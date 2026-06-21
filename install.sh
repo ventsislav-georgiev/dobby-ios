@@ -33,7 +33,7 @@ if [ "$TARGET" = "testflight" ]; then
     -derivedDataPath "$DD/DD" -resolvePackageDependencies
   find "$DD/DD/SourcePackages/checkouts/FFmpegKit" -name Info.plist -path '*.framework/*' | while IFS= read -r p; do
     id="$(plutil -extract CFBundleIdentifier raw "$p" 2>/dev/null)" || continue
-    case "$id" in *_*) plutil -replace CFBundleIdentifier -string "${id//_/-}" "$p" ;; esac
+    case "$id" in *_*) chmod u+w "$(dirname "$p")" "$p"; plutil -replace CFBundleIdentifier -string "${id//_/-}" "$p" ;; esac
   done
 
   xcodebuild archive -project Dobby.xcodeproj -scheme Dobby -configuration Release \
