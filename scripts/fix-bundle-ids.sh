@@ -20,12 +20,20 @@ fix() {
   fi
 }
 
-# Source xcframework slices (ProcessXCFramework stages from here).
-SRC="${BUILD_DIR}/../../SourcePackages/checkouts/FFmpegKit/Sources"
-[ -d "$SRC" ] || SRC="${SRCROOT}/build/SourcePackages/checkouts/FFmpegKit/Sources"
-if [ -d "$SRC" ]; then
+# Source xcframework slices (ProcessXCFramework stages from here). The
+# SourcePackages dir lives at the DerivedData root; its offset from BUILD_DIR
+# differs between normal builds and archives, so walk up until we find it.
+find_src() {
+  local d="$1"
+  while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -d "$d/SourcePackages/checkouts/FFmpegKit/Sources" ] && { echo "$d/SourcePackages/checkouts/FFmpegKit/Sources"; return; }
+    d="$(dirname "$d")"
+  done
+}
+for SRC in "$(find_src "${BUILD_DIR:-}")" "$(find_src "${SRCROOT:-}/build")" "${SRCROOT:-}/build/SourcePackages/checkouts/FFmpegKit/Sources"; do
+  [ -n "$SRC" ] && [ -d "$SRC" ] || continue
   find "$SRC" -name Info.plist -path '*.framework/*' | while IFS= read -r p; do fix "$p"; done
-fi
+done
 
 # Staged copies the Embed Frameworks phase copies from (may be cached-stale).
 for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
