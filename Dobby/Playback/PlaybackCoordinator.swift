@@ -76,6 +76,11 @@ final class PlaybackCoordinator: ObservableObject {
         lastPositionMs = req.startMs ?? 0
         lastDurationMs = 0
         lastReportSec = 0
+        // Clear the reused KSPlayer state so the OSD never shows the PREVIOUS video's
+        // length / resume position before the new stream reports its own.
+        player.timemodel.currentTime = 0
+        player.timemodel.totalTime = 1
+        player.subtitleModel.subtitleDelay = 0
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
         options.userAgent = AppConfig.streamUserAgent
         options.referer = AppConfig.serverURL.absoluteString

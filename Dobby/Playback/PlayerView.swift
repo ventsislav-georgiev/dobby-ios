@@ -42,11 +42,14 @@ struct PlayerView: View {
                 .onStateChanged { _, state in
                     playback.onStateChanged(state)
                     isPlaying = state.isPlaying
+                    controls.syncState(state)
                     if state == .readyToPlay { controls.wake() }
                 }
                 .onPlay { cur, total in playback.onProgress(current: cur, total: total) }
                 .onFinish { _, err in playback.onFinish(error: err) }
+                .scaleEffect(x: controls.zoom * controls.stretch, y: controls.zoom)   // Zoom/Stretch aspect modes
                 .ignoresSafeArea()
+                .clipped()
 
             #if os(iOS)
             tapRegions
@@ -54,8 +57,23 @@ struct PlayerView: View {
 
             subtitleOverlay
 
+            if controls.buffering || !controls.loaded {
+                loadingSpinner.transition(.opacity)
+            }
+
+            if controls.showInfo {
+                infoOverlay.transition(.opacity)
+            }
+
             if controls.visible {
                 osd.transition(.opacity)
+            }
+
+            // Close button as a top-level, topmost layer (not inside `osd`): in iOS
+            // portrait the osd's overlay was below the tap regions in hit-test order, so
+            // the X wasn't tappable. A dedicated top layer always wins the touch.
+            if controls.visible {
+                VStack { HStack { closeButton; Spacer() }; Spacer() }
             }
 
             if let toast = controls.toast {
@@ -114,7 +132,6 @@ struct PlayerView: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .overlay(alignment: .topLeading) { closeButton }
         .animation(.easeInOut(duration: 0.16), value: controls.menu)
     }
 
@@ -152,6 +169,7 @@ struct PlayerView: View {
                 ForEach(PlayerControls.Menu.allCases) { m in
                     iconButton(m.icon, size: 18, active: controls.menu == m) { controls.toggleMenu(m) }
                 }
+                iconButton("info.circle", size: 18, active: controls.showInfo) { controls.toggleInfo() }
                 #if os(macOS)
                 iconButton("arrow.up.left.and.arrow.down.right", size: 18) { controls.toggleFullscreen() }
                 #endif
@@ -243,24 +261,25 @@ struct PlayerView: View {
                 }
             }
         }
-        .padding(.bottom, controls.visible ? 120 : 56)
+        .padding(.bottom, (controls.visible ? 120 : 56) + controls.subtitlePosition)
         .animation(.easeInOut(duration: 0.18), value: controls.visible)
         .allowsHitTesting(false)
     }
 
     @ViewBuilder
     private func styledSubtitle(_ text: AttributedString) -> some View {
+        let size = (controls.subtitleStyle == .large ? 34.0 : 22.0) * controls.subtitleScale
         switch controls.subtitleStyle {
         case .standard:
-            Text(text).font(.title3).foregroundStyle(.white)
+            Text(text).font(.system(size: size)).foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.9), radius: 1, x: 1, y: 1)
                 .multilineTextAlignment(.center)
         case .large:
-            Text(text).font(.system(size: 34, weight: .semibold)).foregroundStyle(.white)
+            Text(text).font(.system(size: size, weight: .semibold)).foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.9), radius: 2, x: 1, y: 1)
                 .multilineTextAlignment(.center)
         case .contrast:
-            Text(text).font(.title3.weight(.semibold)).foregroundStyle(.white)
+            Text(text).font(.system(size: size, weight: .semibold)).foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(.black.opacity(0.7))
@@ -280,6 +299,70 @@ struct PlayerView: View {
             Spacer().frame(height: 140)
         }
         .allowsHitTesting(false)
+    }
+
+    // MARK: Loading spinner (#3 initial load, #5 seek buffering)
+
+    private var loadingSpinner: some View {
+        ProgressView()
+            .progressViewStyle(.circular)
+            .controlSize(.large)
+            .scaleEffect(1.4)
+            .tint(.white)
+            .allowsHitTesting(false)
+    }
+
+    // MARK: Info OSD (stats for nerds) — live, refreshed each second
+
+    private var infoOverlay: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(statLines, id: \.self) { Text($0) }
+            }
+            .font(.system(size: 11, weight: .medium).monospaced())
+            .foregroundStyle(.white)
+            .padding(12)
+            .background(panelBG)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.18), lineWidth: 1))
+            .padding(.top, 56)
+            .padding(.trailing, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var statLines: [String] {
+        guard let p = playback.player.playerLayer?.player else { return ["no stream"] }
+        var out: [String] = []
+        let sz = p.naturalSize
+        if sz.width > 0 { out.append("resolution  \(Int(sz.width))×\(Int(sz.height))") }
+        let vtracks = p.tracks(mediaType: .video)
+        if let v = vtracks.first(where: { $0.isEnabled }) ?? vtracks.first {
+            out.append("video       \(fourCC(v.codecType))  \(v.bitRate / 1000) kbps")
+            if v.nominalFrameRate > 0 { out.append(String(format: "track fps   %.3f", v.nominalFrameRate)) }
+        }
+        let atracks = p.tracks(mediaType: .audio)
+        if let a = atracks.first(where: { $0.isEnabled }) ?? atracks.first {
+            out.append("audio       \(fourCC(a.codecType))  \(a.bitRate / 1000) kbps")
+        }
+        if let d = p.dynamicInfo {
+            out.append(String(format: "display fps %.1f", d.displayFPS))
+            out.append("v-bitrate   \(d.videoBitrate / 1000) kbps")
+            out.append("a-bitrate   \(d.audioBitrate / 1000) kbps")
+            out.append("dropped     \(d.droppedVideoFrameCount) frames")
+            out.append(String(format: "a/v sync    %+.0f ms", d.audioVideoSyncDiff * 1000))
+            out.append(String(format: "read        %.1f MB", Double(d.bytesRead) / 1_048_576))
+        }
+        if p.fileSize > 0 { out.append(String(format: "size        %.1f MB", p.fileSize / 1_048_576)) }
+        return out
+    }
+
+    /// FourCharCode (e.g. 'avc1', 'hvc1', 'mp4a') → trimmed ASCII string.
+    private func fourCC(_ c: UInt32) -> String {
+        let bytes = [UInt8((c >> 24) & 0xff), UInt8((c >> 16) & 0xff), UInt8((c >> 8) & 0xff), UInt8(c & 0xff)]
+        let s = (String(bytes: bytes, encoding: .ascii) ?? "").trimmingCharacters(in: .whitespaces)
+        return s.isEmpty ? "—" : s
     }
 
     private func timeLabel(_ seconds: Double) -> String {
@@ -324,6 +407,7 @@ struct PlayerView: View {
         case 0: controls.toggleMenu(.audio)                                       // a
         case 2: controls.toggleMenu(.speed)                                       // d
         case 13: controls.toggleMenu(.aspect)                                     // w
+        case 34: controls.toggleInfo()                                            // i
         default: return false
         }
         return true
