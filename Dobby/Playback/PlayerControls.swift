@@ -73,9 +73,7 @@ final class PlayerControls: ObservableObject {
 
     #if os(macOS)
     weak var window: NSWindow?
-    private var savedFrame: NSRect?
-    private var savedLevel: NSWindow.Level = .normal
-    var isFullscreen: Bool { savedFrame != nil }
+    var isFullscreen: Bool { window?.styleMask.contains(.fullScreen) ?? false }
     #endif
 
     init() {
@@ -86,8 +84,9 @@ final class PlayerControls: ObservableObject {
     #if os(macOS)
     func attachWindow(_ w: NSWindow) {
         window = w
-        w.isRestorable = false   // don't let macOS restore a (legacy native) fullscreen Space
+        w.isRestorable = false   // don't let macOS restore a fullscreen Space on relaunch
         w.resizeIncrements = NSSize(width: 1, height: 1)   // drop KSPlayer's aspect lock so the window stays freely zoomable
+        w.collectionBehavior.insert(.fullScreenPrimary)    // allow native fullscreen
     }
     #endif
 
@@ -240,46 +239,27 @@ final class PlayerControls: ObservableObject {
 
     // MARK: Fullscreen
 
-    /// Manual frame-to-screen fullscreen — NOT AppKit's native `toggleFullScreen`.
-    /// macOS 26 crashes the SwiftUI window hosting KSPlayer's Metal view + WKWebView
-    /// with an empty-region BRK in `-[NSWindow _adjustNeedsDisplayRegionForNewFrame:]`
-    /// on ANY resize of the *visible* window (native toggleFullScreen, animated
-    /// setFrame, and plain deferred setFrame all crash the same way). AppKit only
-    /// computes that display region for an on-screen window, so we order the window
-    /// OUT, resize it while it has no display region to diff, then order it back IN.
+    /// AppKit native fullscreen (own Space, hidden menu bar / Notification Center).
+    /// The earlier native-fullscreen crash (empty-region BRK in
+    /// `_adjustNeedsDisplayRegionForNewFrame`) was caused by the degenerate
+    /// `aspectRatio = (0,0)` lock we used to "clear" KSPlayer's 16:9 — now cleared
+    /// correctly via `resizeIncrements` at attach, so native is safe again.
     func toggleFullscreen() {
         #if os(macOS)
         let w = window ?? NSApp.keyWindow ?? NSApp.mainWindow
-        guard let w, let screen = w.screen ?? NSScreen.main else { return }
-        let entering = savedFrame == nil
-        let target: NSRect
-        if let frame = savedFrame {                       // exit
-            w.level = savedLevel
-            savedFrame = nil
-            target = frame
-        } else {                                          // enter
-            savedFrame = w.frame
-            savedLevel = w.level
-            // Clear KSPlayer's 16:9 lock so the window can fill a non-16:9 screen.
-            // Setting aspectRatio = (0,0) is degenerate (feeds an empty region into
-            // `_adjustNeedsDisplayRegionForNewFrame` → BRK); resizeIncrements clears
-            // the aspect constraint instead (the two are mutually exclusive).
-            w.resizeIncrements = NSSize(width: 1, height: 1)
-            w.level = .mainMenu + 1                        // cover menu bar by level, not presentationOptions
-            target = screen.frame
-        }
-        // Defer the resize past the current event so it doesn't run reentrantly while
-        // AppKit is still processing the click that triggered it.
-        DispatchQueue.main.async { w.setFrame(target, display: false) }
+        guard let w else { return }
+        w.resizeIncrements = NSSize(width: 1, height: 1)   // belt: never enter the transition with an aspect lock
+        let entering = !w.styleMask.contains(.fullScreen)
+        w.toggleFullScreen(nil)
         playback?.markSelftest("fullscreen now=\(entering)")
         #endif
     }
 
-    /// Restore the window when the overlay tears down while fullscreen (close button,
-    /// playback end, app quit) — else the web view is left screen-sized and elevated.
+    /// Leave fullscreen when the overlay tears down while still in it (close button,
+    /// playback end, app quit) — else the web window is left in its own FS Space.
     func exitFullscreenIfNeeded() {
         #if os(macOS)
-        if isFullscreen { toggleFullscreen() }
+        if isFullscreen { window?.toggleFullScreen(nil) }
         #endif
     }
 }
