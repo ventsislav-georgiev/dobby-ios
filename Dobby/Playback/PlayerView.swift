@@ -47,7 +47,7 @@ struct PlayerView: View {
                 }
                 .onPlay { cur, total in playback.onProgress(current: cur, total: total) }
                 .onFinish { _, err in playback.onFinish(error: err) }
-                .scaleEffect(x: controls.zoom * controls.stretch, y: controls.zoom)   // Zoom/Stretch aspect modes
+                .scaleEffect(x: controls.zoom, y: controls.zoom * controls.stretch)   // Zoom (uniform) + Stretch (vertical only)
                 .ignoresSafeArea()
                 .clipped()
 
