@@ -26,8 +26,18 @@ if [ "$TARGET" = "testflight" ]; then
   EXPORT="$DD/export"
   BUILD=$(date +%Y%m%d%H%M)   # monotonic, unique per upload
 
+  # Resolve packages, then strip the illegal underscore from FFmpegKit's
+  # libshaderc_combined CFBundleIdentifier — before archive, or ProcessXCFramework
+  # extracts the unfixed slice and embed copies it (Xcode 26 rejects underscores).
+  xcodebuild -project Dobby.xcodeproj -scheme Dobby \
+    -derivedDataPath "$DD/DD" -resolvePackageDependencies
+  find "$DD/DD/SourcePackages/checkouts/FFmpegKit" -name Info.plist -path '*.framework/*' | while IFS= read -r p; do
+    id="$(plutil -extract CFBundleIdentifier raw "$p" 2>/dev/null)" || continue
+    case "$id" in *_*) plutil -replace CFBundleIdentifier -string "${id//_/-}" "$p" ;; esac
+  done
+
   xcodebuild archive -project Dobby.xcodeproj -scheme Dobby -configuration Release \
-    -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
+    -destination 'generic/platform=iOS' -derivedDataPath "$DD/DD" -archivePath "$ARCHIVE" \
     DEVELOPMENT_TEAM="$TEAM" CURRENT_PROJECT_VERSION="$BUILD" -allowProvisioningUpdates
 
   OPTS="${TMPDIR:-/tmp}/dobby-export.plist"
