@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Build + install Dobby (Release).
-#   ./install.sh           build mac app, install to /Applications
-#   ./install.sh device    build iOS app, install to the connected iPhone
+#   ./install.sh             build mac app, install to /Applications
+#   ./install.sh device      build iOS app, install to the connected iPhone
+#   ./install.sh testflight  archive iOS app, upload to App Store Connect (TestFlight)
+#
+# TestFlight prereqs (one-time):
+#   1. App record for com.solarflare.dobby exists in App Store Connect.
+#   2. App Store Connect API key created (Users and Access → Integrations → Keys).
+#      Put the AuthKey_<KEYID>.p8 in ~/.appstoreconnect/private_keys/ and export:
+#        export ASC_KEY_ID=<KEYID>
+#        export ASC_ISSUER_ID=<ISSUER-UUID>
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,7 +18,41 @@ TARGET="${1:-mac}"
 
 xcodegen generate
 
-if [ "$TARGET" = "device" ]; then
+if [ "$TARGET" = "testflight" ]; then
+  : "${ASC_KEY_ID:?set ASC_KEY_ID (App Store Connect API key id)}"
+  : "${ASC_ISSUER_ID:?set ASC_ISSUER_ID (App Store Connect issuer uuid)}"
+  DD=build-ios
+  ARCHIVE="$DD/Dobby.xcarchive"
+  EXPORT="$DD/export"
+  BUILD=$(date +%Y%m%d%H%M)   # monotonic, unique per upload
+
+  xcodebuild archive -project Dobby.xcodeproj -scheme Dobby -configuration Release \
+    -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
+    DEVELOPMENT_TEAM="$TEAM" CURRENT_PROJECT_VERSION="$BUILD" -allowProvisioningUpdates
+
+  OPTS="${TMPDIR:-/tmp}/dobby-export.plist"
+  cat > "$OPTS" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>method</key><string>app-store-connect</string>
+  <key>teamID</key><string>$TEAM</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>destination</key><string>export</string>
+</dict></plist>
+PLIST
+
+  rm -rf "$EXPORT"
+  xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportPath "$EXPORT" \
+    -exportOptionsPlist "$OPTS" -allowProvisioningUpdates
+
+  IPA=$(ls "$EXPORT"/*.ipa | head -1)
+  echo "Uploading $IPA (build $BUILD) to TestFlight …"
+  xcrun altool --upload-app --type ios --file "$IPA" \
+    --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+  echo "Uploaded. Processing on App Store Connect takes a few minutes before it appears in TestFlight."
+
+elif [ "$TARGET" = "device" ]; then
   DD=build-ios
   APP="$DD/Build/Products/Release-iphoneos/Dobby.app"
   xcodebuild -project Dobby.xcodeproj -scheme Dobby -configuration Release \
