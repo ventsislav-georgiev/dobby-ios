@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Keys Xcode's INFOPLIST_KEY_ synthesis silently drops. Synthesized keys
+	     (display name, scene manifest, etc.) merge on top of this base. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!-- App-Bound Domains: opting in turns on Service Workers (and other
+	     privileged web APIs) inside WKWebView. Covers the host + subdomains. -->
+	<key>WKAppBoundDomains</key>
+	<array>
+		<string>solarflare-tarpon.ts.net</string>
+	</array>
+</dict>
+</plist>
