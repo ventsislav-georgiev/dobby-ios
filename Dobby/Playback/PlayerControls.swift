@@ -66,6 +66,26 @@ final class PlayerControls: ObservableObject {
         didSet { UserDefaults.standard.set(subtitleStyle.rawValue, forKey: Self.styleKey) }
     }
 
+    // Loading / playback state surfaced for the spinner + auto-hide.
+    @Published var buffering = false
+    @Published var loaded = false
+    @Published var showInfo = false
+
+    // Aspect: Fit/Fill via KSPlayer gravity; Zoom/Stretch via a SwiftUI scaleEffect.
+    @Published var isFill = false
+    @Published var zoom: Double = 1.0
+    @Published var stretch: Double = 1.0
+
+    @Published var subtitleScale: Double = UserDefaults.standard.object(forKey: "dobby.subScale") as? Double ?? 1.0 {
+        didSet { UserDefaults.standard.set(subtitleScale, forKey: "dobby.subScale") }
+    }
+    @Published var subtitlePosition: Double = UserDefaults.standard.object(forKey: "dobby.subPos") as? Double ?? 40 {
+        didSet { UserDefaults.standard.set(subtitlePosition, forKey: "dobby.subPos") }
+    }
+    @Published var subtitleDelay: Double = 0 {
+        didSet { playback?.player.subtitleModel.subtitleDelay = subtitleDelay }
+    }
+
     private static let styleKey = "dobby.subtitleStyle"
     private var hideTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
@@ -90,7 +110,19 @@ final class PlayerControls: ObservableObject {
     }
     #endif
 
-    var isPlaying: Bool { playback?.player.playerLayer?.state.isPlaying ?? true }
+    var isPlaying: Bool { playback?.player.playerLayer?.state.isPlaying ?? false }
+
+    // MARK: Player state → spinner + auto-hide
+
+    /// Driven from KSPlayer's onStateChanged. `.buffering`/`.preparing` mean loading
+    /// (spinner); first `.readyToPlay`/`.bufferFinished` marks the new video loaded and
+    /// applies the chosen aspect; any playing state (re)arms the idle auto-hide — the
+    /// readyToPlay→bufferFinished gap is why the OSD used to get stuck visible.
+    func syncState(_ s: KSPlayerState) {
+        buffering = (s == .buffering || s == .preparing || s == .initialized)
+        if s == .readyToPlay || s == .bufferFinished, !loaded { loaded = true; applyAspect() }
+        if s.isPlaying { scheduleHide() }
+    }
 
     // MARK: Visibility
 
@@ -102,7 +134,7 @@ final class PlayerControls: ObservableObject {
 
     func scheduleHide() {
         hideTask?.cancel()
-        guard menu == nil, isPlaying else { return }   // keep visible if a menu is open or paused
+        guard menu == nil, !showInfo, isPlaying else { return }   // keep visible if a menu/info is open or paused
         hideTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled else { return }
@@ -152,6 +184,21 @@ final class PlayerControls: ObservableObject {
         seekBy(total * fraction)
     }
 
+    // MARK: Aspect / Info
+
+    func applyAspect() { playback?.player.isScaleAspectFill = isFill }
+
+    func setAspect(fill: Bool, zoom z: Double, stretch s: Double) {
+        isFill = fill; zoom = z; stretch = s
+        applyAspect()
+        forceShow()
+    }
+
+    func toggleInfo() {
+        showInfo.toggle()
+        if showInfo { forceShow() } else { scheduleHide() }
+    }
+
     // MARK: Menus
 
     func toggleMenu(_ m: Menu) {
@@ -189,6 +236,25 @@ final class PlayerControls: ObservableObject {
                     self?.flash("Subtitle style: \(style.label)")
                 }))
             }
+            // Size.
+            for (label, scale) in [("Small", 0.75), ("Normal", 1.0), ("Large", 1.4), ("Huge", 1.8)] {
+                rows.append(OSDItem(id: "size-\(scale)", label: "Size: \(label)",
+                                    selected: abs(subtitleScale - scale) < 0.01, action: { [weak self] in
+                    self?.subtitleScale = scale; self?.flash("Subtitle size: \(label)") }))
+            }
+            // Vertical position (extra points above the bottom).
+            for (label, off) in [("Lower", 0.0), ("Default", 40.0), ("Higher", 120.0), ("Top", 280.0)] {
+                rows.append(OSDItem(id: "pos-\(off)", label: "Position: \(label)",
+                                    selected: abs(subtitlePosition - off) < 0.5, action: { [weak self] in
+                    self?.subtitlePosition = off; self?.flash("Subtitle position: \(label)") }))
+            }
+            // Delay alignment.
+            for d in [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
+                let lbl = d == 0 ? "Delay: 0s" : String(format: "Delay: %+.1fs", d)
+                rows.append(OSDItem(id: "delay-\(d)", label: lbl,
+                                    selected: abs(subtitleDelay - d) < 0.01, action: { [weak self] in
+                    self?.subtitleDelay = d; self?.flash(lbl) }))
+            }
             return rows
         case .audio:
             let tracks = p.player.playerLayer?.player.tracks(mediaType: .audio) ?? []
@@ -208,12 +274,26 @@ final class PlayerControls: ObservableObject {
                 })
             }
         case .aspect:
-            return [
-                OSDItem(id: "fit", label: "Fit", selected: !p.player.isScaleAspectFill, action: { [weak self] in
-                    p.player.isScaleAspectFill = false; self?.flash("Aspect: Fit") }),
-                OSDItem(id: "fill", label: "Fill", selected: p.player.isScaleAspectFill, action: { [weak self] in
-                    p.player.isScaleAspectFill = true; self?.flash("Aspect: Fill") }),
+            let plain = !isFill && zoom == 1 && stretch == 1
+            var rows: [OSDItem] = [
+                OSDItem(id: "fit", label: "Fit", selected: plain, action: { [weak self] in
+                    self?.setAspect(fill: false, zoom: 1, stretch: 1); self?.flash("Aspect: Fit") }),
+                OSDItem(id: "fill", label: "Fill (crop)", selected: isFill, action: { [weak self] in
+                    self?.setAspect(fill: true, zoom: 1, stretch: 1); self?.flash("Aspect: Fill") }),
             ]
+            for pct in [5, 10, 15, 20] {
+                let z = 1 + Double(pct) / 100
+                rows.append(OSDItem(id: "zoom\(pct)", label: "Zoom +\(pct)%",
+                                    selected: !isFill && abs(zoom - z) < 0.001 && stretch == 1, action: { [weak self] in
+                    self?.setAspect(fill: false, zoom: z, stretch: 1); self?.flash("Zoom +\(pct)%") }))
+            }
+            for pct in [5, 10, 15, 20] {
+                let s = 1 + Double(pct) / 100
+                rows.append(OSDItem(id: "stretch\(pct)", label: "Stretch +\(pct)%",
+                                    selected: !isFill && abs(stretch - s) < 0.001 && zoom == 1, action: { [weak self] in
+                    self?.setAspect(fill: false, zoom: 1, stretch: s); self?.flash("Stretch +\(pct)%") }))
+            }
+            return rows
         }
     }
 
