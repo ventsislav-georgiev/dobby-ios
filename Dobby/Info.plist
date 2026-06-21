@@ -4,6 +4,9 @@
 <dict>
 	<!-- Keys Xcode's INFOPLIST_KEY_ synthesis silently drops. Synthesized keys
 	     (display name, scene manifest, etc.) merge on top of this base. -->
+	<!-- No custom/proprietary crypto → skip TestFlight's per-build export-compliance prompt. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
