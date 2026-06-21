@@ -1,6 +1,6 @@
 name: Dobby
 options:
-  bundleIdPrefix: com.solarflare
+  bundleIdPrefix: eu.illegible
   createIntermediateGroups: true
   deploymentTarget:
     macOS: "14.0"
@@ -26,7 +26,7 @@ targets:
         product: KSPlayer
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.solarflare.dobby
+        PRODUCT_BUNDLE_IDENTIFIER: eu.illegible.dobbyios
         PRODUCT_NAME: Dobby
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES

@@ -5,7 +5,7 @@
 #   ./install.sh testflight  archive iOS app, upload to App Store Connect (TestFlight)
 #
 # TestFlight prereqs (one-time):
-#   1. App record for com.solarflare.dobby exists in App Store Connect.
+#   1. App record for eu.illegible.dobbyios exists in App Store Connect.
 #   2. App Store Connect API key created (Users and Access → Integrations → Keys).
 #      Put the AuthKey_<KEYID>.p8 in ~/.appstoreconnect/private_keys/ and export:
 #        export ASC_KEY_ID=<KEYID>
