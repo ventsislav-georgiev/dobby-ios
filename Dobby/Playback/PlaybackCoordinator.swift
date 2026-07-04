@@ -23,6 +23,10 @@ final class PlaybackCoordinator: ObservableObject {
     let options: KSOptions = {
         let o = KSOptions()
         o.automaticWindowResize = false
+        // Render as soon as 2 frames are decoded instead of gating readyToPlay
+        // on preferredForwardBufferDuration (3s) of buffered video. The buffer
+        // still fills in the background; this only unblocks the first frame.
+        o.isSecondOpen = true
         return o
     }()
 
@@ -107,6 +111,11 @@ final class PlaybackCoordinator: ObservableObject {
         // Resume: native demuxer seek for the FFmpeg/ME path (MKV etc). AVPlayer (HLS/
         // MP4) ignores this, so onStateChanged also seeks manually at readyToPlay.
         options.startPlayTime = req.startSeconds
+        // KSPlayerLayer instantiates KSOptions.firstPlayerType and only falls
+        // back to the second on failure. The synthesized MPD is FFmpeg-only,
+        // so the default (KSAVPlayer) burns an async AVFoundation failure on
+        // every open — including each quality switch. Route per lane instead.
+        KSOptions.firstPlayerType = req.isAdaptivePair ? KSMEPlayer.self : KSAVPlayer.self
         activeRef = req.ref
         request = req
         mark("play ref=\(req.ref) start=\(req.startSeconds)s url=\(req.url ?? req.videoUrl ?? "-")")
@@ -206,7 +215,11 @@ final class PlaybackCoordinator: ObservableObject {
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
             let start = resumeSeconds ?? request?.startSeconds ?? 0
-            if start > 1 { player.seek(time: start) }
+            // The adaptive pair plays on MEPlayer, which already seeked to
+            // options.startPlayTime at open (avformat_seek_file in readThread);
+            // seeking again here flushes and re-buffers. Manual seek is only
+            // for the AVPlayer lane, which ignores startPlayTime.
+            if start > 1, !(request?.isAdaptivePair ?? false) { player.seek(time: start) }
             // Only on first open — a quality switch keeps the subtitleModel
             // (it lives on the coordinator), re-adding would duplicate tracks.
             if resumeSeconds == nil { applyInitialSubtitles() }
