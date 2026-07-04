@@ -23,6 +23,17 @@ struct PlayNativePayload: Decodable {
     let audioUrl: String?
     let videoMimeType: String?
     let audioMimeType: String?
+    let durationMs: Int?            // ytdlpAdaptive: for the synthesized MPD
+    let qualityOptions: [QualityOption]?   // ytdlpAdaptive: per-height video alternates
+
+    /// One selectable quality: a video-only URL sharing the payload's audio stream.
+    struct QualityOption: Decodable {
+        let label: String?
+        let height: Int?
+        let videoUrl: String?
+        let videoMimeType: String?
+        let isDefault: Bool?
+    }
 
     var startSeconds: Double { Double(startMs ?? 0) / 1000.0 }
 

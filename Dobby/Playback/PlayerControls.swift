@@ -36,12 +36,13 @@ struct OSDItem: Identifiable {
 @MainActor
 final class PlayerControls: ObservableObject {
     enum Menu: String, Identifiable, CaseIterable {
-        case subtitles, audio, speed, aspect
+        case subtitles, audio, quality, speed, aspect
         var id: String { rawValue }
         var title: String {
             switch self {
             case .subtitles: return "Subtitles"
             case .audio: return "Audio"
+            case .quality: return "Quality"
             case .speed: return "Speed"
             case .aspect: return "Aspect"
             }
@@ -50,6 +51,7 @@ final class PlayerControls: ObservableObject {
             switch self {
             case .subtitles: return "captions.bubble"
             case .audio: return "waveform"
+            case .quality: return "slider.horizontal.3"
             case .speed: return "speedometer"
             case .aspect: return "aspectratio"
             }
@@ -264,6 +266,23 @@ final class PlayerControls: ObservableObject {
                     p.player.playerLayer?.player.select(track: t)
                     self?.flash("Audio: \(t.name)")
                 })
+            }
+        case .quality:
+            let options = p.qualityOptions
+            guard !options.isEmpty else {
+                // HLS lane: AVPlayer's ABR picks renditions itself.
+                return [OSDItem(id: "auto", label: "Auto (adaptive)", selected: true, enabled: false, action: {})]
+            }
+            return options.enumerated().map { idx, opt in
+                let label = opt.label ?? opt.height.map { "\($0)p" } ?? "Option \(idx + 1)"
+                return OSDItem(
+                    id: "q\(idx)",
+                    label: label,
+                    selected: opt.videoUrl != nil && opt.videoUrl == p.currentVideoUrl,
+                    action: { [weak self] in
+                        p.selectQuality(opt)
+                        self?.flash("Quality: \(label)")
+                    })
             }
         case .speed:
             return speeds.map { s in

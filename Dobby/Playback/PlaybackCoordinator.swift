@@ -45,9 +45,23 @@ final class PlaybackCoordinator: ObservableObject {
         else { try? data.write(to: URL(fileURLWithPath: path)) }
     }
 
-    /// Resolved playable URL for the current request (single-stream only here;
-    /// ytdlpAdaptive video+audio merge is Phase 4).
+    /// Local synthesized MPD for the ytdlpAdaptive pair (nil for single-stream).
+    /// Published: a quality switch writes a new MPD here and the player view
+    /// reopens on the URL change.
+    @Published private(set) var adaptiveManifestURL: URL?
+
+    /// Video URL of the currently playing adaptive representation (for the
+    /// quality menu's checkmark).
+    private(set) var currentVideoUrl: String?
+
+    /// Position to restore after a quality switch reopens the stream.
+    private var resumeSeconds: Double?
+
+    var qualityOptions: [PlayNativePayload.QualityOption] { request?.qualityOptions ?? [] }
+
+    /// Resolved playable URL for the current request.
     var playURL: URL? {
+        if let adaptiveManifestURL { return adaptiveManifestURL }
         guard let req = request else { return nil }
         return (req.url ?? req.videoUrl).flatMap { URL(string: $0) }
     }
@@ -57,16 +71,20 @@ final class PlaybackCoordinator: ObservableObject {
     func play(_ req: PlayNativePayload) {
         // ytdlpAdaptive = separate video-only + audio-only googlevideo streams. Android
         // muxes them via MergingMediaSource; KSPlayer has no remote-stream muxing, so
-        // report a clean fallback instead of playing video without audio.
-        // ponytail: upgrade path = synthesize a local DASH MPD referencing both streams,
-        // or add an external-audio input to MEPlayer.
+        // wrap both in a synthesized static MPD — FFmpeg's dash demuxer fetches and
+        // muxes the two single-file representations itself.
+        adaptiveManifestURL = nil
         if req.isAdaptivePair {
-            NSLog("%@", "Dobby: ytdlpAdaptive unsupported (no remote mux); reporting fallback ref=\(req.ref)")
-            activeRef = req.ref
-            lastPositionMs = req.startMs ?? 0
-            emit("bookPlayNativePlaybackEnded", completed: false)
-            activeRef = nil
-            return
+            guard let mpd = Self.writeAdaptivePairMPD(req) else {
+                NSLog("%@", "Dobby: ytdlpAdaptive MPD synth failed (missing duration?); reporting fallback ref=\(req.ref)")
+                activeRef = req.ref
+                lastPositionMs = req.startMs ?? 0
+                emit("bookPlayNativePlaybackEnded", completed: false)
+                activeRef = nil
+                return
+            }
+            adaptiveManifestURL = mpd
+            mark("adaptive-pair via synthesized MPD \(mpd.lastPathComponent)")
         }
         guard (req.url ?? req.videoUrl) != nil else {
             NSLog("%@", "Dobby: play missing url ref=\(req.ref)")
@@ -76,6 +94,8 @@ final class PlaybackCoordinator: ObservableObject {
         lastPositionMs = req.startMs ?? 0
         lastDurationMs = 0
         lastReportSec = 0
+        currentVideoUrl = req.videoUrl
+        resumeSeconds = nil
         // Clear the reused KSPlayer state so the OSD never shows the PREVIOUS video's
         // length / resume position before the new stream reports its own.
         player.timemodel.currentTime = 0
@@ -158,15 +178,39 @@ final class PlaybackCoordinator: ObservableObject {
         player.seek(time: seconds)
     }
 
+    /// Swap the adaptive pair's video representation (audio stream unchanged):
+    /// write a new MPD and let the published URL change reopen the player at
+    /// the current position. ytdlpAdaptive-only — HLS quality is AVPlayer ABR.
+    func selectQuality(_ option: PlayNativePayload.QualityOption) {
+        guard let req = request, req.isAdaptivePair,
+              let videoUrl = option.videoUrl, videoUrl != currentVideoUrl,
+              let mpd = Self.writeAdaptivePairMPD(
+                  req,
+                  videoUrl: videoUrl,
+                  videoMimeType: option.videoMimeType,
+                  fileSuffix: "-h\(option.height ?? 0)"
+              ) else { return }
+        let position = Double(player.timemodel.currentTime)
+        currentVideoUrl = videoUrl
+        resumeSeconds = position
+        didSeekToStart = false
+        options.startPlayTime = position
+        adaptiveManifestURL = mpd
+        mark("quality switch \(option.label ?? "?") pos=\(Int(position))s")
+    }
+
     // MARK: KSPlayer callbacks (wired from PlayerView)
 
     func onStateChanged(_ state: KSPlayerState) {
         mark("state=\(state)")
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
-            let start = request?.startSeconds ?? 0
+            let start = resumeSeconds ?? request?.startSeconds ?? 0
             if start > 1 { player.seek(time: start) }
-            applyInitialSubtitles()
+            // Only on first open — a quality switch keeps the subtitleModel
+            // (it lives on the coordinator), re-adding would duplicate tracks.
+            if resumeSeconds == nil { applyInitialSubtitles() }
+            resumeSeconds = nil
         }
     }
 
@@ -197,6 +241,76 @@ final class PlaybackCoordinator: ObservableObject {
         request = nil
         activeRef = nil
         lastReportSec = 0
+        adaptiveManifestURL = nil
+        currentVideoUrl = nil
+        resumeSeconds = nil
+    }
+
+    /// Static single-Period MPD wrapping the ytdlpAdaptive video+audio URLs.
+    /// Each Representation is one whole-file BaseURL (no SegmentBase) — FFmpeg's
+    /// dash demuxer probes and streams such representations progressively.
+    private static func writeAdaptivePairMPD(
+        _ req: PlayNativePayload,
+        videoUrl videoOverride: String? = nil,
+        videoMimeType videoMimeOverride: String? = nil,
+        fileSuffix: String = ""
+    ) -> URL? {
+        guard let videoUrl = videoOverride ?? req.videoUrl, let audioUrl = req.audioUrl,
+              let durationMs = req.durationMs, durationMs > 0 else { return nil }
+        let videoMime = videoMimeOverride ?? req.videoMimeType
+
+        func xmlEscape(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;")
+                .replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+                .replacingOccurrences(of: "\"", with: "&quot;")
+        }
+        // "video/mp4; codecs=\"avc1.64002a\"" → ("video/mp4", "avc1.64002a")
+        func splitMime(_ raw: String?, fallback: String) -> (mime: String, codecs: String?) {
+            guard let raw, !raw.isEmpty else { return (fallback, nil) }
+            let parts = raw.split(separator: ";", maxSplits: 1)
+            let mime = parts.first.map { $0.trimmingCharacters(in: .whitespaces) } ?? fallback
+            var codecs: String?
+            if parts.count > 1, let range = parts[1].range(of: "codecs=") {
+                codecs = parts[1][range.upperBound...]
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\" "))
+            }
+            return (mime, codecs)
+        }
+        func adaptationSet(_ raw: String?, fallback: String, id: String, bandwidth: Int, url: String) -> String {
+            let (mime, codecs) = splitMime(raw, fallback: fallback)
+            let codecAttr = codecs.map { " codecs=\"\($0)\"" } ?? ""
+            return """
+                <AdaptationSet mimeType="\(mime)"\(codecAttr)>
+                  <Representation id="\(id)" bandwidth="\(bandwidth)">
+                    <BaseURL>\(xmlEscape(url))</BaseURL>
+                  </Representation>
+                </AdaptationSet>
+            """
+        }
+
+        let duration = String(format: "PT%.3fS", Double(durationMs) / 1000.0)
+        let mpd = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" \
+        mediaPresentationDuration="\(duration)" minBufferTime="PT2S" \
+        profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+          <Period duration="\(duration)">
+        \(adaptationSet(videoMime, fallback: "video/mp4", id: "video", bandwidth: 4_000_000, url: videoUrl))
+        \(adaptationSet(req.audioMimeType, fallback: "audio/mp4", id: "audio", bandwidth: 128_000, url: audioUrl))
+          </Period>
+        </MPD>
+        """
+        // Suffix keeps quality-switch MPDs at distinct paths — KSVideoPlayer only
+        // reopens when the URL actually changes.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dobby-adaptive-\(abs(req.ref.hashValue))\(fileSuffix).mpd")
+        guard let data = mpd.data(using: .utf8) else { return nil }
+        do { try data.write(to: file) } catch {
+            NSLog("Dobby: MPD write failed: \(error.localizedDescription)")
+            return nil
+        }
+        return file
     }
 
     private func emit(_ fn: String, completed: Bool) {

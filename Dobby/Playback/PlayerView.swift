@@ -161,24 +161,42 @@ struct PlayerView: View {
                 Text(timeLabel(total)).font(.caption.monospacedDigit())
             }
 
-            HStack(spacing: 18) {
-                iconButton(isPlaying ? "pause.fill" : "play.fill", size: 22) { controls.togglePlay(); isPlaying = controls.isPlaying }
-                iconButton("gobackward.10", size: 19) { controls.seekBy(-10) }
-                iconButton("goforward.10", size: 19) { controls.seekBy(10) }
-                Spacer()
-                ForEach(PlayerControls.Menu.allCases) { m in
-                    iconButton(m.icon, size: 18, active: controls.menu == m) { controls.toggleMenu(m) }
-                }
-                iconButton("info.circle", size: 18, active: controls.showInfo) { controls.toggleInfo() }
-                #if os(macOS)
-                iconButton("arrow.up.left.and.arrow.down.right", size: 18) { controls.toggleFullscreen() }
-                #endif
+            // Portrait iPhone can't fit every button: fall back to a tighter row
+            // without the ±10s buttons (the tap zones already cover seeking).
+            ViewThatFits(in: .horizontal) {
+                buttonRow(spacing: 18, compact: false)
+                buttonRow(spacing: 12, compact: true)
+                buttonRow(spacing: 6, compact: true)
             }
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
         .background(LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom))
+    }
+
+    /// Menus that make sense for the current stream: quality is only offered
+    /// when the payload carried per-height alternates (ytdlpAdaptive lane).
+    private var menuButtons: [PlayerControls.Menu] {
+        PlayerControls.Menu.allCases.filter { $0 != .quality || !playback.qualityOptions.isEmpty }
+    }
+
+    private func buttonRow(spacing: CGFloat, compact: Bool) -> some View {
+        HStack(spacing: spacing) {
+            iconButton(isPlaying ? "pause.fill" : "play.fill", size: 22) { controls.togglePlay(); isPlaying = controls.isPlaying }
+            if !compact {
+                iconButton("gobackward.10", size: 19) { controls.seekBy(-10) }
+                iconButton("goforward.10", size: 19) { controls.seekBy(10) }
+            }
+            Spacer()
+            ForEach(menuButtons) { m in
+                iconButton(m.icon, size: 18, active: controls.menu == m) { controls.toggleMenu(m) }
+            }
+            iconButton("info.circle", size: 18, active: controls.showInfo) { controls.toggleInfo() }
+            #if os(macOS)
+            iconButton("arrow.up.left.and.arrow.down.right", size: 18) { controls.toggleFullscreen() }
+            #endif
+        }
     }
 
     private func iconButton(_ name: String, size: CGFloat, active: Bool = false, _ action: @escaping () -> Void) -> some View {
@@ -406,6 +424,7 @@ struct PlayerView: View {
         case 1: controls.toggleMenu(.subtitles)                                   // s
         case 0: controls.toggleMenu(.audio)                                       // a
         case 2: controls.toggleMenu(.speed)                                       // d
+        case 12: if !playback.qualityOptions.isEmpty { controls.toggleMenu(.quality) } // q
         case 13: controls.toggleMenu(.aspect)                                     // w
         case 34: controls.toggleInfo()                                            // i
         default: return false
