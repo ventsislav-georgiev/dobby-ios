@@ -16,7 +16,8 @@ struct DobbyApp: App {
                 .ignoresSafeArea()
         }
         #if os(macOS)
-        .windowStyle(.hiddenTitleBar)
+        // Standard title bar: hiddenTitleBar left no draggable region (the web view
+        // fills the window and eats mouse events), so the window couldn't be moved.
         .defaultSize(width: 1280, height: 800)
         #endif
     }

@@ -225,9 +225,13 @@ final class PlayerControls: ObservableObject {
                 })]
             for info in p.player.subtitleModel.subtitleInfos {
                 let sel = p.player.subtitleModel.selectedSubtitleInfo?.subtitleID == info.subtitleID
-                rows.append(OSDItem(id: info.subtitleID, label: info.name, selected: sel, action: { [weak self] in
+                // Sideloaded subs (URLSubtitleInfo) carry a source-prefixed label from
+                // the web layer (Stremio -, Addic7ed -); mark in-container tracks so
+                // the two are distinguishable in the list.
+                let name = info is URLSubtitleInfo ? info.name : "Embedded - \(info.name)"
+                rows.append(OSDItem(id: info.subtitleID, label: name, selected: sel, action: { [weak self] in
                     p.player.subtitleModel.selectedSubtitleInfo = info
-                    self?.flash("Subtitles: \(info.name)")
+                    self?.flash("Subtitles: \(name)")
                 }))
             }
             // Style sub-section appended as toggle rows.
