@@ -23,6 +23,7 @@ enum BridgeInjection {
             canPlayNative: \(canPlayNative ? "true" : "false"),
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
+            setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },
             setSubtitleOffsetMs: function (ref, ms) { post('setSubtitleOffsetMs', { ref: ref, ms: ms }); },
             stop: function (ref) { post('stop', { ref: ref }); },
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.

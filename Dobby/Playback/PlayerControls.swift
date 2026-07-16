@@ -234,6 +234,16 @@ final class PlayerControls: ObservableObject {
                     self?.flash("Subtitles: \(name)")
                 }))
             }
+            // Online catalog (web-pushed a4k/Stremio/etc. results): pick-to-download.
+            // Already-attached ids are hidden — they show as regular rows above.
+            for entry in p.subtitleCatalog where !p.attachedCatalogIds.contains(entry.id) {
+                let name = entry.displayName
+                rows.append(OSDItem(id: "cat-\(entry.id)", label: "⬇ \(name)", detail: entry.lang,
+                                    selected: false, action: { [weak self] in
+                    p.requestCatalogSubtitle(id: entry.id)
+                    self?.flash("Loading: \(name)")
+                }))
+            }
             // Style sub-section appended as toggle rows.
             for style in SubtitleStyle.allCases {
                 rows.append(OSDItem(id: "style-\(style.rawValue)", label: "Style: \(style.label)",

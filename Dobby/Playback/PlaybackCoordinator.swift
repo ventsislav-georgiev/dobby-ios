@@ -131,6 +131,30 @@ final class PlaybackCoordinator: ObservableObject {
         let info = URLSubtitleInfo(subtitleID: url.absoluteString, name: name, url: url)
         player.subtitleModel.addSubtitle(info: info)
         player.subtitleModel.selectedSubtitleInfo = info
+        if let cid = p.catalogId { attachedCatalogIds.insert(cid) }
+    }
+
+    /// Online-subtitle catalog pushed by the web (same contract as the Android
+    /// wrapper's setSubtitleCatalog). Entries render as pick-to-download rows in
+    /// the native subtitles menu.
+    @Published private(set) var subtitleCatalog: [SubtitleCatalogEntry] = []
+    /// Catalog ids already fetched+attached — hidden from the catalog rows.
+    @Published private(set) var attachedCatalogIds: Set<String> = []
+
+    func setSubtitleCatalog(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let items = try? JSONDecoder().decode([SubtitleCatalogEntry].self, from: data) else {
+            NSLog("Dobby setSubtitleCatalog bad payload")
+            return
+        }
+        subtitleCatalog = items
+    }
+
+    /// Ask the web layer to download a catalog subtitle; it responds with attachSubtitle.
+    func requestCatalogSubtitle(id: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["catalogId": id]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        bridge?.callJS("window.bookPlayNativeRequestSubtitle && window.bookPlayNativeRequestSubtitle(\(json));")
     }
 
     func setSubtitleOffset(ref: String, ms: Int) {
@@ -257,6 +281,8 @@ final class PlaybackCoordinator: ObservableObject {
         adaptiveManifestURL = nil
         currentVideoUrl = nil
         resumeSeconds = nil
+        subtitleCatalog = []
+        attachedCatalogIds = []
     }
 
     /// Static single-Period MPD wrapping the ytdlpAdaptive video+audio URLs.
