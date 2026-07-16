@@ -57,11 +57,25 @@ struct AttachSubtitlePayload: Decodable {
     let mimeType: String?
     let lang: String?
     let label: String?
+    let catalogId: String?
 
     static func decode(_ json: String) -> AttachSubtitlePayload? {
         guard let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(AttachSubtitlePayload.self, from: data)
     }
+}
+
+/// One entry of the web's online-subtitle catalog (`setSubtitleCatalog`) — results the
+/// user hasn't downloaded yet. Selecting one asks the web (via
+/// `bookPlayNativeRequestSubtitle`) to fetch it and call `attachSubtitle` back.
+struct SubtitleCatalogEntry: Decodable, Identifiable {
+    let id: String
+    let lang: String?
+    let label: String?
+    let fileName: String?
+    let kind: String?
+
+    var displayName: String { label ?? fileName ?? lang ?? id }
 }
 
 struct SubtitleTrack: Decodable {

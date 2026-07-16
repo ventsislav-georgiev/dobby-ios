@@ -81,6 +81,8 @@ extension WebBridge: WKScriptMessageHandler {
             playback.play(req)
         case "attachSubtitle":
             if let json = payload as? String { playback.attachSubtitle(json) }
+        case "setSubtitleCatalog":
+            if let json = payload as? String { playback.setSubtitleCatalog(json) }
         case "setSubtitleOffsetMs":
             if let dict = payload as? [String: Any],
                let ref = dict["ref"] as? String,

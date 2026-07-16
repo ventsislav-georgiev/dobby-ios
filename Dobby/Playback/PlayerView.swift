@@ -2,6 +2,8 @@ import SwiftUI
 import KSPlayer
 #if os(macOS)
 import AppKit
+#else
+import UIKit
 #endif
 
 /// Full-window native player with an Android-TV-style OSD: bottom transport bar,
@@ -73,7 +75,11 @@ struct PlayerView: View {
             // portrait the osd's overlay was below the tap regions in hit-test order, so
             // the X wasn't tappable. A dedicated top layer always wins the touch.
             if controls.visible {
+                // Root view ignores the safe area, so offset manually below the status
+                // bar / Dynamic Island — touches there never reach the app (portrait
+                // X-not-tappable bug).
                 VStack { HStack { closeButton; Spacer() }; Spacer() }
+                    .padding(.top, topSafeInset)
             }
 
             if let toast = controls.toast {
@@ -97,15 +103,26 @@ struct PlayerView: View {
 
     // MARK: Tap regions (iOS)
 
-    /// Three full-height zones under the OSD. While the OSD is showing, any tap just
-    /// dismisses it (first tap = hide). With the OSD hidden: left = −10s, center =
-    /// play/pause, right = +10s. Sits below the OSD in the ZStack, so OSD buttons win.
+    /// Tap layout (OSD hidden): big center square = play/pause, bottom-left corner
+    /// = −10s, bottom-right corner = +10s, everywhere else (top corners, left/right
+    /// of center) only reveals the OSD. While the OSD is showing, any tap dismisses
+    /// it (first tap = hide). Sits below the OSD in the ZStack, so OSD buttons win.
     #if os(iOS)
     private var tapRegions: some View {
-        HStack(spacing: 0) {
-            tapZone { controls.seekBy(-10) }
-            tapZone { controls.togglePlay(); isPlaying = controls.isPlaying }
-            tapZone { controls.seekBy(10) }
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            ZStack {
+                tapZone { controls.wake() }   // base: dead zones just reveal the OSD
+                tapZone { controls.togglePlay(); isPlaying = controls.isPlaying }
+                    .frame(width: w * 0.5, height: h * 0.5)
+                    .position(x: w / 2, y: h / 2)
+                tapZone { controls.seekBy(-10) }
+                    .frame(width: w * 0.28, height: h * 0.3)
+                    .position(x: w * 0.14, y: h * 0.85)
+                tapZone { controls.seekBy(10) }
+                    .frame(width: w * 0.28, height: h * 0.3)
+                    .position(x: w * 0.86, y: h * 0.85)
+            }
         }
         .ignoresSafeArea()
     }
@@ -141,9 +158,23 @@ struct PlayerView: View {
                 .font(.system(size: 26))
                 .foregroundStyle(.white.opacity(0.9))
                 .shadow(radius: 3)
+                .padding(16)   // inside the label: whole padded area is tappable (≥44pt)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(16)
+    }
+
+    /// Top safe-area inset read off the key window — GeometryReader reports zero
+    /// here because an ancestor already ignores the safe area.
+    private var topSafeInset: CGFloat {
+        #if os(iOS)
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }?.safeAreaInsets.top ?? 0
+        #else
+        0
+        #endif
     }
 
     private var controlBar: some View {
@@ -275,13 +306,22 @@ struct PlayerView: View {
             Spacer()
             ForEach(subtitles.parts) { part in
                 if let text = part.text {
-                    styledSubtitle(AttributedString(text))
+                    styledSubtitle(plainText(text))
                 }
             }
         }
         .padding(.bottom, (controls.visible ? 120 : 56) + controls.subtitlePosition)
         .animation(.easeInOut(duration: 0.18), value: controls.visible)
         .allowsHitTesting(false)
+    }
+
+    /// KSPlayer stamps `SubtitleModel.textFont` as a .font attribute over the whole
+    /// string; an embedded attribute beats SwiftUI's .font() modifier, which made the
+    /// style/size menu a no-op. Strip it so our styling applies.
+    private func plainText(_ text: NSAttributedString) -> AttributedString {
+        let m = NSMutableAttributedString(attributedString: text)
+        m.removeAttribute(.font, range: NSRange(location: 0, length: m.length))
+        return AttributedString(m)
     }
 
     @ViewBuilder
