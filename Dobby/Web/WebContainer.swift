@@ -12,13 +12,28 @@ struct WebContainer {
         WebBridge(playback: playback, offline: offline)
     }
 
+    /// True when `url`'s host is covered by WKAppBoundDomains (the entry matches the
+    /// host or a suffix of it). LAN IPs never are — that list only takes domains.
+    static func isAppBound(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(),
+              let domains = Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String]
+        else { return false }
+        return domains.contains { domain in
+            let d = domain.lowercased()
+            return host == d || host.hasSuffix("." + d)
+        }
+    }
+
     fileprivate func makeWebView(_ coordinator: WebBridge) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.mediaTypesRequiringUserActionForPlayback = []
         // Opt into App-Bound Domains (see WKAppBoundDomains in Info.plist) so
         // Service Workers are available in the WKWebView — without this,
         // navigator.serviceWorker is undefined and the web hides offline download.
-        config.limitsNavigationsToAppBoundDomains = true
+        // WKAppBoundDomains is a static Info.plist list that cannot hold a
+        // user-configured LAN address, and opting in would block navigating to
+        // one, so the opt-in only applies when the resolved origin is listed.
+        config.limitsNavigationsToAppBoundDomains = WebContainer.isAppBound(url)
         #if os(iOS)
         config.allowsInlineMediaPlayback = true
         #endif
