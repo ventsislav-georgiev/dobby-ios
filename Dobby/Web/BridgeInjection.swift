@@ -21,6 +21,7 @@ enum BridgeInjection {
             platform: 'native',
             version: '0.1',
             canPlayNative: \(canPlayNative ? "true" : "false"),
+            setServerAddresses: function (json) { post('setServerAddresses', json); },
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
             setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },

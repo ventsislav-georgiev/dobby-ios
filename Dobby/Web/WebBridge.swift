@@ -64,6 +64,11 @@ extension WebBridge: WKScriptMessageHandler {
                 let json = "{\"ref\":\"selftest\",\"url\":\"\(u)\",\"title\":\"selftest\"}"
                 if let req = PlayNativePayload.decode(json) { playback.play(req) }
             }
+        // Web app pushes the canonical address list (Settings → Dobby server
+        // addresses) on every load. Cached so the next cold start finds the server
+        // on a different network without anyone touching a setting.
+        case "setServerAddresses":
+            if let json = payload as? String { ServerAddresses.store(json: json) }
         case "downloadNativeOffline":
             if let json = payload as? String { offline.startDownload(json) }
         case "downloadNativeBook":

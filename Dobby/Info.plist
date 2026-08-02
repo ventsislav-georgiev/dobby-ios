@@ -28,8 +28,20 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- The LAN address of the server is plain HTTP (only the Tailscale name is
+	     fronted by `tailscale serve`), so cleartext to local hosts must be allowed
+	     or the app can never use the direct home-network address. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Dobby connects directly to your home server when you are on the same network.</string>
 	<!-- App-Bound Domains: opting in turns on Service Workers (and other
-	     privileged web APIs) inside WKWebView. Covers the host + subdomains. -->
+	     privileged web APIs) inside WKWebView. Covers the host + subdomains.
+	     Only domains are accepted here, so a LAN address can't be listed — the
+	     opt-in is applied conditionally, see WebContainer.isAppBound. -->
 	<key>WKAppBoundDomains</key>
 	<array>
 		<string>solarflare-tarpon.ts.net</string>
