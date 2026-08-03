@@ -7,6 +7,8 @@ struct PlayNativePayload: Decodable {
     let url: String?
     let mimeType: String?
     let title: String?
+    let artist: String?          // Now Playing secondary line (YouTube channel / author)
+    let album: String?           // Now Playing tertiary line (series / show)
     let startMs: Int?
     let poster: String?
     let preferredSubtitleLang: String?

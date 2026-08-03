@@ -24,6 +24,10 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- Now Playing Live Activity: lock screen, Dynamic Island, and the CarPlay
+	     Dashboard (which renders Live Activities with no CarPlay entitlement). -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

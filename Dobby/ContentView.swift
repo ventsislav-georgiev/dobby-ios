@@ -7,6 +7,10 @@ struct ContentView: View {
     @State private var serverURL: URL?
     @State private var resolving = true
     @State private var editingAddresses = false
+    #if os(iOS)
+    @StateObject private var spotify = SpotifyLyricsSession()
+    @State private var showLyrics = false
+    #endif
 
     var body: some View {
         ZStack {
@@ -23,18 +27,73 @@ struct ContentView: View {
                     .environmentObject(playback)
                     .transition(.opacity)
             }
+
+            #if os(iOS)
+            if showLyrics {
+                LyricsView(session: spotify) { showLyrics = false; spotify.stop() }
+                    .transition(.opacity)
+            } else if lyricsAvailable {
+                lyricsPill
+            }
+            #endif
         }
         .animation(.easeInOut(duration: 0.2), value: playback.activeRef)
         .task { await resolve() }
         .sheet(isPresented: $editingAddresses) {
             AddressEditor { await resolve() }
         }
+        #if os(iOS)
+        .animation(.easeInOut(duration: 0.2), value: showLyrics)
+        // Getting into the car with Spotify already going is the whole use case;
+        // don't make it a tap. The Live Activity can only be *started* by a
+        // foregrounded app, which is exactly where we are at this moment.
+        .onChange(of: playback.carRoute.isCar) { isCar in
+            guard isCar, spotify.connected, !spotify.track.isEmpty else { return }
+            showLyrics = true
+            spotify.start()
+        }
+        #endif
     }
+
+    #if os(iOS)
+    /// Offer the lane when Spotify is actually playing something, or when it is
+    /// configured but not yet connected (otherwise there is no way in).
+    private var lyricsAvailable: Bool {
+        !spotify.track.isEmpty || (spotify.configured && !spotify.connected)
+    }
+
+    private var lyricsPill: some View {
+        VStack {
+            HStack {
+                Spacer()
+                Button {
+                    showLyrics = true
+                    spotify.start()
+                } label: {
+                    Label(spotify.track.isEmpty ? "Spotify" : spotify.track, systemImage: "music.note.list")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 14)
+                .padding(.top, 4)
+            }
+            Spacer()
+        }
+    }
+    #endif
 
     private func resolve() async {
         resolving = true
         serverURL = await ServerAddresses.resolve()
         resolving = false
+        #if os(iOS)
+        spotify.serverURL = serverURL
+        await spotify.refreshStatus()
+        #endif
     }
 }
 

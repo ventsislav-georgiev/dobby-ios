@@ -21,9 +21,13 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - Dobby
+      - Shared
     dependencies:
       - package: KSPlayer
         product: KSPlayer
+      # iOS-only: WidgetKit/ActivityKit Live Activities have no macOS counterpart.
+      - target: DobbyWidgets
+        destinationFilters: [iOS]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.illegible.dobbyios
@@ -44,3 +48,26 @@ targets:
         name: Fix framework bundle ids
       - path: scripts/deepen-macos-frameworks.sh
         name: Deepen macOS FFmpeg frameworks
+
+  # Now Playing Live Activity. Exists for the CarPlay Dashboard, which renders Live
+  # Activities without any CarPlay entitlement. iOS 26 floor: that is when
+  # `supplementalActivityFamilies([.small])` — the API that puts our own view on the
+  # dashboard instead of a Dynamic Island crop — shipped.
+  DobbyWidgets:
+    type: app-extension
+    supportedDestinations: [iOS]
+    deploymentTarget:
+      iOS: "26.0"
+    sources:
+      - DobbyWidgets
+      - Shared
+    settings:
+      base:
+        IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+        PRODUCT_BUNDLE_IDENTIFIER: eu.illegible.dobbyios.widgets
+        PRODUCT_NAME: DobbyWidgets
+        INFOPLIST_FILE: DobbyWidgets/Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Dobby
+        SKIP_INSTALL: YES
+        SWIFT_VERSION: "5.0"
