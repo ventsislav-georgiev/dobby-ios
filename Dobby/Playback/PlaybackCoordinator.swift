@@ -1,6 +1,15 @@
 import Foundation
 import Combine
 import KSPlayer
+import MediaPlayer
+
+#if canImport(UIKit)
+import UIKit
+private typealias PlatformImage = UIImage
+#else
+import AppKit
+private typealias PlatformImage = NSImage
+#endif
 
 /// Owns native playback. Drives KSPlayer (AVPlayer for HLS/MP4 → keeps PiP/AirPlay/
 /// lock-screen; FFmpeg/Metal for DASH/MKV/VP9/AV1). KSPlayer wires Now Playing +
@@ -16,6 +25,9 @@ final class PlaybackCoordinator: ObservableObject {
 
     /// Single reused KSPlayer coordinator (the SwiftUI view binds to this).
     let player = KSVideoPlayer.Coordinator()
+
+    /// Car head unit connected? Drives audio-only stream selection.
+    let carRoute = CarRoute()
 
     // KSOptions.isAutoPlay is a static (default true); plain options autoplay.
     // automaticWindowResize snaps the macOS window to the video's aspect ratio on
@@ -49,6 +61,9 @@ final class PlaybackCoordinator: ObservableObject {
         else { try? data.write(to: URL(fileURLWithPath: path)) }
     }
 
+    /// Audio-only stream in car mode (adaptive pairs only) — see `play`.
+    @Published private(set) var audioOnlyURL: URL?
+
     /// Local synthesized MPD for the ytdlpAdaptive pair (nil for single-stream).
     /// Published: a quality switch writes a new MPD here and the player view
     /// reopens on the URL change.
@@ -65,6 +80,7 @@ final class PlaybackCoordinator: ObservableObject {
 
     /// Resolved playable URL for the current request.
     var playURL: URL? {
+        if let audioOnlyURL { return audioOnlyURL }
         if let adaptiveManifestURL { return adaptiveManifestURL }
         guard let req = request else { return nil }
         return (req.url ?? req.videoUrl).flatMap { URL(string: $0) }
@@ -78,7 +94,16 @@ final class PlaybackCoordinator: ObservableObject {
         // wrap both in a synthesized static MPD — FFmpeg's dash demuxer fetches and
         // muxes the two single-file representations itself.
         adaptiveManifestURL = nil
-        if req.isAdaptivePair {
+        audioOnlyURL = nil
+        // Car mode: play the pair's audio representation alone. No video decode means
+        // no heat, no battery burn, and playback survives the phone going in a pocket —
+        // and the head unit only ever shows Now Playing anyway. Single-stream lanes
+        // (HLS/DASH/direct file) carry no separate audio URL, so they are unaffected.
+        if req.isAdaptivePair, carRoute.isCar, let audio = req.audioUrl,
+           let audioURL = URL(string: audio) {
+            audioOnlyURL = audioURL
+            mark("car route active — audio-only stream")
+        } else if req.isAdaptivePair {
             guard let mpd = Self.writeAdaptivePairMPD(req) else {
                 NSLog("%@", "Dobby: ytdlpAdaptive MPD synth failed (missing duration?); reporting fallback ref=\(req.ref)")
                 activeRef = req.ref
@@ -118,6 +143,7 @@ final class PlaybackCoordinator: ObservableObject {
         KSOptions.firstPlayerType = req.isAdaptivePair ? KSMEPlayer.self : KSAVPlayer.self
         activeRef = req.ref
         request = req
+        loadArtwork(req)
         mark("play ref=\(req.ref) start=\(req.startSeconds)s url=\(req.url ?? req.videoUrl ?? "-")")
     }
 
@@ -215,6 +241,7 @@ final class PlaybackCoordinator: ObservableObject {
     /// write a new MPD and let the published URL change reopen the player at
     /// the current position. ytdlpAdaptive-only — HLS quality is AVPlayer ABR.
     func selectQuality(_ option: PlayNativePayload.QualityOption) {
+        guard audioOnlyURL == nil else { return }   // no video stream to switch in car mode
         guard let req = request, req.isAdaptivePair,
               let videoUrl = option.videoUrl, videoUrl != currentVideoUrl,
               let mpd = Self.writeAdaptivePairMPD(
@@ -248,6 +275,77 @@ final class PlaybackCoordinator: ObservableObject {
             // (it lives on the coordinator), re-adding would duplicate tracks.
             if resumeSeconds == nil { applyInitialSubtitles() }
             resumeSeconds = nil
+            configureRemoteCommands()   // after KSPlayer's own registration on this layer
+            #if os(iOS)
+            let started = NowPlayingActivity.shared.start(
+                title: request?.title ?? "Dobby",
+                subtitle: request?.artist ?? request?.album ?? "",
+                kind: "video",
+                elapsed: Double(player.timemodel.currentTime),
+                duration: Double(player.timemodel.totalTime),
+                isLive: request?.isLive ?? false
+            )
+            mark("liveactivity started=\(started)")
+            #endif
+        }
+        applyNowPlaying()
+    }
+
+    // MARK: - Now Playing (lock screen, Control Center, car head unit)
+
+    /// KSPlayer fills duration/elapsed and only takes a title when the *stream* carries one —
+    /// torrent and YouTube URLs carry none, so the car shows a blank card. Merge in the title
+    /// and poster the web app already sent us. Merging (never replacing) keeps KSPlayer's keys.
+    private var nowPlayingArtwork: MPMediaItemArtwork?
+
+    private func applyNowPlaying() {
+        guard let req = request else { return }
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        if let title = req.title { info[MPMediaItemPropertyTitle] = title }
+        if let artist = req.artist, !artist.isEmpty { info[MPMediaItemPropertyArtist] = artist }
+        if let album = req.album, !album.isEmpty { info[MPMediaItemPropertyAlbumTitle] = album }
+        if let artwork = nowPlayingArtwork { info[MPMediaItemPropertyArtwork] = artwork }
+        // Audio, not video: a `.video` media type makes CarPlay and the lock screen
+        // treat the card as a video the head unit refuses to show. Dobby's car story
+        // is listening, so declare audio and keep a full Now Playing card everywhere.
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+        info[MPNowPlayingInfoPropertyIsLiveStream] = req.isLive ?? false
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        mark("nowplaying title=\(info[MPMediaItemPropertyTitle] ?? "-") "
+            + "artist=\(info[MPMediaItemPropertyArtist] ?? "-") "
+            + "album=\(info[MPMediaItemPropertyAlbumTitle] ?? "-") "
+            + "artwork=\(info[MPMediaItemPropertyArtwork] != nil) "
+            + "mediaType=\(info[MPNowPlayingInfoPropertyMediaType] ?? "-")")
+    }
+
+    /// KSPlayer's `registerRemoteControllEvent()` runs on every layer creation and wires
+    /// next/previous track to its playlist API — Dobby has no playlist, so the car and
+    /// lock screen show two dead buttons. Disable them (skip ±30 s takes their slots,
+    /// matching the web player's `seekRel(±30)`; KSPlayer's own default is 15 s).
+    private func configureRemoteCommands() {
+        let center = MPRemoteCommandCenter.shared()
+        center.nextTrackCommand.isEnabled = false
+        center.previousTrackCommand.isEnabled = false
+        center.skipForwardCommand.preferredIntervals = [30]
+        center.skipBackwardCommand.preferredIntervals = [30]
+        mark("remotecommands next=\(center.nextTrackCommand.isEnabled) "
+            + "prev=\(center.previousTrackCommand.isEnabled) "
+            + "skipFwd=\(center.skipForwardCommand.preferredIntervals) "
+            + "skipBack=\(center.skipBackwardCommand.preferredIntervals) "
+            + "carRoute=\(carRoute.isCar)")
+    }
+
+    private func loadArtwork(_ req: PlayNativePayload) {
+        nowPlayingArtwork = nil
+        guard let poster = req.poster, let url = URL(string: poster) else { return }
+        Task { [weak self] in
+            guard let data = try? await URLSession.shared.data(from: url).0,
+                  let image = PlatformImage(data: data) else { return }
+            await MainActor.run {
+                guard let self, self.activeRef == req.ref else { return }   // a later play() won the race
+                self.nowPlayingArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                self.applyNowPlaying()
+            }
         }
     }
 
@@ -255,6 +353,16 @@ final class PlaybackCoordinator: ObservableObject {
         guard current.isFinite, current > 0 else { return }
         lastPositionMs = Int(current * 1000)
         lastDurationMs = Int(max(0, total) * 1000)
+        #if os(iOS)
+        // Self-throttled to one push per 15 s — the widget runs its own clock between them.
+        NowPlayingActivity.shared.update(
+            title: request?.title ?? "Dobby",
+            subtitle: request?.artist ?? request?.album ?? "",
+            elapsed: current, duration: total,
+            isLive: request?.isLive ?? false,
+            isPlaying: player.playerLayer?.state.isPlaying ?? true
+        )
+        #endif
         // ponytail: report every ~5s — matches the web's SmartTube save cadence.
         if current - lastReportSec >= 5 {
             lastReportSec = current
@@ -279,10 +387,15 @@ final class PlaybackCoordinator: ObservableObject {
         activeRef = nil
         lastReportSec = 0
         adaptiveManifestURL = nil
+        audioOnlyURL = nil
         currentVideoUrl = nil
         resumeSeconds = nil
         subtitleCatalog = []
         attachedCatalogIds = []
+        nowPlayingArtwork = nil
+        #if os(iOS)
+        NowPlayingActivity.shared.end()
+        #endif
     }
 
     /// Static single-Period MPD wrapping the ytdlpAdaptive video+audio URLs.

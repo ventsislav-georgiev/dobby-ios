@@ -8,6 +8,9 @@ final class WebBridge: NSObject {
     private let offline: OfflineStore
     private(set) weak var webView: WKWebView?
 
+    /// Title the web audiobook lane last reported — a change means a new item.
+    private var webNowPlayingTitle: String?
+
     init(playback: PlaybackCoordinator, offline: OfflineStore) {
         self.playback = playback
         self.offline = offline
@@ -18,6 +21,10 @@ final class WebBridge: NSObject {
     func attach(webView: WKWebView) {
         self.webView = webView
         playback.bridge = self
+        playback.carRoute.onChange = { [weak self] isCar in self?.pushCarRoute(isCar) }
+        // `deliver` is wired on `ready`, not here: a command handed over while the
+        // page is still loading has nothing to run it and would vanish.
+        VoiceCommandQueue.shared.deliver = nil
         offline.activate()   // create bg session + reclaim downloads from a prior launch
         offline.pushIndex = { [weak self] json in
             self?.callJS("window.Dobby && window.Dobby._setOffline(\(json));")
@@ -25,6 +32,21 @@ final class WebBridge: NSObject {
         offline.reportProgress = { [weak self] json in
             self?.callJS("window.bookPlayNativeDownloadProgress && window.bookPlayNativeDownloadProgress(\(json));")
         }
+    }
+
+    /// Tell the web app the audio route entered/left a car head unit, so it can drop
+    /// into a car-friendly mode (no CarPlay entitlement is involved — this is just
+    /// the audio route). Latched on `window.Dobby` so late readers see it too.
+    private func pushCarRoute(_ isCar: Bool) {
+        callJS("window.Dobby && (window.Dobby.isCarAudio = \(isCar));"
+             + "window.bookPlayNativeAudioRoute && window.bookPlayNativeAudioRoute({car:\(isCar)});")
+    }
+
+    /// Hand a Siri command to the web app (see `js/23-voice.js`).
+    private func pushVoiceCommand(_ command: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: command),
+              let json = String(data: data, encoding: .utf8) else { return }
+        callJS("window.bookPlayNativeVoiceCommand && window.bookPlayNativeVoiceCommand(\(json));")
     }
 
     /// Evaluate a JS expression in the web app (native → web callback).
@@ -59,9 +81,20 @@ extension WebBridge: WKScriptMessageHandler {
         case "ready":
             NSLog("%@", "Dobby ready bridge \(String(describing: payload))")
             callJS("window.Dobby && window.Dobby._setOffline(\(offline.indexJSON()));")
+            pushCarRoute(playback.carRoute.isCar)   // page reload lost the latched value
+            // Siri may have launched us with a command; the page can run it now.
+            VoiceCommandQueue.shared.deliver = { [weak self] command in self?.pushVoiceCommand(command) }
+            VoiceCommandQueue.shared.flush()
             // Headless e2e: DOBBY_SELFTEST_URL drives the real web→playNative→decode path.
             if let u = ProcessInfo.processInfo.environment["DOBBY_SELFTEST_URL"] {
-                let json = "{\"ref\":\"selftest\",\"url\":\"\(u)\",\"title\":\"selftest\"}"
+                // artist/album/poster included so the Now Playing merge path is
+                // exercised too, not just decode-and-open.
+                let env = ProcessInfo.processInfo.environment
+                let poster = env["DOBBY_SELFTEST_POSTER"] ?? ""
+                let json = """
+                {"ref":"selftest","url":"\(u)","title":"selftest",\
+                "artist":"selftest artist","album":"selftest album","poster":"\(poster)"}
+                """
                 if let req = PlayNativePayload.decode(json) { playback.play(req) }
             }
         // Web app pushes the canonical address list (Settings → Dobby server
@@ -96,6 +129,29 @@ extension WebBridge: WKScriptMessageHandler {
             }
         case "stop":
             playback.stop()
+        case "setNowPlaying":
+            #if os(iOS)
+            guard let json = payload as? String,
+                  let data = json.data(using: .utf8),
+                  let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            if d["ended"] as? Bool == true { NowPlayingActivity.shared.end(); return }
+            let title = d["title"] as? String ?? "Dobby"
+            let subtitle = d["subtitle"] as? String ?? ""
+            let elapsed = (d["elapsed"] as? NSNumber)?.doubleValue ?? 0
+            let duration = (d["duration"] as? NSNumber)?.doubleValue ?? 0
+            let playing = d["isPlaying"] as? Bool ?? false
+            // A new title means a new item — restart rather than update, so the
+            // dashboard card doesn't keep the previous book's timeline.
+            if webNowPlayingTitle != title {
+                webNowPlayingTitle = title
+                NowPlayingActivity.shared.start(title: title, subtitle: subtitle, kind: "book",
+                                                elapsed: elapsed, duration: duration, isLive: false)
+            } else {
+                NowPlayingActivity.shared.update(title: title, subtitle: subtitle,
+                                                 elapsed: elapsed, duration: duration,
+                                                 isLive: false, isPlaying: playing)
+            }
+            #endif
         default:
             NSLog("%@", "Dobby: unhandled bridge action \(action)")
         }

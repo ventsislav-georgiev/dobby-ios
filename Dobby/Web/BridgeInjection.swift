@@ -21,12 +21,20 @@ enum BridgeInjection {
             platform: 'native',
             version: '0.1',
             canPlayNative: \(canPlayNative ? "true" : "false"),
+            // Audio is routed to a car head unit. Pushed by the wrapper on every
+            // route change (and once after 'ready'); read it, don't set it.
+            isCarAudio: false,
             setServerAddresses: function (json) { post('setServerAddresses', json); },
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
             setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },
             setSubtitleOffsetMs: function (ref, ms) { post('setSubtitleOffsetMs', { ref: ref, ms: ms }); },
             stop: function (ref) { post('stop', { ref: ref }); },
+            // Now Playing state for the web-driven audiobook lane, so it also gets a
+            // Live Activity (lock screen / Dynamic Island / CarPlay Dashboard). Native
+            // playback pushes its own; call this only for <audio>-element playback.
+            // { title, subtitle, elapsed, duration, isPlaying, ended }
+            setNowPlaying: function (json) { post('setNowPlaying', json); },
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.
             _offline: [],
             _setOffline: function (arr) { this._offline = Array.isArray(arr) ? arr : []; },
