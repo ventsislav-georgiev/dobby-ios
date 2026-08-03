@@ -35,18 +35,21 @@ final class SpotifyLyricsSession: ObservableObject {
     /// Lyrics screen on screen. Set by the bridge row and by plugging into a car.
     @Published var presented = false
 
-    /// Manual nudge, positive meaning "advance the lines sooner". LRCLIB timings are
-    /// crowd-sourced against whichever release the contributor had, and Spotify's
-    /// reported position carries its own lag — neither is something the client can
-    /// derive, so this is a knob. Persisted: tune it once, not every drive.
-    @Published var offsetMs: Double = UserDefaults.standard.double(forKey: "spotifyLyricsOffsetMs") {
+    /// Manual nudge for the *current track*, positive meaning "advance the lines
+    /// sooner".
+    ///
+    /// Per track, not global, because the error is per track: an LRCLIB entry is
+    /// timed against whichever release its contributor owned, so one song runs a
+    /// second behind and the next runs three seconds ahead of the same master. One
+    /// global shift cannot be right for both. LRCLIB has no per-recording key
+    /// (no ISRC) to match on, so nothing here can derive the difference — but it is
+    /// stable per song, so remembering it means tuning each song at most once.
+    @Published var offsetMs: Double = 0 {
         didSet {
-            UserDefaults.standard.set(offsetMs, forKey: Self.offsetKey)
+            if let trackId { OffsetStore.set(offsetMs, for: trackId) }
             tick()
         }
     }
-
-    private static let offsetKey = "spotifyLyricsOffsetMs"
 
     @Published private(set) var connected = false
     @Published private(set) var configured = false
@@ -244,6 +247,9 @@ final class SpotifyLyricsSession: ObservableObject {
             artist = state.artist ?? ""
             artwork = state.artwork.flatMap(URL.init(string:))
             durationMs = state.durationMs ?? 0
+            // Whatever this song needed last time. Assigned after `trackId` so the
+            // observer writes it back under the new track, not the one just left.
+            offsetMs = state.trackId.map(OffsetStore.get) ?? 0
             if running {
                 NowPlayingActivity.shared.startLyrics(track: track, artist: artist,
                                                       duration: Double(durationMs) / 1000)
@@ -313,6 +319,38 @@ final class SpotifyLyricsSession: ObservableObject {
 
     private func endpoint(_ path: String) -> URL? {
         serverURL?.appendingPathComponent(path)
+    }
+}
+
+/// Remembers the per-track lyric nudge. A plain dictionary in `UserDefaults`, with
+/// an insertion order alongside it so the oldest entries fall off instead of the
+/// file growing for the life of the install.
+private enum OffsetStore {
+    private static let values = "spotifyLyricsOffsets"
+    private static let order = "spotifyLyricsOffsetOrder"
+    private static let limit = 400
+
+    static func get(_ trackId: String) -> Double {
+        (UserDefaults.standard.dictionary(forKey: values)?[trackId] as? Double) ?? 0
+    }
+
+    static func set(_ offset: Double, for trackId: String) {
+        let defaults = UserDefaults.standard
+        var stored = defaults.dictionary(forKey: values) as? [String: Double] ?? [:]
+        var recent = defaults.stringArray(forKey: order) ?? []
+        recent.removeAll { $0 == trackId }
+
+        if offset == 0 {
+            stored[trackId] = nil            // back in sync: stop remembering it
+        } else {
+            stored[trackId] = offset
+            recent.append(trackId)
+        }
+        while recent.count > limit {
+            stored[recent.removeFirst()] = nil
+        }
+        defaults.set(stored, forKey: values)
+        defaults.set(recent, forKey: order)
     }
 }
 
