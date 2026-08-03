@@ -35,6 +35,19 @@ final class SpotifyLyricsSession: ObservableObject {
     /// Lyrics screen on screen. Set by the bridge row and by plugging into a car.
     @Published var presented = false
 
+    /// Manual nudge, positive meaning "advance the lines sooner". LRCLIB timings are
+    /// crowd-sourced against whichever release the contributor had, and Spotify's
+    /// reported position carries its own lag — neither is something the client can
+    /// derive, so this is a knob. Persisted: tune it once, not every drive.
+    @Published var offsetMs: Double = UserDefaults.standard.double(forKey: "spotifyLyricsOffsetMs") {
+        didSet {
+            UserDefaults.standard.set(offsetMs, forKey: Self.offsetKey)
+            tick()
+        }
+    }
+
+    private static let offsetKey = "spotifyLyricsOffsetMs"
+
     @Published private(set) var connected = false
     @Published private(set) var configured = false
     @Published private(set) var running = false
@@ -54,20 +67,21 @@ final class SpotifyLyricsSession: ObservableObject {
     private var durationMs = 0
     /// Playback position at `anchoredAt`, in milliseconds.
     private var anchorMs: Double = 0
-    private var anchoredAt = Date()
+    /// Monotonic, because `Date()` is not: an NTP correction mid-song would shift
+    /// every remaining line by however far the wall clock jumped.
+    private var anchoredAt = ProcessInfo.processInfo.systemUptime
 
-    private var pollTask: Task<Void, Never>?
-    private var endPollPending = false
-    private var lastEndPoll = Date.distantPast
+    private var streamTask: Task<Void, Never>?
     private var ticker: Timer?
     private let keepAlive = AudioKeepAlive()
 
-    /// A poll is a resync, not a heartbeat — the local clock covers the gaps.
-    private static let playingPollInterval: TimeInterval = 10
-    private static let idlePollInterval: TimeInterval = 15
-    /// Below this the difference is network jitter, not a seek. Snapping on jitter
-    /// makes the highlighted line jump backwards mid-word.
-    private static let resyncThresholdMs: Double = 1500
+    /// A skip, a seek, or a phone that was asleep. Snap, and accept the visible jump.
+    private static let snapThresholdMs: Double = 1200
+    /// Everything under the snap threshold is drift or jitter, and gets folded in a
+    /// fraction at a time — converging over a few updates instead of yanking the
+    /// highlighted line backwards mid-word. Clock discipline, not a deadband: the
+    /// old ±1.5s tolerance *was* the desync, since being 1.4s out never corrected.
+    private static let slew: Double = 0.35
 
     // MARK: - Lifecycle
 
@@ -103,24 +117,35 @@ final class SpotifyLyricsSession: ObservableObject {
         NowPlayingActivity.shared.startLyrics(track: track.isEmpty ? "Spotify" : track,
                                               artist: artist,
                                               duration: Double(durationMs) / 1000)
-        pollTask = Task { [weak self] in
+        // The Pi pushes; it polls Spotify on our behalf and knows when a track ends,
+        // so a skip lands here as fast as it notices instead of a poll later. A drive
+        // through a tunnel is the normal case, hence the reconnect loop.
+        streamTask = Task { [weak self] in
+            var backoff: UInt64 = 1
             while !Task.isCancelled {
-                guard let self else { return }
-                await self.poll()
-                let interval = self.isPlaying ? Self.playingPollInterval : Self.idlePollInterval
-                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                do {
+                    try await self?.consumeStream()
+                    backoff = 1
+                } catch {
+                    await self?.setStatus("Reconnecting…")
+                }
+                if Task.isCancelled { return }
+                try? await Task.sleep(nanoseconds: backoff * 1_000_000_000)
+                backoff = min(backoff * 2, 15)
             }
         }
-        // 4 Hz is enough to land a line change within a frame of where it belongs
-        // and costs nothing next to the radio that is already on.
-        ticker = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        // 10 Hz: a line lands within a tenth of a second of its cue, which is under
+        // what anyone notices, and costs nothing next to the radio already playing.
+        ticker = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
     }
 
+    fileprivate func setStatus(_ text: String?) { status = text }
+
     func stop() {
         running = false
-        pollTask?.cancel(); pollTask = nil
+        streamTask?.cancel(); streamTask = nil
         ticker?.invalidate(); ticker = nil
         keepAlive.stop()
         NowPlayingActivity.shared.end()
@@ -176,8 +201,36 @@ final class SpotifyLyricsSession: ObservableObject {
             status = "Can't reach Dobby"
             return
         }
-        let roundTrip = Date().timeIntervalSince(sentAt)
+        apply(state, transit: Date().timeIntervalSince(sentAt) / 2)
+    }
 
+    /// Reads the server's push feed until it ends. Throws so the caller can back off
+    /// and reconnect; a clean end (server restart, graceful shutdown) throws too.
+    private func consumeStream() async throws {
+        guard var components = endpoint("api/spotify/stream").flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) })
+        else { return }
+        if let trackId { components.queryItems = [.init(name: "have", value: trackId)] }
+        guard let url = components.url else { return }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = .infinity   // the feed is quiet whenever the music is
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+
+        let decoder = JSONDecoder()
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data: ") else { continue }   // ": ping" and "retry:" are noise
+            guard let data = String(line.dropFirst(6)).data(using: .utf8),
+                  let state = try? decoder.decode(ServerState.self, from: data) else { continue }
+            // Transit is one way here and well under the slew loop's resolution.
+            apply(state, transit: 0)
+        }
+        throw URLError(.networkConnectionLost)   // stream ended; reconnect
+    }
+
+    private func apply(_ state: ServerState, transit: TimeInterval) {
         connected = state.connected
         guard state.connected else { status = "Spotify not connected"; stop(); return }
 
@@ -202,49 +255,49 @@ final class SpotifyLyricsSession: ObservableObject {
             synced = lyrics.synced
         }
 
+        // Pausing and resuming both change what the local clock means, so they snap
+        // rather than slew — otherwise the words keep walking for a beat after the
+        // music stops.
+        let transportChanged = isPlaying != state.playing
         isPlaying = state.playing
         status = state.lyricsUnavailable && state.trackId != nil ? "No lyrics for this track"
                : (state.error == "rate_limited" ? "Spotify is throttling — following on the local clock" : nil)
 
-        // The reading was taken `ageMs` ago on the Pi, plus about half the round
-        // trip getting here — but only a *playing* track moved during that time.
+        // The reading was taken `ageMs` ago on the Pi, plus the trip here — but only
+        // a *playing* track moved during that time.
         guard let progress = state.progressMs else { return }
         let serverMs = state.playing
-            ? Double(progress + state.ageMs) + roundTrip * 500
+            ? Double(progress + state.ageMs) + transit * 1000
             : Double(progress)
-        // A new song always re-anchors: two tracks can be at the same offset, and
-        // then the drift test would silently keep the old song's clock.
-        if trackChanged || !running || abs(serverMs - positionMs()) > Self.resyncThresholdMs {
+
+        // A new song always snaps: two tracks can be at the same offset, and then the
+        // error test would silently keep the old song's clock.
+        let error = serverMs - positionMs()
+        if trackChanged || transportChanged || !running || abs(error) > Self.snapThresholdMs {
             anchorMs = serverMs
-            anchoredAt = Date()
+            anchoredAt = ProcessInfo.processInfo.systemUptime
+        } else {
+            anchorMs += error * Self.slew
         }
         tick()
     }
 
     private func positionMs() -> Double {
-        isPlaying ? anchorMs + Date().timeIntervalSince(anchoredAt) * 1000 : anchorMs
+        guard isPlaying else { return anchorMs }
+        return anchorMs + (ProcessInfo.processInfo.systemUptime - anchoredAt) * 1000
     }
 
     private func tick() {
         let position = positionMs()
-        // The local clock ran off the end of the song, so Spotify is already on the
-        // next one. Waiting out the poll interval would leave the last line of the
-        // previous track sitting on the dashboard — this is the most visible way
-        // for the lane to look broken, and one extra call per track is cheap.
-        // Throttled: the Pi coalesces its own upstream call, so a still-stale answer
-        // would otherwise have the 4 Hz ticker asking again every quarter second.
-        if running, isPlaying, durationMs > 0, position > Double(durationMs) + 500,
-           !endPollPending, Date().timeIntervalSince(lastEndPoll) > 5 {
-            endPollPending = true
-            lastEndPoll = Date()
-            Task { await poll(); endPollPending = false }
-        }
         guard synced, !lines.isEmpty else { return }
+        // The nudge moves the *words*, never the clock — `position` above still has to
+        // mean playback position for the end-of-track check and the drift test.
+        let cue = position + offsetMs
         // Songs run forwards; start from the current line instead of rescanning.
         var next = index
-        while next + 1 < lines.count, Double(lines[next + 1].t) <= position { next += 1 }
-        if next == index, index >= 0, Double(lines[index].t) > position {
-            next = lines.lastIndex { Double($0.t) <= position } ?? -1   // seeked backwards
+        while next + 1 < lines.count, Double(lines[next + 1].t) <= cue { next += 1 }
+        if next == index, index >= 0, Double(lines[index].t) > cue {
+            next = lines.lastIndex { Double($0.t) <= cue } ?? -1   // seeked backwards
         }
         guard next != index else { return }
         index = next

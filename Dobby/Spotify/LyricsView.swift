@@ -11,7 +11,6 @@ struct LyricsView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
             if !session.connected {
                 ConnectView(session: session)
             } else if session.lines.isEmpty {
@@ -21,6 +20,11 @@ struct LyricsView: View {
             }
             controls
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Background, not a child: a full-bleed `Color` *inside* the stack grows it
+        // past the safe area, which put the title and close button under the status
+        // bar where the system swallows the taps.
+        .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
     }
 
@@ -87,8 +91,31 @@ struct LyricsView: View {
             if !session.synced, !session.lines.isEmpty {
                 Text("Unsynced lyrics — scroll manually")
                     .font(.caption2).foregroundStyle(.tertiary).padding(.bottom, 12)
+            } else if session.synced {
+                nudge
             }
         }
+    }
+
+    /// LRCLIB timings are contributed against whichever release the contributor
+    /// owned, and Spotify reports its position with a lag of its own. Neither is
+    /// something the app can derive, so it is a knob — and it sticks.
+    private var nudge: some View {
+        HStack(spacing: 14) {
+            Button { session.offsetMs -= 250 } label: { Image(systemName: "minus") }
+            Text(session.offsetMs == 0 ? "In sync" : String(format: "%+.2fs", session.offsetMs / 1000))
+                .font(.caption.monospacedDigit())
+                .frame(minWidth: 66)
+                .onTapGesture { session.offsetMs = 0 }
+            Button { session.offsetMs += 250 } label: { Image(systemName: "plus") }
+        }
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.bottom, 14)
     }
 }
 

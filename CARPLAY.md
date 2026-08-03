@@ -233,20 +233,42 @@ the source instead — and the SDK's binary framework never enters the tree.
 
 **Spotify's quota is small and undocumented.** Development Mode apps (5 users, app
 owner must have Premium) share one quota per developer account; a 429 now carries
-`"reason": "QUOTA_EXCEEDED"` and often no `Retry-After`. So a poll is treated as a
-*resync*, never a tick: the Pi coalesces `currently-playing` to one upstream call per
-2.5 s across all callers, the phone polls the Pi every 10 s, and between polls the lyric
-advances on the phone's own clock. A reading is only snapped back when it disagrees with
-the local clock by more than 1.5 s — which also sidesteps the long-standing bug class
-where `progress_ms` goes stale between pause/seek events on some clients.
+`"reason": "QUOTA_EXCEEDED"` and often no `Retry-After`. So a reading is treated as a
+*resync*, never a tick: the phone runs its own clock and the network only disciplines it.
+
+**The Pi polls; the phone listens.** `GET /api/spotify/stream` is SSE. The Pi runs one
+watcher — 2 s while a track plays, 10 s while paused, and it wakes *exactly* at the end
+of a song rather than a couple of seconds into the next — and it only runs while someone
+is connected, so an idle app costs zero quota. Every listener shares that one upstream
+call. The first design had the phone polling every 10 s, which is how long the previous
+song's words could stay up after a skip.
+
+**Clock discipline, not a deadband.** The phone anchors on `progress_ms + ageMs` and
+advances on `ProcessInfo.systemUptime` (monotonic — a wall-clock correction mid-song
+would shift every remaining line). Each event computes the error: over 1.2 s it is a
+seek, a skip or a phone that was asleep, and it snaps; under that it folds in 35 % of the
+error per event, converging in a few seconds without yanking the highlighted line
+backwards mid-word. Track changes and pause/resume always snap, since both change what
+the clock means. The earlier "ignore anything under 1.5 s" rule *was* the desync people
+saw: being 1.4 s out simply never corrected. This also sidesteps the long-standing bug
+class where `progress_ms` goes stale between pause/seek events on some clients.
+
+**What is left over is a knob, because it is not derivable.** LRCLIB timings are
+contributed against whichever release the contributor owned, and Spotify's reported
+position carries a lag of its own. `LyricsView` has a ±0.25 s nudge that persists in
+`UserDefaults` (tap the readout to zero it).
 
 **Lyrics do not come from Spotify at all** — its lyrics are a Musixmatch licence with no
 public API. [LRCLIB](https://lrclib.net) is free and keyless: `/api/get` wants artist +
 track + album + duration and 404s if the duration is more than ~2 s off, so a
 `/api/search` fallback picks the nearest duration within 10 s (preferring a synced entry)
 — without that window, "Creep" resolves to an acoustic cut whose timings are wrong.
-Lyrics are cached per track id on the Pi forever; misses expire after a week, since
-LRCLIB gains transcriptions over time.
+A plain miss is usually a *naming* miss, not an absent song, so the same lookup is
+retried with Spotify's decorations stripped ("- 2011 Remaster", "(feat. …)") and the
+lead artist alone, then as free text. Lyrics are cached per track id on the Pi forever;
+misses expire after a week, since LRCLIB gains transcriptions over time. Cache filenames
+carry a matcher generation (`-m2`) — a cached miss only means "the matcher of the day
+found nothing", so improving the matcher has to invalidate them.
 
 ### Shape
 
@@ -257,7 +279,9 @@ certificate (`tailscale serve`). PKCE means there is no client secret to copy an
 The phone opens `/api/spotify/login?redirect=dobby://spotify-connected` in an
 `ASWebAuthenticationSession` and the browser closes itself when the token lands.
 
-One endpoint is polled: `GET /api/spotify/state?have=<trackId>`. It returns the track,
+The screen holds `GET /api/spotify/stream?have=<trackId>` open; `GET
+/api/spotify/state?have=<trackId>` is the same payload as a one-shot, used before the
+screen is open and as a probe. It returns the track,
 `progressMs` with the `ageMs` it already spent on the Pi, and the whole lyric timeline —
 omitted once the caller says it has it, so the steady-state response is a few hundred
 bytes. Scopes are read-only (`user-read-currently-playing`, `user-read-playback-state`):
