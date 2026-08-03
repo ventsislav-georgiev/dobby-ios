@@ -8,6 +8,17 @@ import Foundation
 enum BridgeInjection {
     static let canPlayNative = true
 
+    /// The lyrics lane exists for the CarPlay Dashboard, so it is iOS-only. The web
+    /// app feature-detects this function to decide whether to show the row in the
+    /// Audiobooks tab — leaving it out on macOS is what keeps the row off the Mac.
+    private static var lyricsMember: String {
+        #if os(iOS)
+        "openSpotifyLyrics: function () { post('openSpotifyLyrics', {}); },"
+        #else
+        ""
+        #endif
+    }
+
     static var script: String {
         """
         (function () {
@@ -35,6 +46,7 @@ enum BridgeInjection {
             // playback pushes its own; call this only for <audio>-element playback.
             // { title, subtitle, elapsed, duration, isPlaying, ended }
             setNowPlaying: function (json) { post('setNowPlaying', json); },
+            \(lyricsMember)
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.
             _offline: [],
             _setOffline: function (arr) { this._offline = Array.isArray(arr) ? arr : []; },

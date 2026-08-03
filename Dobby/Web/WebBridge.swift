@@ -129,6 +129,10 @@ extension WebBridge: WKScriptMessageHandler {
             }
         case "stop":
             playback.stop()
+        case "openSpotifyLyrics":
+            #if os(iOS)
+            SpotifyLyricsSession.shared.present()
+            #endif
         case "setNowPlaying":
             #if os(iOS)
             guard let json = payload as? String,
