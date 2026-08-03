@@ -27,13 +27,6 @@ struct ContentView: View {
                     .transition(.opacity)
             }
 
-            // Opened from the Audiobooks tab's "Spotify Lyrics" row, over the bridge.
-            #if os(iOS)
-            if spotify.presented {
-                LyricsView(session: spotify) { spotify.dismiss() }
-                    .transition(.opacity)
-            }
-            #endif
         }
         .animation(.easeInOut(duration: 0.2), value: playback.activeRef)
         .task { await resolve() }
@@ -41,7 +34,16 @@ struct ContentView: View {
             AddressEditor { await resolve() }
         }
         #if os(iOS)
-        .animation(.easeInOut(duration: 0.2), value: spotify.presented)
+        // Opened from the Audiobooks tab's "Spotify Lyrics" row, over the bridge.
+        // A cover, not a sibling in the stack: the whole app is mounted with
+        // `.ignoresSafeArea()` for the web view (DobbyApp), so anything laid out
+        // alongside it lands under the status bar — which is where the title and the
+        // close button were, unreachable. A modal presentation gets its own safe area.
+        #if os(iOS)
+        .fullScreenCover(isPresented: $spotify.presented) {
+            LyricsView(session: spotify) { spotify.dismiss() }
+        }
+        #endif
         // Getting into the car with Spotify already going is the whole use case;
         // don't make it a tap. The Live Activity can only be *started* by a
         // foregrounded app, which is exactly where we are at this moment.
