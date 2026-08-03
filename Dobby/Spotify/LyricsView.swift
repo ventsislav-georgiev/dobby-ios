@@ -97,16 +97,23 @@ struct LyricsView: View {
         }
     }
 
-    /// LRCLIB timings are contributed against whichever release the contributor
-    /// owned, and Spotify reports its position with a lag of its own. Neither is
-    /// something the app can derive, so it is a knob — and it sticks.
+    /// Per song, and it sticks: an LRCLIB entry is timed against whichever release
+    /// its contributor owned, so the error is a property of the track, not of the
+    /// app — one song runs a second late and the next runs three seconds early.
+    /// Plus advances the words, minus holds them back. Tap the readout to clear.
     private var nudge: some View {
         HStack(spacing: 14) {
             Button { session.offsetMs -= 250 } label: { Image(systemName: "minus") }
-            Text(session.offsetMs == 0 ? "In sync" : String(format: "%+.2fs", session.offsetMs / 1000))
-                .font(.caption.monospacedDigit())
-                .frame(minWidth: 66)
-                .onTapGesture { session.offsetMs = 0 }
+            VStack(spacing: 1) {
+                Text(session.offsetMs == 0 ? "In sync" : String(format: "%+.2fs", session.offsetMs / 1000))
+                    .font(.caption.monospacedDigit())
+                if session.offsetMs != 0 {
+                    Text("saved for this song").font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
+            }
+            .frame(minWidth: 96)
+            .contentShape(Rectangle())
+            .onTapGesture { session.offsetMs = 0 }
             Button { session.offsetMs += 250 } label: { Image(systemName: "plus") }
         }
         .font(.footnote.weight(.semibold))
