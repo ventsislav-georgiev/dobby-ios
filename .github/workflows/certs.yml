@@ -6,6 +6,14 @@ name: List signing certificates
 # what the account is holding so the right ones can be revoked by hand.
 on:
   workflow_dispatch:
+    inputs:
+      revoke_ci_certificates:
+        description: >-
+          Revoke every DEVELOPMENT certificate named "Created via API".
+          These are the ones CI minted; certificates named after a person
+          belong to a real Mac and are never touched.
+        type: boolean
+        default: false
 
 jobs:
   list:
@@ -16,6 +24,7 @@ jobs:
           KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          REVOKE: ${{ inputs.revoke_ci_certificates }}
         run: |
           node - <<'NODE'
           import crypto from 'node:crypto';
@@ -37,15 +46,19 @@ jobs:
           ).toString('base64url');
           const token = `${header}.${payload}.${signature}`;
 
-          const response = await fetch(
-            'https://api.appstoreconnect.apple.com/v1/certificates?limit=200',
-            { headers: { Authorization: `Bearer ${token}` } }
-          );
-          if (!response.ok) {
-            console.log(`HTTP ${response.status}: ${await response.text()}`);
-            process.exit(1);
-          }
-          const { data } = await response.json();
+          const call = async (path, method = 'GET') => {
+            const response = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
+              method,
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!response.ok) {
+              console.log(`${method} ${path}: HTTP ${response.status} ${await response.text()}`);
+              process.exit(1);
+            }
+            return response.status === 204 ? null : response.json();
+          };
+
+          const { data } = await call('/v1/certificates?limit=200');
           const byType = {};
           for (const cert of data) {
             const { certificateType: type, displayName, expirationDate } = cert.attributes;
@@ -56,5 +69,20 @@ jobs:
             console.log(`${type}  (${rows.length})`);
             console.log(rows.sort().join('\n'));
             console.log('');
+          }
+
+          if (process.env.REVOKE !== 'true') process.exit(0);
+
+          // Only the ones CI made. A certificate named after a person is
+          // installed on a real Mac, and revoking it breaks signing there.
+          const disposable = data.filter(
+            (cert) =>
+              cert.attributes.certificateType === 'DEVELOPMENT' &&
+              cert.attributes.displayName === 'Created via API'
+          );
+          console.log(`revoking ${disposable.length} CI certificate(s)`);
+          for (const cert of disposable) {
+            await call(`/v1/certificates/${cert.id}`, 'DELETE');
+            console.log(`  revoked ${cert.id}  ${cert.attributes.expirationDate?.slice(0, 10)}`);
           }
           NODE
