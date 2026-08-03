@@ -103,3 +103,16 @@ jobs:
           xcrun altool --upload-app --type ios \
             --file "$(ls build/export/*.ipa | head -1)" \
             --apiKey "$KEY_ID" --apiIssuer "$ISSUER_ID"
+
+      # Automatic signing mints a fresh Apple Development certificate for this
+      # runner, which is gone the moment the job ends — but the account keeps
+      # the record, and once enough pile up archiving fails outright with
+      # "Choose a certificate to revoke". Hand it back. Runs even on failure:
+      # a run that dies after the archive still minted one. Certificates named
+      # after a person live on a real Mac and are left alone.
+      - name: Revoke this run's certificate
+        if: always()
+        env:
+          KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          REVOKE: true
+        run: node scripts/asc-certs.mjs
