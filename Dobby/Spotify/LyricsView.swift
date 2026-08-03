@@ -87,6 +87,19 @@ struct LyricsView: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
+            // Lyrics scroll underneath, so the header needs its own ground to
+            // stand on. A fade rather than a bar: a hard edge would read as a
+            // second screen, and lines have to arrive from somewhere.
+            .padding(.bottom, 22)
+            .background {
+                LinearGradient(
+                    colors: [.black, .black, .black.opacity(0.9), .clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+            }
             Spacer()
             if !session.synced, !session.lines.isEmpty {
                 Text("Unsynced lyrics — scroll manually")
