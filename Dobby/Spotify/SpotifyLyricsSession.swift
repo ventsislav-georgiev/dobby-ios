@@ -23,10 +23,17 @@ import Combine
 ///   see its note.
 @MainActor
 final class SpotifyLyricsSession: ObservableObject {
+    /// Shared because the way in is the web app's Audiobooks row, which arrives
+    /// over the bridge — `WebBridge` has no path to a view's `@StateObject`.
+    static let shared = SpotifyLyricsSession()
+
     struct Line: Codable, Equatable {
         let t: Int
         let text: String
     }
+
+    /// Lyrics screen on screen. Set by the bridge row and by plugging into a car.
+    @Published var presented = false
 
     @Published private(set) var connected = false
     @Published private(set) var configured = false
@@ -73,6 +80,20 @@ final class SpotifyLyricsSession: ObservableObject {
         connected = status.connected
         configured = status.configured
         if connected, !running { await poll() }
+        // Just came back from the login sheet with the screen already open.
+        if connected, presented, !running { start() }
+    }
+
+    /// Open the lyrics screen. Following only starts once Spotify is connected —
+    /// before that the screen is the Connect prompt, with nothing to poll for.
+    func present() {
+        presented = true
+        if connected { start() }
+    }
+
+    func dismiss() {
+        presented = false
+        stop()
     }
 
     func start() {
