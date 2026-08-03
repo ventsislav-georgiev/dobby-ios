@@ -18,7 +18,7 @@ jobs:
           KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
         run: |
           node - <<'NODE'
-          const crypto = require('crypto');
+          import crypto from 'node:crypto';
 
           // ES256 JWT, per Apple's "Generating Tokens for API Requests".
           const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
