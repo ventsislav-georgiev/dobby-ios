@@ -215,6 +215,43 @@ Two things to know:
 `/api/smarttube/feed/trending` is deliberately not exposed — it parses to an empty
 item list, which in a car is an album that opens onto nothing.
 
+**Lane 6c — bitrate ceiling for books (2026-08-04).** Books are one file each, and
+they are enormous: 1.3GB at ~680kbps is typical, the full-cast titles reach 8.8GB.
+On the LAN that is invisible; over cellular, which is where CarPlay listens, it means
+a slow start and a stall on any hiccup. Subsonic already has the mechanism — clients
+send `maxBitRate` (kbps) on `stream` — and we were parsing it and ignoring it.
+
+`SubsonicTranscode.swift` now spawns `ffmpeg -ss <offset> -i <file> -vn -ac 1
+-b:a <kbps>k -f mp3 -` and streams stdout chunked. 64kbps mono is transparent for
+narration and turns a 4-hour book into ~120MB. The Pi transcodes at roughly 32×
+realtime, so the CPU cost is not the constraint.
+
+Four rules the code encodes, each learned the hard way:
+
+- `download` never transcodes — the spec says a download returns the original.
+- No re-encode when the source is already at or under the ceiling (`sourceExceeds`,
+  10% slack). Unknown duration downscales anyway: a client that sent a ceiling wants one.
+- `-ss` goes *before* `-i`, so seeking uses the container index rather than decoding
+  through hours of audio to reach the offset.
+- On client disconnect the read pipe is closed *before* `terminate()`. On SIGTERM
+  ffmpeg tries to flush its output trailer, which blocks forever on a pipe with no
+  reader — the process survives the signal and one transcode leaks per skipped track.
+  Breaking the pipe first turns that write into EPIPE. Verified: `pgrep -c ffmpeg`
+  goes back to 0 after a hangup, where it stayed at 1 before the fix.
+
+A transcoded body has no length known up front, so it is chunked and cannot be
+range-seeked. That is the standard Subsonic tradeoff — clients buffer forward.
+
+This only helps if the client actually sends `maxBitRate`; it is a per-client
+setting. `[subsonic] GET stream … maxBitRate=` in the log says whether it did.
+
+**Logs survive restarts now.** The user journal is not persisted on this Pi, so a
+restart destroyed the only copy — twice, mid-investigation. A drop-in at
+`~/.config/systemd/user/bookplay.service.d/logfile.conf` appends stdout and stderr to
+`~/bookplay/data/bookplay.log`. `[stream]` lines carry user-agent, `Range`, and bytes
+offered, plus a distinct line when a transfer is cut short, which separates "the
+player stopped asking" from "we stopped sending".
+
 ## Lane 7 — Spotify lyrics on the Dashboard (2026-08-03)
 
 The one car experience that does not need Dobby to play anything. Spotify keeps the
