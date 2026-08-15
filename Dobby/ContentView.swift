@@ -18,7 +18,13 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .background(Color.black)
             } else {
-                ServerUnreachableView(resolving: resolving, edit: { editingAddresses = true })
+                ServerUnreachableView(
+                    resolving: resolving,
+                    edit: { editingAddresses = true },
+                    // ponytail: load the last-good origin anyway — nothing answers, but the
+                    // service worker's cache is keyed to that origin, so cached content plays.
+                    offline: { serverURL = ServerAddresses.candidates().first }
+                )
             }
 
             if let url = playback.playURL, playback.request != nil {
@@ -68,6 +74,7 @@ struct ContentView: View {
 private struct ServerUnreachableView: View {
     let resolving: Bool
     let edit: () -> Void
+    let offline: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -81,6 +88,7 @@ private struct ServerUnreachableView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Edit addresses", action: edit)
+                Button("Continue offline", action: offline)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
