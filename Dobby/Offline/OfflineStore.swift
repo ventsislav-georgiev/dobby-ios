@@ -5,9 +5,13 @@ import Foundation
 /// Unlimited size — straight to disk, no Service-Worker cache quota.
 ///
 /// Two URLSessions:
-///  - `session` (.default): single-file VIDEO downloads + subtitle sidecars (unchanged).
-///  - `bgSession` (.background): multi-file AUDIOBOOK chapter downloads — keeps running
-///    when the app is backgrounded/suspended and is faster (parallel, no SW overhead).
+///  - `session` (.default): subtitle sidecars only — small, completion-handler based,
+///    which a background session does not allow.
+///  - `bgSession` (.background): the media transfers, AUDIOBOOK chapters and VIDEO
+///    files alike. iOS suspends the app (and with it any .default task) shortly after
+///    it leaves the foreground, which killed video downloads with a timeout; a
+///    background session hands the transfer to the system daemon, which needs no
+///    Background App Refresh permission and survives suspension and relaunch.
 ///
 /// Sync bridge getters (listNativeOffline/getNativeOffline) can't be served by a WKWebView
 /// message handler (those are async), so the index is mirrored into a JS-side cache via
@@ -56,9 +60,14 @@ final class OfflineStore: NSObject, ObservableObject {
         let s = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
         boundBgSession = s
         s.getAllTasks { tasks in
-            for t in tasks { Task { @MainActor in
-                if let key = t.taskDescription { self.tasks[key] = t }
-            } }
+            let live = tasks.compactMap { t -> (String, URLSessionTask)? in
+                guard let key = t.taskDescription else { return nil }
+                return (key, t)
+            }
+            Task { @MainActor in
+                for (key, t) in live { self.tasks[key] = t }
+                self.failOrphanedDownloads(liveKeys: Set(live.map { $0.0 }))
+            }
         }
         return s
     }
@@ -98,7 +107,7 @@ final class OfflineStore: NSObject, ObservableObject {
         emit(p.videoId, status: "downloading", bytes: 0, total: 0)
 
         let key = "video\t\(p.videoId)"
-        let task = session.downloadTask(with: url)
+        let task = activeBgSession.downloadTask(with: url)
         task.taskDescription = key
         tasks[key] = task
         task.resume()
@@ -172,6 +181,23 @@ final class OfflineStore: NSObject, ObservableObject {
         }
     }
 
+    /// Called once the background session has reported which tasks survived the
+    /// relaunch. Anything the index still calls in-flight with no task behind it is
+    /// dead — the app was killed before the transfer finished and iOS did not keep
+    /// it — so it has to stop claiming to be downloading, or the UI waits forever.
+    private func failOrphanedDownloads(liveKeys: Set<String>) {
+        for (id, e) in index where e.status == "downloading" || e.status == "preparing" {
+            if e.kind == "book" {
+                guard let chs = e.chapters else { continue }
+                let stillGoing = chs.contains { $0.status == "downloading" && liveKeys.contains("book\t\(id)\t\($0.name)") }
+                if stillGoing { continue }
+                for ch in chs where ch.status == "downloading" { markChapter(id, ch.name, "error") }
+            } else if !liveKeys.contains("video\t\(id)") {
+                fail(id, "interrupted")
+            }
+        }
+    }
+
     private func fail(_ videoId: String, _ error: String) {
         if var e = index[videoId] { e.status = "error"; index[videoId] = e }
         saveIndex()
@@ -210,13 +236,11 @@ final class OfflineStore: NSObject, ObservableObject {
     private func loadIndex() {
         guard let data = try? Data(contentsOf: indexURL),
               let raw = try? JSONDecoder().decode([String: Entry].self, from: data) else { return }
+        // Everything now transfers on the background session, so a relaunch may find
+        // its tasks still alive. Marking in-flight entries failed here would kill a
+        // download that is still running — activeBgSession re-attaches the surviving
+        // tasks and failOrphanedDownloads fails only what has none.
         index = raw
-        for (k, var e) in index where e.status == "downloading" || e.status == "preparing" {
-            // Books resume via the background session (re-attached in activate());
-            // leave them "downloading". Stale single-file videos can't resume → error.
-            if e.kind == "book" { continue }
-            e.status = "error"; index[k] = e
-        }
     }
 
     private func saveIndex() {
