@@ -23,6 +23,9 @@ enum ApiSchemeHandlerCheck {
         mirrorFallback()
         tokenTrap()
         corsOriginGate()
+        imageCacheHit()
+        imageCachePolicy()
+        imageLaneIsolation()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -202,5 +205,76 @@ enum ApiSchemeHandlerCheck {
               "image lane still echoes a third-party origin")
         check(ApiSchemeHandler.acao(origin: nil, serverOrigin: server, secret: false) == "*",
               "image lane still answers * with no Origin")
+    }
+
+    // MARK: #071 — a disk hit answers with no transport call
+
+    static func imageCacheHit() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = URLCache(memoryCapacity: 1 << 20, diskCapacity: 1 << 20, directory: dir)
+        let url = URL(string: "https://m.media-amazon.com/images/M/poster.jpg")!
+        let request = ApiSchemeHandler.imageRequest(url)
+
+        var fetches = 0
+        func fetchOrCache() -> ApiSchemeHandler.CachedImageAnswer? {
+            if let hit = ApiSchemeHandler.cachedImageAnswer(cache, request) { return hit }
+            fetches += 1
+            return nil
+        }
+
+        check(fetchOrCache() == nil, "a cold cache has nothing")
+        check(fetches == 1, "a cold cache calls the transport once")
+
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "image/jpeg",
+                                                      "Cache-Control": "public, max-age=3600"])!
+        let bytes = Data("fake-poster-bytes".utf8)
+        cache.storeCachedResponse(CachedURLResponse(response: response, data: bytes), for: request)
+
+        let first = fetchOrCache()
+        check(first?.data == bytes, "the cached bytes are served")
+        check(fetches == 1, "a cache hit never calls the transport")
+
+        let second = fetchOrCache()
+        check(second?.data == bytes, "a second request for the same URL is also served from disk")
+        check(fetches == 1, "still 1: the second request never calls the transport either")
+    }
+
+    // MARK: #071 — the willCacheResponse rewrite/veto
+
+    static func imageCachePolicy() {
+        let url = URL(string: "https://m.media-amazon.com/images/M/poster.jpg")!
+        let data = Data("x".utf8)
+
+        // Upstream sends nothing: our default is stamped on.
+        let bare = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [:])!
+        let bareProposal = CachedURLResponse(response: bare, data: data)
+        let stamped = ImageTransport.cachePolicy(for: bareProposal)
+        let stampedHTTP = stamped?.response as? HTTPURLResponse
+        check(stampedHTTP?.value(forHTTPHeaderField: "Cache-Control") == ApiSchemeHandler.defaultImageCacheControl,
+              "no upstream Cache-Control gets the #071 default stamped on before caching")
+
+        // Upstream sends its own value: honoured verbatim, no rewrite.
+        let own = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                  headerFields: ["Cache-Control": "public, max-age=60"])!
+        let ownProposal = CachedURLResponse(response: own, data: data)
+        let honoured = ImageTransport.cachePolicy(for: ownProposal)
+        check((honoured?.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Cache-Control") == "public, max-age=60",
+              "an explicit upstream Cache-Control is honoured, not overwritten")
+
+        // Upstream says no-store: vetoed, never handed to the cache.
+        let noStore = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                      headerFields: ["Cache-Control": "no-store"])!
+        let noStoreProposal = CachedURLResponse(response: noStore, data: data)
+        check(ImageTransport.cachePolicy(for: noStoreProposal) == nil,
+              "Cache-Control: no-store is never cached")
+    }
+
+    // MARK: #071 — the credential/settings lane and the image lane are different sessions
+
+    static func imageLaneIsolation() {
+        check(!Transport.usesDiskCache, "the settings/credential lane (Transport) has no disk cache")
+        check(ImageTransport.usesDiskCache, "the image lane (ImageTransport) has a disk cache")
     }
 }
