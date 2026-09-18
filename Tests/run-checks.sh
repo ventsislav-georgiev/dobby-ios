@@ -10,3 +10,9 @@ OUT="$(mktemp -d)/api-scheme-check"
 xcrun swiftc -o "$OUT" \
   Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
+
+# #068: ServerAddresses' connect/read timeout-staging decision, same pattern.
+OUT2="$(mktemp -d)/server-addresses-check"
+xcrun swiftc -o "$OUT2" \
+  Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
+"$OUT2"
