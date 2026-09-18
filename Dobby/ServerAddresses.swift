@@ -136,6 +136,12 @@ enum ServerAddresses {
         config.waitsForConnectivity = false
         let collector = MetricsCollector()
         let session = URLSession(configuration: config, delegate: collector, delegateQueue: nil)
+        // Per-attempt session with its own delegate: invalidate once the one task is
+        // done, or it and the MetricsCollector it pins leak for the app's lifetime.
+        // Safe after the awaited call below returns/throws — the metrics callback
+        // fires before the task completes, and invalidate-after-finish is exactly
+        // what finishTasksAndInvalidate is for.
+        defer { session.finishTasksAndInvalidate() }
         let started = Date()
         do {
             let (_, response) = try await session.data(for: request)
