@@ -173,6 +173,10 @@ enum ServerAddresses {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = budget
+        // Round 4: timeoutIntervalForRequest alone is an inactivity timeout — any byte
+        // resets it — and this probe never cancels itself on activity, so a peer that
+        // connects and trickles bytes would run unbounded without a resource cap too.
+        config.timeoutIntervalForResource = budget
         config.waitsForConnectivity = false
         let delegate = ProbeDelegate(started: Date())
         let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
@@ -182,7 +186,17 @@ enum ServerAddresses {
         // `data(for:)`'s unguaranteed ordering: `run()` only returns after
         // `didCompleteWithError`, which is the task's actual completion, so the task is
         // already finished by the time `finishTasksAndInvalidate` is reached below.
-        let result = await delegate.run(session.dataTask(with: request))
+        let task = session.dataTask(with: request)
+        // Round 4: propagate cancellation into the task — a bare continuation ignores
+        // it, so a torn-down caller (e.g. a cancelled SwiftUI .task) would otherwise
+        // keep this probe running to completion regardless. didCompleteWithError still
+        // fires on a cancelled task, so run() still resumes; classify() already treats
+        // a cancelled attempt's httpStatus: nil the same as any other no-answer case.
+        let result = await withTaskCancellationHandler {
+            await delegate.run(task)
+        } onCancel: {
+            task.cancel()
+        }
         session.finishTasksAndInvalidate()
         return result
     }
