@@ -227,7 +227,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// call for the network path (the disk-cache hit above still uses it, since
     /// that body is already fully in memory and chunking it further buys nothing).
     private final class ImageStreamSink: ImageSink {
-        private unowned let handler: ApiSchemeHandler
+        // weak, not unowned: StreamDelegate holds this sink independently of
+        // the handler's own lifetime, so a WebView torn down mid-stream can
+        // deallocate the handler while a callback from the URLSession
+        // delegate queue is still pending — `unowned` would trap on that
+        // dereference instead of harmlessly no-oping.
+        private weak var handler: ApiSchemeHandler?
         private let task: WKURLSchemeTask
         private let id: ObjectIdentifier
         private let origin: String?
@@ -267,6 +272,10 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             let length = response.value(forHTTPHeaderField: "Content-Encoding") == nil
                 && response.expectedContentLength >= 0 ? Int(response.expectedContentLength) : nil
             let cacheControl = response.value(forHTTPHeaderField: "Cache-Control") ?? ApiSchemeHandler.defaultImageCacheControl
+            guard let handler else {
+                outcome = .failed(502, "Image proxy failed")
+                return false
+            }
             handler.logImage(path: path, status: 200, contentType: contentType,
                              length: length.map { "\($0)" } ?? "?", startedAt: startedAt, diskHit: false)
             guard handler.beginImageStream(task, id, contentType: contentType, contentLength: length,
@@ -279,12 +288,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         func receive(_ data: Data) {
-            guard case .served = outcome else { return } // a redirect's body, not the image
+            guard case .served = outcome, let handler else { return } // a redirect's body, not the image
             _ = handler.send(task, id) { $0.didReceive(data) }
         }
 
         func complete(error: Error?) {
-            guard case .served = outcome else { return } // redirect/failure: streamImageHop's caller decides
+            guard case .served = outcome, let handler else { return } // redirect/failure: streamImageHop's caller decides
             if let error {
                 handler.failMidStream(task, id, error)
             } else {
@@ -310,12 +319,6 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                                              headerFields: headerFields) else { return false }
         return send(task, id) { $0.didReceive(response) }
-    }
-
-    private func failMidStream(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ error: Error) {
-        guard isActive(id) else { return }
-        task.didFailWithError(error)
-        lock.lock(); active.remove(id); lock.unlock()
     }
 
     private func serveGraphQL(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
@@ -532,17 +535,40 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         lock.lock(); defer { lock.unlock() }; return active.contains(id)
     }
 
+    /// The check-then-call is atomic with `lock` held across `body(task)`, not
+    /// just across the check: `webView(_:stop:)` also takes `lock` to remove
+    /// `id`, so a `stop` racing a WebKit call on this task now either happens
+    /// fully before or fully after it, never in between. Before #071 the two
+    /// were separate critical sections, which was already a live crash window
+    /// (a `stop` landing between the check and the call raises
+    /// `NSInternalInconsistencyException` on a torn-down `WKURLSchemeTask`,
+    /// uncatchable in Swift) — #071's streamed delivery calls this once per
+    /// network chunk from the `URLSession` delegate queue, running
+    /// concurrently with the handler's own serial queue, which turned an
+    /// occasional window into one per chunk. `didReceive`/`didFinish`/
+    /// `didFailWithError` are all fast, non-reentrant WebKit calls, so holding
+    /// `lock` across them is cheap and never risks a deadlock back into this
+    /// class.
     private func send(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                       _ body: (WKURLSchemeTask) -> Void) -> Bool {
-        guard isActive(id) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard active.contains(id) else { return false }
         body(task)
         return true
     }
 
     private func finish(_ task: WKURLSchemeTask, _ id: ObjectIdentifier) {
-        guard isActive(id) else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard active.contains(id) else { return }
         task.didFinish()
-        lock.lock(); active.remove(id); lock.unlock()
+        active.remove(id)
+    }
+
+    private func failMidStream(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        guard active.contains(id) else { return }
+        task.didFailWithError(error)
+        active.remove(id)
     }
 }
 
@@ -619,7 +645,13 @@ enum ImageTransport {
 
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
+        // timeoutIntervalForRequest is an inactivity timeout, not a transfer
+        // bound — a server that trickles bytes never trips it. The 25 s wait
+        // in stream() below is a transfer bound, so timeoutIntervalForResource
+        // must be under it or a slow poster can still be running past the
+        // semaphore's timeout with outcome left at its .failed default.
         config.timeoutIntervalForRequest = 20
+        config.timeoutIntervalForResource = 20
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
         config.requestCachePolicy = .useProtocolCachePolicy
@@ -634,6 +666,9 @@ enum ImageTransport {
     /// exactly as `Transport.RefuseRedirects` does, so a 3xx completes as its
     /// own final response with no further body — `ApiSchemeHandler`'s per-hop
     /// allowlist re-check is unchanged, it just reads the outcome differently.
+    /// The 25 s wait here is comfortably above `timeoutIntervalForResource`
+    /// (20 s) on `session`, so the transfer itself — not just the connection
+    /// going idle — is what's actually bounded below this call returning.
     static func stream(_ request: URLRequest, sink: ImageSink) {
         let semaphore = DispatchSemaphore(value: 0)
         StreamDelegate.shared.run(session.dataTask(with: request), sink: sink) { semaphore.signal() }
