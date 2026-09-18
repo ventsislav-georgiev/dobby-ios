@@ -44,10 +44,6 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
 
     // MARK: - Serving
 
-    private func isActive(_ id: ObjectIdentifier) -> Bool {
-        lock.lock(); defer { lock.unlock() }; return active.contains(id)
-    }
-
     private func serve(task: WKURLSchemeTask, id: ObjectIdentifier, file: URL, rangeHeader: String?) {
         guard let handle = try? FileHandle(forReadingFrom: file) else {
             finish(task, id, notFound: true); return
@@ -82,32 +78,41 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
         var remaining = end - start + 1
         let chunkSize = 256 * 1024
         while remaining > 0 {
-            guard isActive(id) else { return }   // web cancelled (seek/teardown)
+            lock.lock(); let stillActive = active.contains(id); lock.unlock()
+            guard stillActive else { return }   // web cancelled (seek/teardown)
             let want = Int(min(Int64(chunkSize), remaining))
             let data = handle.readData(ofLength: want)
             if data.isEmpty { break }
             remaining -= Int64(data.count)
             guard send(task, id, { $0.didReceive(data) }) else { return }
         }
-        _ = send(task, id, { $0.didFinish() })
-        lock.lock(); active.remove(id); lock.unlock()
+        finish(task, id, notFound: false)
     }
 
     /// WKURLSchemeTask throws an ObjC exception if touched after stop — guard every call.
+    /// The check-then-call is atomic with `lock` held across `body(task)`, not
+    /// just across the check: `webView(_:stop:)` also takes `lock` to remove
+    /// `id`, so a `stop` racing a WebKit call on this task now either happens
+    /// fully before or fully after it, never in between (same fix as #071 in
+    /// ApiSchemeHandler.send/finish). `didReceive`/`didFinish` are fast,
+    /// non-reentrant WebKit calls, so holding `lock` across them is cheap and
+    /// never risks a deadlock back into this class.
     private func send(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ body: (WKURLSchemeTask) -> Void) -> Bool {
-        guard isActive(id) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard active.contains(id) else { return false }
         body(task)
         return true
     }
 
     private func finish(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, notFound: Bool) {
-        guard isActive(id) else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard active.contains(id) else { return }
         if notFound, let url = task.request.url,
            let resp = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil) {
             task.didReceive(resp)
         }
         task.didFinish()
-        lock.lock(); active.remove(id); lock.unlock()
+        active.remove(id)
     }
 
     // MARK: - Helpers
