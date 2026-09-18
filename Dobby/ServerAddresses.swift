@@ -100,7 +100,7 @@ enum ServerAddresses {
     /// networking, just the same "which answer means what" call Android's `answered(int)`
     /// makes. `httpStatus` is nil when the short attempt got no response at all;
     /// `connected` is whether the TCP/TLS handshake completed regardless of that (from
-    /// `URLSessionTaskMetrics.connectEndDate` — see `MetricsCollector`).
+    /// `URLSessionTaskMetrics.connectEndDate` — see `ProbeDelegate`).
     static func classify(connected: Bool, httpStatus: Int?) -> ProbeOutcome {
         // A status line — any status line — means the read already finished: it settles
         // the verdict outright and a retry could not change it. Only the no-status case
@@ -117,13 +117,53 @@ enum ServerAddresses {
     }
 
     /// Recovers "did the connect finish" from a request that may have timed out before
-    /// answering. `URLSession` has no `HttpURLConnection`-style separate connect timeout,
-    /// so this is how the same fact Android reads directly is recovered here: metrics are
-    /// delivered whether the task succeeded, failed or timed out.
-    private final class MetricsCollector: NSObject, URLSessionTaskDelegate {
-        private(set) var connected = false
+    /// answering, and hands back the whole `Attempt` — `URLSession` has no
+    /// `HttpURLConnection`-style separate connect timeout, so this is how the same fact
+    /// Android reads directly is recovered here.
+    ///
+    /// Round 3: `data(for:)`'s `async` resume is NOT documented to be ordered against
+    /// `didFinishCollecting` on the delegate queue (`delegateQueue: nil` is its own
+    /// serial queue, separate from wherever the continuation resumes) — reading
+    /// `connected` after `await session.data(for:)` returned was a data race, and one
+    /// that could read `false` on a connect that actually succeeded, misclassifying a
+    /// slow-but-present Pi as absent under load: the exact #046 failure this file
+    /// exists to prevent. `didCompleteWithError` IS documented to follow
+    /// `didFinishCollecting`, so build the `Attempt` there instead, entirely on the
+    /// delegate queue that wrote every field of it — nothing is read across queues, so
+    /// no lock is needed.
+    private final class ProbeDelegate: NSObject, URLSessionDataDelegate {
+        private let started: Date
+        private var status: Int?
+        private var connected = false
+        private var continuation: CheckedContinuation<Attempt, Never>?
+
+        init(started: Date) { self.started = started }
+
+        /// Resumes the task and suspends until `didCompleteWithError` builds the result.
+        func run(_ task: URLSessionDataTask) async -> Attempt {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+                task.resume()
+            }
+        }
+
+        // Only the status line is wanted; the body is swallowed unread (`/api/health`'s
+        // is tiny, but there is no reason to buffer it either way).
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            status = (response as? HTTPURLResponse)?.statusCode
+            completionHandler(.allow)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {}
+
         func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
             connected = metrics.transactionMetrics.contains { $0.connectEndDate != nil }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            continuation?.resume(returning: Attempt(httpStatus: status, connected: connected, elapsedMs: elapsedMs(since: started)))
+            continuation = nil
         }
     }
 
@@ -134,22 +174,17 @@ enum ServerAddresses {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = budget
         config.waitsForConnectivity = false
-        let collector = MetricsCollector()
-        let session = URLSession(configuration: config, delegate: collector, delegateQueue: nil)
-        // Per-attempt session with its own delegate: invalidate once the one task is
-        // done, or it and the MetricsCollector it pins leak for the app's lifetime.
-        // Safe after the awaited call below returns/throws — the metrics callback
-        // fires before the task completes, and invalidate-after-finish is exactly
-        // what finishTasksAndInvalidate is for.
-        defer { session.finishTasksAndInvalidate() }
-        let started = Date()
-        do {
-            let (_, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode
-            return Attempt(httpStatus: status, connected: true, elapsedMs: elapsedMs(since: started))
-        } catch {
-            return Attempt(httpStatus: nil, connected: collector.connected, elapsedMs: elapsedMs(since: started))
-        }
+        let delegate = ProbeDelegate(started: Date())
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        // Per-attempt session with its own delegate: invalidate once its one task is
+        // done, or it and the delegate it pins leak for the app's lifetime. Safe here —
+        // unlike round 2's version of this comment, this is no longer resting on
+        // `data(for:)`'s unguaranteed ordering: `run()` only returns after
+        // `didCompleteWithError`, which is the task's actual completion, so the task is
+        // already finished by the time `finishTasksAndInvalidate` is reached below.
+        let result = await delegate.run(session.dataTask(with: request))
+        session.finishTasksAndInvalidate()
+        return result
     }
 
     private static func elapsedMs(since started: Date) -> Int {
