@@ -51,6 +51,11 @@ struct WebContainer {
 
         // Serve natively-downloaded offline files (the https page can't load file://).
         config.setURLSchemeHandler(OfflineSchemeHandler(), forURLScheme: OfflineSchemeHandler.scheme)
+        // The page addresses this one explicitly (js/01-state-init.js, `apiUrlFor`) for
+        // GET /api/settings and /api/proxy — the two paths that must survive the Pi
+        // being off. `url` and not AppConfig.serverURL: the refresh belongs on whichever
+        // address actually answered.
+        config.setURLSchemeHandler(ApiSchemeHandler(server: url), forURLScheme: ApiSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = coordinator

@@ -11,6 +11,10 @@ enum AppConfig {
     /// WKScriptMessageHandler name. Web calls `window.webkit.messageHandlers.dobby.postMessage(...)`.
     static let bridgeName = "dobby"
 
+    /// The scheme the page uses to reach ApiSchemeHandler. WKWebView refuses a
+    /// handler for https, so these two API paths are addressed by scheme instead.
+    static let apiScheme = "dobby-api"
+
     /// UA used by the native player's FFmpeg/HTTP layer (direct googlevideo / origin
     /// streams). A real browser UA avoids servers that 403 the default "KSPlayer".
     static let streamUserAgent =
