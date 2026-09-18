@@ -130,19 +130,34 @@ enum ServerAddresses {
     /// exists to prevent. `didCompleteWithError` IS documented to follow
     /// `didFinishCollecting`, so build the `Attempt` there instead, entirely on the
     /// delegate queue that wrote every field of it — nothing is read across queues, so
-    /// no lock is needed.
+    /// no lock is needed for `status`/`connected`.
     private final class ProbeDelegate: NSObject, URLSessionDataDelegate {
         private let started: Date
         private var status: Int?
         private var connected = false
+        private let lock = NSLock()
         private var continuation: CheckedContinuation<Attempt, Never>?
+        private var pending: Attempt?
 
         init(started: Date) { self.started = started }
 
-        /// Resumes the task and suspends until `didCompleteWithError` builds the result.
+        /// Resumes the task and suspends until `finish` builds the result. Round 4's
+        /// cancellation handler can call `task.cancel()` before `run()` is even entered
+        /// (`withTaskCancellationHandler`'s `onCancel` is not sequenced after the body),
+        /// so `didCompleteWithError` can fire before a continuation exists. When that
+        /// happens `finish` parks the result in `pending`, and `run()` picks it up here
+        /// instead of installing a continuation nothing would ever resume — both orders
+        /// terminate.
         func run(_ task: URLSessionDataTask) async -> Attempt {
             await withCheckedContinuation { continuation in
+                lock.lock()
+                if let ready = pending {          // completed before we got here
+                    lock.unlock()
+                    continuation.resume(returning: ready)
+                    return                        // task is already terminal; no resume
+                }
                 self.continuation = continuation
+                lock.unlock()
                 task.resume()
             }
         }
@@ -162,8 +177,16 @@ enum ServerAddresses {
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            continuation?.resume(returning: Attempt(httpStatus: status, connected: connected, elapsedMs: elapsedMs(since: started)))
+            finish(Attempt(httpStatus: status, connected: connected, elapsedMs: elapsedMs(since: started)))
+        }
+
+        private func finish(_ attempt: Attempt) {
+            lock.lock()
+            let waiting = continuation
             continuation = nil
+            if waiting == nil { pending = attempt }
+            lock.unlock()
+            waiting?.resume(returning: attempt)
         }
     }
 
@@ -189,9 +212,12 @@ enum ServerAddresses {
         let task = session.dataTask(with: request)
         // Round 4: propagate cancellation into the task — a bare continuation ignores
         // it, so a torn-down caller (e.g. a cancelled SwiftUI .task) would otherwise
-        // keep this probe running to completion regardless. didCompleteWithError still
-        // fires on a cancelled task, so run() still resumes; classify() already treats
-        // a cancelled attempt's httpStatus: nil the same as any other no-answer case.
+        // keep this probe running to completion regardless. Round 5: `onCancel` is not
+        // sequenced after `run()`'s body, so a completion that arrives before `run()`
+        // installs its continuation is parked in `pending` (see `ProbeDelegate`) and
+        // handed over the moment `run()` arrives — both orders terminate.
+        // classify() already treats a cancelled attempt's httpStatus: nil the same as
+        // any other no-answer case.
         let result = await withTaskCancellationHandler {
             await delegate.run(task)
         } onCancel: {
