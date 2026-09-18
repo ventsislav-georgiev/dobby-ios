@@ -22,6 +22,7 @@ enum ApiSchemeHandlerCheck {
         cookieRule()
         mirrorFallback()
         tokenTrap()
+        corsOriginGate()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -153,5 +154,53 @@ enum ApiSchemeHandlerCheck {
         check(token("[]") == nil, "a non-object mirror is no token")
         check(SettingsMirrorStore.imdbAuthToken(from: nil) == nil, "no mirror is no token")
         check(SettingsMirrorStore.imdbAuthToken(from: Data()) == nil, "an empty mirror is no token")
+    }
+
+    /// The scheme handler hangs off the WKWebViewConfiguration, so every document
+    /// the WebView loads can fetch `dobby-api:` — an iframe, a page it navigated
+    /// to. The secret lanes therefore answer ACAO only to the server's own origin;
+    /// anything else, and a request with no Origin at all, gets no header and the
+    /// caller cannot read the body.
+    static func corsOriginGate() {
+        let server = "http://dobby.local:8080"
+
+        for (lane, secret) in [("settings", true), ("credential", true)] {
+            check(ApiSchemeHandler.acao(origin: server, serverOrigin: server, secret: secret) == server,
+                  "\(lane): the server's own origin gets ACAO")
+            check(ApiSchemeHandler.acao(origin: "https://evil.example", serverOrigin: server,
+                                        secret: secret) == nil,
+                  "\(lane): a third-party origin gets no ACAO")
+            check(ApiSchemeHandler.acao(origin: nil, serverOrigin: server, secret: secret) == nil,
+                  "\(lane): no Origin gets no ACAO — never a * fallback")
+            for refused in ["null", "", "http://dobby.local", "https://dobby.local:8080",
+                            "http://dobby.local:8081", "http://dobby.local.evil.example:8080",
+                            "http://evil.example/?x=http://dobby.local:8080"] {
+                check(ApiSchemeHandler.acao(origin: refused, serverOrigin: server, secret: secret) == nil,
+                      "\(lane): not the server origin: \(refused)")
+            }
+            check(ApiSchemeHandler.acao(origin: server, serverOrigin: nil, secret: secret) == nil,
+                  "\(lane): an unparseable server URL gates everything shut")
+        }
+
+        // Case and default ports are spellings of one origin, not different ones.
+        check(ApiSchemeHandler.acao(origin: "HTTP://Dobby.Local:8080", serverOrigin: server,
+                                    secret: true) == server, "origin compare is case-insensitive")
+        check(ApiSchemeHandler.acao(origin: "https://pi.ts.net:443",
+                                    serverOrigin: ApiSchemeHandler.normalizedOrigin("https://pi.ts.net/x"),
+                                    secret: true) == "https://pi.ts.net",
+              "an explicit default port is the same origin")
+        check(ApiSchemeHandler.normalizedOrigin("http://pi.local:80/api") == "http://pi.local",
+              "http default port is dropped")
+        check(ApiSchemeHandler.normalizedOrigin("http://pi.local:8080/api") == "http://pi.local:8080",
+              "a non-default port is kept")
+        check(ApiSchemeHandler.normalizedOrigin("null") == nil, "an opaque origin never normalises")
+        check(ApiSchemeHandler.normalizedOrigin(nil) == nil, "no origin never normalises")
+
+        // The image lane carries no secret, so it keeps the permissive header.
+        check(ApiSchemeHandler.acao(origin: "https://evil.example", serverOrigin: server,
+                                    secret: false) == "https://evil.example",
+              "image lane still echoes a third-party origin")
+        check(ApiSchemeHandler.acao(origin: nil, serverOrigin: server, secret: false) == "*",
+              "image lane still answers * with no Origin")
     }
 }

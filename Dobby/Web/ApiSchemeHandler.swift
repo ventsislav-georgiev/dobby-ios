@@ -40,6 +40,10 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// Tailscale name would be a second, slower link to the same box.
     private let server: URL
 
+    /// `server` as an `Origin` header spells it. The only value the secret-carrying
+    /// lanes will ever answer `Access-Control-Allow-Origin` with.
+    private let serverOrigin: String?
+
     private let queue = DispatchQueue(label: "com.solarflare.dobby.api-scheme", qos: .userInitiated)
     private var active = Set<ObjectIdentifier>()
     private let lock = NSLock()
@@ -51,6 +55,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     init(server: URL) {
         self.server = server
+        self.serverOrigin = Self.normalizedOrigin(server.absoluteString)
         super.init()
     }
 
@@ -86,7 +91,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     private func serveSettings(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                                _ url: URL, _ method: String, _ origin: String?) {
         guard method == "GET" else {
-            fail(task, id, 405, "Settings mirror is GET only", origin); return
+            fail(task, id, 405, "Settings mirror is GET only", origin, secret: true); return
         }
         let outcome = Self.settingsOutcome(mirror: SettingsMirrorStore.load()) {
             Self.fetchSettings(from: server)
@@ -95,7 +100,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         // no-store: this body carries every secret since #045, so nothing that
         // outlives the request is allowed to hold a copy of it but the Keychain item.
         respond(task, id, status: outcome.status, contentType: "application/json",
-                body: outcome.body, origin: origin, extra: ["Cache-Control": "no-store"])
+                body: outcome.body, origin: origin, secret: true,
+                extra: ["Cache-Control": "no-store"])
         if outcome.status == 200 && !outcome.store { refreshSettingsInBackground() }
     }
 
@@ -190,36 +196,36 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                               _ document: String?, _ method: String, _ origin: String?) {
         let noStore = ["Cache-Control": "no-store"]
         guard method == "GET" else {
-            fail(task, id, 405, "Credential lane is GET only", origin, noStore); return
+            fail(task, id, 405, "Credential lane is GET only", origin, noStore, secret: true); return
         }
         guard let document, !document.isEmpty else {
-            fail(task, id, 400, "Missing graphql document", origin, noStore); return
+            fail(task, id, 400, "Missing graphql document", origin, noStore, secret: true); return
         }
         guard let token = SettingsMirrorStore.imdbAuthToken() else {
-            fail(task, id, 401, "IMDb auth token not configured", origin, noStore); return
+            fail(task, id, 401, "IMDb auth token not configured", origin, noStore, secret: true); return
         }
         let upstream = Self.credentialRequest(document: document, token: token)
         guard let url = upstream.url, Self.isAllowedCredentialURL(url) else {
-            fail(task, id, 502, "Credential lane upstream is not allowlisted", origin, noStore); return
+            fail(task, id, 502, "Credential lane upstream is not allowlisted", origin, noStore, secret: true); return
         }
 
         let (data, http) = Transport.sendSync(upstream)
-        guard let http else { fail(task, id, 502, "IMDb proxy failed", origin, noStore); return }
+        guard let http else { fail(task, id, 502, "IMDb proxy failed", origin, noStore, secret: true); return }
         if (300...399).contains(http.statusCode) {
-            fail(task, id, 502, "IMDb redirected; refusing to carry the credential", origin, noStore); return
+            fail(task, id, 502, "IMDb redirected; refusing to carry the credential", origin, noStore, secret: true); return
         }
         guard let finalURL = http.url, Self.isAllowedCredentialURL(finalURL) else {
-            fail(task, id, 502, "IMDb response came from a non-allowlisted host", origin, noStore); return
+            fail(task, id, 502, "IMDb response came from a non-allowlisted host", origin, noStore, secret: true); return
         }
         // Upstream failures collapse to 502 the way the Pi reports them: copying
         // IMDb's 401 through would make the page read "no token configured" for an
         // expired one and blame the settings.
         guard (200...299).contains(http.statusCode), let data else {
-            fail(task, id, 502, "IMDb proxy upstream failed", origin, noStore); return
+            fail(task, id, 502, "IMDb proxy upstream failed", origin, noStore, secret: true); return
         }
         // Only Content-Type is answered, so an upstream Set-Cookie cannot reach the page.
         respond(task, id, status: 200, contentType: "application/json", body: data,
-                origin: origin, extra: noStore)
+                origin: origin, secret: true, extra: noStore)
     }
 
     // MARK: - The rules, as pure functions (see Tests/ApiSchemeHandlerCheck.swift)
@@ -284,29 +290,65 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     // MARK: - Answering the task
 
-    /// `Access-Control-Allow-Origin` echoes the page's own `Origin` because the
-    /// page is on https (or LAN http) and the response is on `dobby-api:` — a
-    /// cross-origin fetch as far as WebKit is concerned, refused without it. The
-    /// echo rather than a constant: the WebView loads whichever address answered
-    /// (`ServerAddresses.resolve()`), so there is no single origin to hard-code.
-    /// Only this app's own WebView can reach the scheme at all.
+    /// `Access-Control-Allow-Origin` is needed at all because the page is on https
+    /// (or LAN http) and the response is on `dobby-api:` — a cross-origin fetch as
+    /// far as WebKit is concerned, refused without it.
+    ///
+    /// The boundary is the WebView, NOT the page. The handler is registered on the
+    /// `WKWebViewConfiguration`, so every document that WebView loads can issue
+    /// `dobby-api:` requests — an iframe, an ad, any page it navigated to — and
+    /// navigation is not restricted (`limitsNavigationsToAppBoundDomains` is false
+    /// on the LAN path). So echoing the caller's `Origin`, or falling back to `*`,
+    /// would hand the settings body — `imdbAuthToken` and the rest of #045 — to
+    /// whichever document asked for it.
+    ///
+    /// Hence two lanes. The settings and credential lanes answer the header only
+    /// when the caller IS the origin the WebView was pointed at, compared as
+    /// normalised `scheme://host[:port]`, and answer no ACAO at all otherwise —
+    /// no `*`, no echo. The image lane carries no secret (allowlisted artwork,
+    /// nothing injected), so it keeps the permissive header and images still load
+    /// for a page on whichever address `ServerAddresses.resolve()` picked.
+    static func acao(origin: String?, serverOrigin: String?, secret: Bool) -> String? {
+        guard secret else { return origin ?? "*" }
+        guard let serverOrigin, let origin = normalizedOrigin(origin),
+              origin == serverOrigin else { return nil }
+        return serverOrigin
+    }
+
+    /// `scheme://host[:port]`, lowercased, default ports dropped — the shape a
+    /// browser puts in `Origin`. Both sides of the compare go through this one
+    /// parser, so a spelled-out `:443` on either side cannot make two spellings of
+    /// the same origin read as different origins. Anything unparseable (`null`,
+    /// an opaque origin, empty) is nil and therefore never matches.
+    static func normalizedOrigin(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty, let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        let defaultPort = scheme == "https" ? 443 : (scheme == "http" ? 80 : nil)
+        if let port = url.port, port != defaultPort { return "\(scheme)://\(host):\(port)" }
+        return "\(scheme)://\(host)"
+    }
+
     private func headers(_ contentType: String, _ length: Int, _ origin: String?,
-                         _ extra: [String: String]) -> [String: String] {
+                         _ secret: Bool, _ extra: [String: String]) -> [String: String] {
         var out = [
             "Content-Type": contentType,
             "Content-Length": "\(length)",
-            "Access-Control-Allow-Origin": origin ?? "*",
         ]
+        if let value = Self.acao(origin: origin, serverOrigin: serverOrigin, secret: secret) {
+            out["Access-Control-Allow-Origin"] = value
+        }
         for (key, value) in extra { out[key] = value }
         return out
     }
 
     private func respond(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, status: Int,
                          contentType: String, body: Data, origin: String?,
-                         extra: [String: String] = [:]) {
+                         secret: Bool = false, extra: [String: String] = [:]) {
         guard let url = task.request.url,
               let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
-                                             headerFields: headers(contentType, body.count, origin, extra)) else {
+                                             headerFields: headers(contentType, body.count, origin,
+                                                                   secret, extra)) else {
             finish(task, id); return
         }
         guard send(task, id, { $0.didReceive(response) }) else { return }
@@ -323,11 +365,13 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     private func fail(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ status: Int,
-                      _ message: String, _ origin: String? = nil, _ extra: [String: String] = [:]) {
+                      _ message: String, _ origin: String? = nil, _ extra: [String: String] = [:],
+                      secret: Bool = false) {
         let escaped = message.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         respond(task, id, status: status, contentType: "application/json",
-                body: Data("{\"error\":\"\(escaped)\"}".utf8), origin: origin, extra: extra)
+                body: Data("{\"error\":\"\(escaped)\"}".utf8), origin: origin,
+                secret: secret, extra: extra)
     }
 
     private func isActive(_ id: ObjectIdentifier) -> Bool {
