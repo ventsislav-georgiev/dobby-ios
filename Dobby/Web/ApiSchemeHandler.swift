@@ -258,7 +258,14 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                 return false
             }
             let contentType = response.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
-            let length = response.expectedContentLength >= 0 ? Int(response.expectedContentLength) : nil
+            // expectedContentLength mirrors the upstream Content-Length, which
+            // for a Content-Encoding response is the *encoded* size — but
+            // URLSession hands this delegate the already-decoded bytes, so
+            // forwarding that number would tell WKURLSchemeTask to expect a
+            // byte count nothing here ever produces, and WebKit fails the
+            // load. Omit the header rather than guess the decoded size.
+            let length = response.value(forHTTPHeaderField: "Content-Encoding") == nil
+                && response.expectedContentLength >= 0 ? Int(response.expectedContentLength) : nil
             let cacheControl = response.value(forHTTPHeaderField: "Cache-Control") ?? ApiSchemeHandler.defaultImageCacheControl
             handler.logImage(path: path, status: 200, contentType: contentType,
                              length: length.map { "\($0)" } ?? "?", startedAt: startedAt, diskHit: false)
@@ -381,9 +388,22 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// `Tests/ApiSchemeHandlerCheck.swift` proves a populated cache answers
     /// here with no upstream call, the #071 unit check, without a socket in
     /// the loop.
+    ///
+    /// A non-2xx entry is never served as a hit even if something once stored
+    /// one (belt-and-braces alongside `ImageTransport.cachePolicy`, which is
+    /// what should stop it from ever being stored) — `serveImage` always
+    /// answers a hit as 200, so a cached 404 must not become one.
+    ///
+    /// ponytail: no max-age/freshness check on this path — a poster is
+    /// immutable at its URL (Amazon's own contract, not just our default), so
+    /// "present" is treated as "fresh" for as long as `URLCache`'s own LRU
+    /// keeps it. Upgrade path if that assumption ever breaks: compare the
+    /// stored response's `Date` header plus its `Cache-Control: max-age`
+    /// against now, same as a real HTTP cache would.
     static func cachedImageAnswer(_ cache: URLCache, _ request: URLRequest) -> CachedImageAnswer? {
         guard let cached = cache.cachedResponse(for: request),
-              let http = cached.response as? HTTPURLResponse else { return nil }
+              let http = cached.response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode) else { return nil }
         return CachedImageAnswer(data: cached.data, response: http)
     }
 
@@ -631,6 +651,11 @@ enum ImageTransport {
     /// directly, and it runs through the same callback the real session uses).
     static func cachePolicy(for proposed: CachedURLResponse) -> CachedURLResponse? {
         guard let http = proposed.response as? HTTPURLResponse else { return proposed }
+        // Redirects are refused (StreamDelegate), so a 3xx IS the final response
+        // of its hop and CFNetwork may still offer it here; a 404/410 is
+        // heuristically cacheable too. None of those are the poster — caching
+        // any of them under the image's URL would poison it until eviction.
+        guard (200...299).contains(http.statusCode) else { return nil }
         if let cacheControl = http.value(forHTTPHeaderField: "Cache-Control") {
             return cacheControl.lowercased().contains("no-store") ? nil : proposed
         }

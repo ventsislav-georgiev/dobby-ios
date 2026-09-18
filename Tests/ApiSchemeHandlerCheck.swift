@@ -26,6 +26,7 @@ enum ApiSchemeHandlerCheck {
         imageCacheHit()
         imageCachePolicy()
         imageLaneIsolation()
+        imageCacheNonSuccessNeverHits()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -269,6 +270,20 @@ enum ApiSchemeHandlerCheck {
         let noStoreProposal = CachedURLResponse(response: noStore, data: data)
         check(ImageTransport.cachePolicy(for: noStoreProposal) == nil,
               "Cache-Control: no-store is never cached")
+
+        // A redirect is refused, so it IS the final response of its hop and
+        // CFNetwork may still offer it here with no Cache-Control of its own —
+        // must never be stamped and stored under the image's URL.
+        let redirect = HTTPURLResponse(url: url, statusCode: 301, httpVersion: "HTTP/1.1", headerFields: [:])!
+        let redirectProposal = CachedURLResponse(response: redirect, data: data)
+        check(ImageTransport.cachePolicy(for: redirectProposal) == nil,
+              "a 301 with no Cache-Control is never cached")
+
+        // A heuristically-cacheable 404 is the same hazard.
+        let notFound = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!
+        let notFoundProposal = CachedURLResponse(response: notFound, data: data)
+        check(ImageTransport.cachePolicy(for: notFoundProposal) == nil,
+              "a 404 with no Cache-Control is never cached")
     }
 
     // MARK: #071 — the credential/settings lane and the image lane are different sessions
@@ -276,5 +291,23 @@ enum ApiSchemeHandlerCheck {
     static func imageLaneIsolation() {
         check(!Transport.usesDiskCache, "the settings/credential lane (Transport) has no disk cache")
         check(ImageTransport.usesDiskCache, "the image lane (ImageTransport) has a disk cache")
+    }
+
+    // MARK: #071 review fix — a non-2xx cache entry is never served as a hit
+
+    static func imageCacheNonSuccessNeverHits() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cache = URLCache(memoryCapacity: 1 << 20, diskCapacity: 1 << 20, directory: dir)
+        let url = URL(string: "https://m.media-amazon.com/images/M/missing.jpg")!
+        let request = ApiSchemeHandler.imageRequest(url)
+
+        // Stored directly (bypassing cachePolicy) so this check stands on its
+        // own even if the store-side veto above is ever weakened.
+        let notFound = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!
+        cache.storeCachedResponse(CachedURLResponse(response: notFound, data: Data()), for: request)
+
+        check(ApiSchemeHandler.cachedImageAnswer(cache, request) == nil,
+              "a stored 404 is never served as a cache hit")
     }
 }
