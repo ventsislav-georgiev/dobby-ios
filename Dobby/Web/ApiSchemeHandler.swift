@@ -531,10 +531,6 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                 secret: secret, extra: extra)
     }
 
-    private func isActive(_ id: ObjectIdentifier) -> Bool {
-        lock.lock(); defer { lock.unlock() }; return active.contains(id)
-    }
-
     /// The check-then-call is atomic with `lock` held across `body(task)`, not
     /// just across the check: `webView(_:stop:)` also takes `lock` to remove
     /// `id`, so a `stop` racing a WebKit call on this task now either happens
