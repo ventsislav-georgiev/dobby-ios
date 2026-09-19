@@ -159,10 +159,20 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
         return true
     }
 
-    /// #151 added the shell's types. These are not cosmetic: WebKit refuses to execute a
-    /// classic `<script>` whose Content-Type is not a JavaScript MIME type and refuses to
-    /// apply a stylesheet that is not `text/css`, so the old `application/octet-stream`
-    /// default would have served all 27 boot sub-resources and booted a blank page.
+    /// #151 added the shell's types, and the two that matter were measured rather than
+    /// assumed (`Tests/BundledShellWebViewCheck.swift`, supervisor mutants 3 and 3b):
+    ///
+    /// - `text/css` is LOAD-BEARING. Serve the stylesheet as `application/octet-stream`
+    ///   and WebKit does not apply it — the measured mutant left the page's custom
+    ///   property unset, i.e. the shell boots unstyled.
+    /// - `text/javascript` is NOT enforced here. Deleting the `js` case left the
+    ///   classic `<script src="dobby-offline://shell/js/…">` executing anyway, so WebKit
+    ///   is lenient about a custom scheme's script MIME type. It is emitted regardless,
+    ///   because it is the correct type and nothing should rest on that leniency —
+    ///   `BundledShellCheck` is what holds it, not the WKWebView.
+    ///
+    /// Everything else here is ordinary correctness; before #151 all of it fell through
+    /// to `application/octet-stream`.
     static func mime(for ext: String) -> String {
         switch ext.lowercased() {
         case "js", "mjs": return "text/javascript"

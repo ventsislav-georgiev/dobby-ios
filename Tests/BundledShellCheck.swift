@@ -100,10 +100,12 @@ enum BundledShellCheck {
 
         // --- the MIME table ----------------------------------------------------------
         //
-        // WebKit refuses to execute a classic <script> whose Content-Type is not a
-        // JavaScript MIME type, and refuses a stylesheet that is not text/css. Before
-        // #151 every one of these fell through to application/octet-stream, which would
-        // have served all 27 boot sub-resources into a blank page with nothing logged.
+        // Before #151 every one of these fell through to application/octet-stream.
+        // Measured (BundledShellWebViewCheck, supervisor mutants 3/3b): text/css is
+        // load-bearing — without it WebKit does not apply the stylesheet and the shell
+        // boots unstyled — while the script type is NOT enforced for a custom scheme,
+        // the script ran as octet-stream. So the js assertion below is held HERE and
+        // nowhere else; deleting it would go unnoticed by the real WKWebView.
         check(OfflineSchemeHandler.mime(for: "js") == "text/javascript", "js is served as text/javascript")
         check(OfflineSchemeHandler.mime(for: "css") == "text/css", "css is served as text/css")
         check(OfflineSchemeHandler.mime(for: "html") == "text/html", "html is served as text/html")
