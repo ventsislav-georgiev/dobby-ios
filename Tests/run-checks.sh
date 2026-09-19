@@ -539,6 +539,13 @@ def need(needle, message):
 need("        let body = task.request.httpBody",
      "webView(_:start:) no longer reads the POST body off the task request")
 
+# ...and hands it on. Reading the body and then passing `nil` (or dropping the
+# argument) leaves every check above green — the merge is pure and the 400 branch
+# is textual — while every settings POST on the phone 400s and the write lane is
+# dead. A helper is only as wired as its call site.
+need('            case "settings": self.serveSettings(task, id, url, method, origin, body)',
+     "webView(_:start:) no longer passes the POST body it read through to serveSettings, so every settings write would be refused with a 400")
+
 # Both halves of the method gate: POST is taken, and everything else is still
 # refused. Dropping either literal from this one line is a separate bug.
 need('        guard method == "GET" || method == "POST" else {',
