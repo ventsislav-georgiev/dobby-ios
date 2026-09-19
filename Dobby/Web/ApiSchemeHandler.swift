@@ -144,13 +144,27 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     private func serveSettings(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                                _ url: URL, _ method: String, _ origin: String?) {
+        let startedAt = DispatchTime.now()
+        var status = 0
+        var length = 0
+        var source = "network"
+        // #116: Debug-only, mirrors logImage below — route, status, size, source,
+        // duration; the body carries settings secrets and must never be logged.
+        #if DEBUG
+        defer { self.logApi(route: "settings", status: status, length: length, source: source, startedAt: startedAt) }
+        #endif
         guard method == "GET" else {
+            status = 405
             fail(task, id, 405, "Settings mirror is GET only", origin, secret: true); return
         }
-        let outcome = Self.settingsOutcome(mirror: SettingsMirrorStore.load()) {
+        let mirror = SettingsMirrorStore.load()
+        source = (mirror?.isEmpty == false) ? "mirror" : "network"
+        let outcome = Self.settingsOutcome(mirror: mirror) {
             Self.fetchSettings(from: server)
         }
         if outcome.store { SettingsMirrorStore.save(outcome.body) }
+        status = outcome.status
+        length = outcome.body.count
         // no-store: this body carries every secret since #045, so nothing that
         // outlives the request is allowed to hold a copy of it but the Keychain item.
         respond(task, id, status: outcome.status, contentType: "application/json",
@@ -360,6 +374,15 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         Self.log.info("answered \(path, privacy: .public) image \(status) \(contentType, privacy: .public) \(length, privacy: .public)B head \(ms)ms \(diskHit ? "disk-hit" : "upstream", privacy: .public)")
     }
 
+    /// #116: Debug-only, settings/graphql equivalent of `logImage` above — status-only,
+    /// same Logger/category. Never the body, never a header value, never a token.
+    #if DEBUG
+    private func logApi(route: String, status: Int, length: Int, source: String, startedAt: DispatchTime) {
+        let ms = (DispatchTime.now().uptimeNanoseconds - startedAt.uptimeNanoseconds) / 1_000_000
+        Self.log.info("answered \(route, privacy: .public) \(status) \(length, privacy: .public)B \(source, privacy: .public) \(ms)ms")
+    }
+    #endif
+
     private func beginImageStream(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, contentType: String,
                                   contentLength: Int?, origin: String?, cacheControl: String) -> Bool {
         guard let url = task.request.url else { return false }
@@ -375,35 +398,54 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     private func serveGraphQL(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                               _ document: String?, _ method: String, _ origin: String?) {
+        let startedAt = DispatchTime.now()
+        var status = 0
+        var length = 0
+        // #116: Debug-only, same shape as logApi("settings", ...) above.
+        #if DEBUG
+        defer { self.logApi(route: "graphql", status: status, length: length, source: "network", startedAt: startedAt) }
+        #endif
         let noStore = ["Cache-Control": "no-store"]
         guard method == "GET" else {
+            status = 405
             fail(task, id, 405, "Credential lane is GET only", origin, noStore, secret: true); return
         }
         guard let document, !document.isEmpty else {
+            status = 400
             fail(task, id, 400, "Missing graphql document", origin, noStore, secret: true); return
         }
         guard let token = SettingsMirrorStore.imdbAuthToken() else {
+            status = 401
             fail(task, id, 401, "IMDb auth token not configured", origin, noStore, secret: true); return
         }
         let upstream = Self.credentialRequest(document: document, token: token)
         guard let url = upstream.url, Self.isAllowedCredentialURL(url) else {
+            status = 502
             fail(task, id, 502, "Credential lane upstream is not allowlisted", origin, noStore, secret: true); return
         }
 
         let (data, http) = Transport.sendSync(upstream)
-        guard let http else { fail(task, id, 502, "IMDb proxy failed", origin, noStore, secret: true); return }
+        guard let http else {
+            status = 502
+            fail(task, id, 502, "IMDb proxy failed", origin, noStore, secret: true); return
+        }
         if (300...399).contains(http.statusCode) {
+            status = 502
             fail(task, id, 502, "IMDb redirected; refusing to carry the credential", origin, noStore, secret: true); return
         }
         guard let finalURL = http.url, Self.isAllowedCredentialURL(finalURL) else {
+            status = 502
             fail(task, id, 502, "IMDb response came from a non-allowlisted host", origin, noStore, secret: true); return
         }
         // Upstream failures collapse to 502 the way the Pi reports them: copying
         // IMDb's 401 through would make the page read "no token configured" for an
         // expired one and blame the settings.
         guard (200...299).contains(http.statusCode), let data else {
+            status = 502
             fail(task, id, 502, "IMDb proxy upstream failed", origin, noStore, secret: true); return
         }
+        status = 200
+        length = data.count
         // Only Content-Type is answered, so an upstream Set-Cookie cannot reach the page.
         respond(task, id, status: 200, contentType: "application/json", body: data,
                 origin: origin, secret: true, extra: noStore)

@@ -6,6 +6,10 @@ xcrun swiftc -o "$OUT" \
   Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
 
+OUT0="$(mktemp -d)/app-config-check"
+xcrun swiftc -o "$OUT0" Dobby/AppConfig.swift Tests/AppConfigCheck.swift
+"$OUT0"
+
 # ServerAddresses.swift is compiled twice: OUT2 without -D DEBUG so the file still compiles
 # clean in release configuration (the noServerSeamActive() predicate itself is unconditional,
 # only its call site in probe(_:) is #if DEBUG-gated), and OUT3 with -D DEBUG so the
@@ -26,37 +30,69 @@ DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server
 # A textual check over the source is the only tool that can catch the call site losing its
 # DEBUG gate (or a second, ungated call being added elsewhere).
 python3 - <<'PY'
+import glob
 import re
 import sys
 
-path = "Dobby/ServerAddresses.swift"
-with open(path) as f:
-    lines = f.readlines()
+def assert_gated(call_regex, label, expected_calls=1):
+    hits = []
+    files = {}
+    for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+        with open(path) as f:
+            lines = f.readlines()
+        files[path] = lines
+        for i, l in enumerate(lines):
+            stripped = l.strip()
+            if stripped.startswith("//"):
+                continue
+            if re.search(rf"func\s+{label}\b", l):
+                continue
+            if re.search(call_regex, l):
+                hits.append((path, i))
 
-calls = [i for i, l in enumerate(lines) if "noServerSeamActive()" in l and "func noServerSeamActive" not in l]
-if len(calls) != 1:
-    sys.stderr.write(f"FAIL: expected exactly one call to noServerSeamActive() outside its declaration, found {len(calls)}\n")
-    sys.exit(1)
+    if len(hits) != expected_calls:
+        where = ", ".join(f"{p}:{i + 1}" for p, i in hits)
+        sys.stderr.write(f"FAIL: expected {expected_calls} call(s) to {label}() in Dobby/, "
+                         f"found {len(hits)} ({where})\n")
+        sys.exit(1)
 
-call_idx = calls[0]
+    for path, call_idx in hits:
+        lines = files[path]
 
-def nearest_nonblank(idx, step):
-    i = idx + step
-    while 0 <= i < len(lines):
-        stripped = lines[i].strip()
-        if stripped:
-            return stripped
-        i += step
-    return None
+        def nearest_nonblank_noncomment(idx, step):
+            i = idx + step
+            while 0 <= i < len(lines):
+                stripped = lines[i].strip()
+                if stripped and not stripped.startswith("//"):
+                    return stripped
+                i += step
+            return None
 
-above = nearest_nonblank(call_idx, -1)
-below = nearest_nonblank(call_idx, 1)
+        above = nearest_nonblank_noncomment(call_idx, -1)
+        if above != "#if DEBUG":
+            sys.stderr.write(f"FAIL: {label}() call site is not #if DEBUG-gated ({path}:{call_idx + 1})\n")
+            sys.exit(1)
 
-if above != "#if DEBUG" or below != "#endif":
-    sys.stderr.write("FAIL: noServerSeamActive() call site is not #if DEBUG-gated\n")
-    sys.exit(1)
+        # Walk to the end of the call line's statement/block (brace-balance), so a
+        # call sitting inside a multi-line guarded block (e.g. an `if ... { }`)
+        # checks for #endif after the block closes, not right after the call line.
+        balance = lines[call_idx].count("{") - lines[call_idx].count("}")
+        end_idx = call_idx
+        while balance > 0 and end_idx + 1 < len(lines):
+            end_idx += 1
+            balance += lines[end_idx].count("{") - lines[end_idx].count("}")
 
-print("PASS: noServerSeamActive() call site is #if DEBUG-gated")
+        below = nearest_nonblank_noncomment(end_idx, 1)
+        if below != "#endif":
+            sys.stderr.write(f"FAIL: {label}() call site is not #if DEBUG-gated ({path}:{call_idx + 1})\n")
+            sys.exit(1)
+
+        print(f"PASS: {label}() call site is #if DEBUG-gated ({path}:{call_idx + 1})")
+
+assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive")
+assert_gated(r"autoOfflineSeamActive\(\)", "autoOfflineSeamActive")
+assert_gated(r"AppConfig\.startURL\(origin:", "startURL")
+assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
 PY
 
 # #115: the progress-bar scrub state (Dobby/Playback/ScrubState.swift) as a pure value

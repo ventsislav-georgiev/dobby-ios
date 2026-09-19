@@ -64,6 +64,13 @@ struct ContentView: View {
         resolving = true
         serverURL = await ServerAddresses.resolve()
         resolving = false
+        #if DEBUG
+        // #116 device round 3 test seam: DOBBY_AUTO_OFFLINE=1 performs the same
+        // action as tapping "Continue offline" below, for a headless run.
+        if serverURL == nil, ServerAddresses.autoOfflineSeamActive() {
+            serverURL = ServerAddresses.candidates().first
+        }
+        #endif
         #if os(iOS)
         spotify.serverURL = serverURL
         await spotify.refreshStatus()

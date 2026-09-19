@@ -16,6 +16,7 @@ enum ServerAddressesCheck {
         classification()
         normalization()
         noServerSeam()
+        autoOfflineSeam()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -82,6 +83,17 @@ enum ServerAddressesCheck {
         check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "0"]) == false,
               "any value other than exactly \"1\" leaves the seam off")
         check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "true"]) == false,
+              "no truthy-string coercion — exact match only")
+    }
+
+    static func autoOfflineSeam() {
+        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "1"]) == true,
+              "DOBBY_AUTO_OFFLINE=1 activates the seam")
+        check(ServerAddresses.autoOfflineSeamActive([:]) == false,
+              "seam is off when the var is unset")
+        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "0"]) == false,
+              "any value other than exactly \"1\" leaves the seam off")
+        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "true"]) == false,
               "no truthy-string coercion — exact match only")
     }
 }
