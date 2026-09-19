@@ -240,7 +240,18 @@ enum ServerAddresses {
     /// ponytail: no cross-candidate taper of the long budget (Android's
     /// `LONG_READ_WINDOW_MS` caps total `resolve()` time once several candidates each go
     /// slow) — add it if `resolve()` is ever seen running long with 3+ configured addresses.
+    /// Debug-only test seam (#068 device done-condition, mirrors Android's
+    /// `debug.bookplay.pioff`): DOBBY_NO_SERVER=1 makes every probe report the
+    /// Pi absent without touching the network, so "Continue offline" can be
+    /// exercised on a Mac/simulator build against a Pi that is actually reachable.
+    /// Pure function so it is checkable without a socket in the loop; wired into
+    /// `probe(_:)` below, never into `classify`/`normalize`/anything shipped-path.
+    static func noServerSeamActive(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        env["DOBBY_NO_SERVER"] == "1"
+    }
+
     private static func probe(_ origin: URL) async -> (ProbeOutcome, reason: String) {
+        if noServerSeamActive() { return (.absent, "DOBBY_NO_SERVER=1 (seam)") }
         let short = await attempt(origin, budget: shortTimeout)
         switch classify(connected: short.connected, httpStatus: short.httpStatus) {
         case .present:

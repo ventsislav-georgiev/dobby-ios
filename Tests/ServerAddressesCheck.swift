@@ -11,6 +11,7 @@ enum ServerAddressesCheck {
     static func main() {
         classification()
         normalization()
+        noServerSeam()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -55,5 +56,17 @@ enum ServerAddressesCheck {
               == "https://dobby.solarflare-tarpon.ts.net", "an explicit https origin round-trips")
         check(ServerAddresses.normalize("ftp://x") == nil, "a non-http(s) scheme is refused")
         check(ServerAddresses.normalize("   ") == nil, "blank input is refused")
+    }
+
+    /// #068 device done-condition test seam.
+    static func noServerSeam() {
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "1"]) == true,
+              "DOBBY_NO_SERVER=1 activates the seam")
+        check(ServerAddresses.noServerSeamActive([:]) == false,
+              "seam is off when the var is unset")
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "0"]) == false,
+              "any value other than exactly \"1\" leaves the seam off")
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "true"]) == false,
+              "no truthy-string coercion — exact match only")
     }
 }
