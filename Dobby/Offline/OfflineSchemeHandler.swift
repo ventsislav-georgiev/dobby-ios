@@ -174,7 +174,14 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
     /// `standardizedFileURL` is what collapses `..`, so this is a check on where the path
     /// actually LANDS, not on what it looked like going in. The separator in the prefix is
     /// deliberate: without it `…/Offline-secrets` would pass as "under" `…/Offline`.
-    private static func contained(_ candidate: URL, in root: URL) -> URL? {
+    /// Internal rather than private only so `Tests/BundledShellCheck.swift` can reach it.
+    /// It has to: once the redundant second decode was removed, no URL can carry a
+    /// separator past the `..` guard any more, so the separator clause below is
+    /// unreachable through `fileURL` and would sit unpinned if it were only tested from
+    /// there. It stays because it is what holds if a future caller hands this a component
+    /// it built some other way — measured, a supervisor mutant that dropped it left the
+    /// whole suite green.
+    static func contained(_ candidate: URL, in root: URL) -> URL? {
         let base = root.standardizedFileURL.path
         let landed = candidate.standardizedFileURL.path
         guard landed.hasPrefix(base.hasSuffix("/") ? base : base + "/") else { return nil }

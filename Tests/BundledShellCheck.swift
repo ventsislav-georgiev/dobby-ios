@@ -174,6 +174,17 @@ enum BundledShellCheck {
                 == docs.appendingPathComponent("book").appendingPathComponent("a%2Fb.m4b").path,
               "a filename literally containing %2F survives as one component — one decode, not two")
 
+        // The separator in the containment prefix, pinned directly. Through fileURL it is
+        // now unreachable — with one decode nothing can carry a "/" past the `..` guard —
+        // so a mutant dropping it left the whole suite green until this case existed. It
+        // is defence for the next caller, not for today's, and that is exactly the kind of
+        // clause this ledger keeps finding unpinned.
+        let sibling = docs.deletingLastPathComponent().appendingPathComponent("Offline-secrets")
+        check(OfflineSchemeHandler.contained(sibling.appendingPathComponent("x"), in: docs) == nil,
+              "a SIBLING of the root is not 'under' it, even though its path has the root's as a plain prefix")
+        check(OfflineSchemeHandler.contained(docs.appendingPathComponent("book/part.m4b"), in: docs) != nil,
+              "and a genuine child still passes, so the clause above is not refusing everything")
+
         // --- the OTHER half of "this build has no shell" -----------------------------
         //
         // Supervisor review fix. The check above pins that the HANDLER refuses; nothing
