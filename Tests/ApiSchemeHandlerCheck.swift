@@ -30,6 +30,8 @@ enum ApiSchemeHandlerCheck {
         settingsSeedCoversEveryNullKey()
         settingsPatchMergesShallowly()
         settingsPatchIsRefusedWhenItIsNotAnObject()
+        settingsQueueAccumulatesPatchesOnly()
+        settingsPushOutcomeRule()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -454,5 +456,104 @@ enum ApiSchemeHandlerCheck {
         check(ApiSchemeHandler.mergedSettings(base: nil,
                                               patch: Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)) != nil,
               "a well-formed patch was refused")
+    }
+
+    // MARK: #152 — the write-back queue: what is accumulated, and what a push means
+    //
+    // Same rule as above: every fixture value is an obvious placeholder.
+
+    /// The queue accumulates PATCHES, never documents. This is the half that makes
+    /// the push safe to send at all.
+    static func settingsQueueAccumulatesPatchesOnly() {
+        let one = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
+
+        // (a) THE trap. A one-key write queues one key. Building the queue on
+        //     `settingsSeed` — i.e. reusing `mergedSettings` here — would queue nine,
+        //     and the Pi applies `preferredSubtitleLanguage` and
+        //     `preferredAudioLanguage` by body PRESENCE (SettingsRoutes.swift:86-90,
+        //     `rawObject?.keys.contains(...)`, and `sanitizedLanguage(nil)` is nil),
+        //     so the seed's explicit nulls would CLEAR both on a Pi for a device that
+        //     never touched them. Absent, not null, is the assertion: `isNull` reads
+        //     an absent key as not-null, so the count check below is what would catch
+        //     a seed leaking in, and the explicit absence check is what names why.
+        let queued = object(ApiSchemeHandler.mergedPatch(pending: nil, patch: one))
+        check(queued.count == 1,
+              "a one-key write queued \(queued.count) keys — the queue is built on the "
+                  + "nine-key seed, and its nulls would clear the Pi's language fields")
+        check(queued["premiumizeApiKey"] as? String == "fixture-key", "the queued patch lost its own key")
+        for language in ["preferredSubtitleLanguage", "preferredAudioLanguage"] {
+            check(queued[language] == nil,
+                  "the queued patch carries \(language) the device never wrote; the Pi keys that "
+                      + "field off body presence and would clear it")
+        }
+        // The other seven are the opposite convention (SettingsRoutes.swift:63-76,
+        // each inside an `if let sanitizedSecret(...)`, so a null no-ops) — but they
+        // must not be sent either, because a device that never set one has nothing to
+        // say about it. Not a class, key by key.
+        for secret in ["imdbAuthToken", "openSubtitlesUsername", "openSubtitlesPassword",
+                       "subdlApiKey", "subsourceApiKey", "spotifyClientId"] {
+            check(queued[secret] == nil, "the queued patch carries \(secret) the device never wrote")
+        }
+
+        // (b) two saves across two Pi-less sessions BOTH reach the Pi. A queue that
+        //     replaced instead of accumulating would lose the first one silently —
+        //     the mirror has both merged in, so nothing else on the device notices.
+        let two = Data(#"{"subdlApiKey":"fixture-subdl"}"#.utf8)
+        let both = object(ApiSchemeHandler.mergedPatch(pending: ApiSchemeHandler.mergedPatch(pending: nil, patch: one),
+                                                       patch: two))
+        check(both.count == 2, "the queue replaced the earlier patch instead of accumulating it (\(both.count) keys)")
+        check(both["premiumizeApiKey"] as? String == "fixture-key", "the queue dropped the first save's key")
+        check(both["subdlApiKey"] as? String == "fixture-subdl", "the queue dropped the second save's key")
+
+        // (c) the same key written twice: the later value is what the user meant.
+        let older = ApiSchemeHandler.mergedPatch(pending: nil, patch: Data(#"{"premiumizeApiKey":"fixture-old"}"#.utf8))
+        let newer = object(ApiSchemeHandler.mergedPatch(pending: older, patch: one))
+        check(newer.count == 1, "re-writing one key grew the queue to \(newer.count) keys")
+        check(newer["premiumizeApiKey"] as? String == "fixture-key",
+              "the queue kept the earlier value of a key the user wrote twice")
+
+        // (d) a null the USER put in a patch is a clear they asked for, and has to
+        //     reach the Pi as one. Dropping nulls wholesale — the obvious way to
+        //     "keep the push additive" — would make clearing a secret impossible
+        //     while the Pi is off, and (a) alone would still be green.
+        let cleared = object(ApiSchemeHandler.mergedPatch(pending: nil,
+                                                          patch: Data(#"{"imdbAuthToken":null}"#.utf8)))
+        check(cleared["imdbAuthToken"] != nil, "a clear the user asked for was dropped from the queue")
+        check(isNull(cleared, "imdbAuthToken"), "a clear the user asked for was queued as something other than null")
+        check(cleared.count == 1, "the clearing patch queued \(cleared.count) keys, not the one it names")
+
+        // (e) same refusal rule as the mirror merge: a body that is not a JSON object
+        //     cannot be queued. (`serveSettings` 400s before it ever gets here, so
+        //     this is the boundary being closed rather than a live path.)
+        for refused in ["[]", "\"fixture\"", "17", "null", "true", "not json at all", ""] {
+            check(ApiSchemeHandler.mergedPatch(pending: nil, patch: Data(refused.utf8)) == nil,
+                  "a queued body that is not a JSON object was accepted: \(refused)")
+        }
+        // ...and an unreadable queue is not allowed to swallow the new patch with it.
+        let overJunk = object(ApiSchemeHandler.mergedPatch(pending: Data("not json at all".utf8), patch: one))
+        check(overJunk["premiumizeApiKey"] as? String == "fixture-key",
+              "a corrupt queue swallowed the patch being written into it")
+    }
+
+    /// When a push may release the hold, and when it must not. Getting `.held`
+    /// wrong in either direction is the whole entry: too eager and the mirror stops
+    /// protecting a change the Pi never took, too reluctant and the phone is held
+    /// forever — which is the #149 behaviour this replaces.
+    static func settingsPushOutcomeRule() {
+        for landed in [200, 201, 202, 204, 299] {
+            check(ApiSchemeHandler.pushOutcome(status: landed) == .landed, "\(landed) is not a landed push")
+        }
+        // A body the Pi will never take. Held instead, these pin the mirror for the
+        // life of the install and re-create exactly the bug this entry closes.
+        for refused in [400, 401, 403, 404, 409, 413, 422, 499] {
+            check(ApiSchemeHandler.pushOutcome(status: refused) == .refused, "\(refused) is not a refusal")
+        }
+        // Not about the body: timing, or the Pi being unwell. The patch stays queued
+        // and the mirror keeps winning. `nil` is "the Pi never answered at all",
+        // which is the normal case here — the Pi being off is why there is a queue.
+        for held: Int? in [nil, 0, 408, 429, 500, 502, 503, 504, 100, 301, 302] {
+            check(ApiSchemeHandler.pushOutcome(status: held) == .held,
+                  "\(held.map(String.init) ?? "no answer") did not hold the queued patch")
+        }
     }
 }

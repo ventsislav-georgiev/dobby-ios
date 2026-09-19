@@ -748,3 +748,199 @@ if "excludes:\n          - Shell" not in project:
 
 print("PASS: the Pi-less cold start is wired — makeWebView calls load(_:in:), only the offline branch synthesizes the shell, ContentView sets both halves, and Dobby/Shell ships as a folder reference (#151)")
 SHELLWIRINGPY
+
+# ---------------------------------------------------------------------------
+# #152 (M5 follow-up) — the iOS settings write-back: drain, then pull.
+#
+# ApiSchemeHandlerCheck pins the two pure rules as values: what the queue
+# accumulates (patches, never the seed), and what a push status means for the hold.
+# What no value-level check can reach is the wiring — that the drain runs at all,
+# that it runs BEFORE the #149 ahead-guard rather than after the `return`, that what
+# goes on the wire is the queued PATCH and never the mirrored document, and that the
+# hold is released only by a push the Pi actually answered. Exact single-line
+# constructs, and position where position is the meaning.
+# ---------------------------------------------------------------------------
+python3 - <<'SETTINGSWRITEBACKPY'
+import sys
+
+path = "Dobby/Web/ApiSchemeHandler.swift"
+with open(path) as f:
+    src = f.read()
+
+def fail(message, needle=None):
+    sys.stderr.write("FAIL: " + message + " (#152)\n")
+    if needle is not None:
+        sys.stderr.write("expected to find, verbatim:\n  " + needle + "\n")
+    sys.exit(1)
+
+def need(haystack, needle, message):
+    if needle not in haystack:
+        fail(message, needle)
+
+def body_of(signature):
+    if signature not in src:
+        fail("no such declaration any more: " + signature, signature)
+    start = src.index(signature)
+    return src[start:src.index("\n    }\n", start)]
+
+# 1. The POST leg keeps the PATCH BYTES. Without this line the merge is still stored
+#    and the mirror still marked ahead — every #149 check stays green — while there
+#    is nothing to push, so the hold never releases and the phone is exactly as
+#    permanently stuck as before. The argument is the raw `patch`, not `merged`:
+#    pushing the merged document would carry the seed's explicit nulls.
+need(src, "            SettingsMirrorStore.queuePatch(patch)",
+     "the settings POST no longer queues the patch bytes, so a write made with the Pi off "
+     "is never pushed and the ahead-of-server hold never releases")
+
+# ...and it comes AFTER markAheadOfServer() and before the acknowledgement. Queue
+# before mark leaves a window in which a drain can land, clear the queue and release
+# the hold, and then markAheadOfServer() re-takes a hold with nothing queued behind
+# it — held forever, the exact bug. queuePatch re-takes the hold itself, under the
+# queue's own lock, which is what makes this order the safe one.
+mark_idx = src.index("            SettingsMirrorStore.markAheadOfServer()")
+queue_idx = src.index("            SettingsMirrorStore.queuePatch(patch)")
+ack_idx = src.index('            respond(task, id, status: 200, contentType: "application/json",')
+if not mark_idx < queue_idx < ack_idx:
+    fail("the settings POST queues the patch before it marks the mirror ahead, or after it has "
+         "already acknowledged the write")
+
+# 2. The drain is RUN, and it runs before the guard that returns. Below the guard it
+#    is unreachable code in the only state it exists for, and nothing else in this
+#    suite executes refreshSettingsInBackground.
+refresh = body_of("private func refreshSettingsInBackground() {")
+need(refresh, "        drainPendingSettings()",
+     "refreshSettingsInBackground no longer drains the queued patch, so the #149 hold is "
+     "still set once and never cleared")
+guard_line = "if SettingsMirrorStore.isAheadOfServer { return }"
+if refresh.index("        drainPendingSettings()") > refresh.index(guard_line):
+    fail("the drain sits after the ahead-of-server guard, which returns — so it never runs")
+
+# 3. The drain's own body. Both halves: the patch is read from the QUEUE, and the
+#    legacy hold with nothing behind it is released rather than held forever (every
+#    phone already running the #149 build is in that state after upgrading).
+drain = body_of("private func drainPendingSettings() {")
+for needle, message in [
+    ("        guard SettingsMirrorStore.isAheadOfServer else { return }",
+     "the drain no longer starts from the hold, so it pushes on every settings GET"),
+    ("        guard let pending = SettingsMirrorStore.pendingPatch() else {",
+     "the drain no longer takes its bytes from the queue"),
+    ("            SettingsMirrorStore.releaseHold()",
+     "a hold with nothing queued behind it is no longer released, so a phone upgrading from "
+     "the #149 build stays permanently stuck"),
+    ("            switch Self.pushSettings(pending, to: self.server) {",
+     "the drain no longer pushes the queued patch to the Pi"),
+    ("            case .landed, .refused:", "the drain no longer distinguishes a push that ended the hold"),
+    ("                SettingsMirrorStore.clearPending(ifStill: pending)",
+     "the drain no longer releases the hold against the exact bytes it pushed"),
+    ("            case .held:", "the drain no longer has a branch that keeps the patch queued"),
+    ("        if drainInFlight { refreshing.unlock(); return }",
+     "the drain lost its single-flight guard, so a boot that reads settings twice POSTs the "
+     "user's secrets twice"),
+]:
+    need(drain, needle, message)
+
+# THE trap, as an absence. Pushing the mirrored document in the queue's place is the
+# naive fix that looks right and clears live values on the Pi: POST /api/settings
+# applies preferredSubtitleLanguage and preferredAudioLanguage by body PRESENCE
+# (SettingsRoutes.swift:86-90), so the seed's explicit nulls would blank both for a
+# device that never touched either.
+push = body_of("private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {")
+for scope, label in [(drain, "the drain"), (push, "the push")]:
+    for forbidden in ["SettingsMirrorStore.load()", "mergedSettings", "seedSettingsJson", "settingsSeed"]:
+        if forbidden in scope:
+            fail(label + " reaches for the mirrored document (" + forbidden + "); only the queued "
+                 "patch may be pushed, or the Pi's live language values are cleared by a stale "
+                 "mirror's nulls")
+
+# 4. The push sends the patch as the body, with the method the Pi's route takes.
+for needle, message in [
+    ('        request.httpMethod = "POST"', "the push no longer uses the method POST /api/settings takes"),
+    ("        request.httpBody = patch", "the push no longer sends the queued patch as its body"),
+    ("        return pushOutcome(status: http?.statusCode)",
+     "the push no longer routes its status through the pinned outcome rule"),
+]:
+    need(push, needle, message)
+
+# 5. Position inside the drain: the clear is INSIDE the landed/refused case and after
+#    the push. Hoisted above the switch — or added to the .held branch — it releases
+#    the hold for a change the Pi never took, which loses the user's key. That mutant
+#    passes every `need` above.
+push_at = drain.index("            switch Self.pushSettings(pending, to: self.server) {")
+landed_at = drain.index("            case .landed, .refused:")
+clear_at = drain.index("                SettingsMirrorStore.clearPending(ifStill: pending)")
+held_at = drain.index("            case .held:")
+if not push_at < landed_at < clear_at < held_at:
+    fail("the queue is cleared outside the landed/refused case, or before the push — the hold "
+         "must only be released by a push the Pi actually answered")
+if drain.count("SettingsMirrorStore.clearPending(") != 1:
+    fail("there is more than one path that releases the hold in the drain")
+
+# 6. clearPending is a compare-and-delete, in that order. The compare is what stops a
+#    save that landed mid-push from being thrown away with the confirmation of the
+#    older one — that mutant loses the user's latest change AND releases the hold in
+#    the same step. Clearing the bit before the delete leaves the mirror unprotected
+#    with the patch still queued.
+clear = body_of("static func clearPending(ifStill pushed: Data) {")
+for needle, message in [
+    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
+     "clearPending no longer takes the queue lock, so it can interleave with a page write"),
+    ("        guard read(pendingQuery) == pushed else { return }",
+     "clearPending no longer checks that what is queued is still what was pushed"),
+    ("        SecItemDelete(pendingQuery as CFDictionary)", "clearPending no longer removes the queued patch"),
+    ("        UserDefaults.standard.set(false, forKey: aheadKey)", "clearPending no longer releases the hold"),
+]:
+    need(clear, needle, message)
+if not (clear.index("pendingLock.lock()")
+        < clear.index("guard read(pendingQuery) == pushed")
+        < clear.index("SecItemDelete(pendingQuery")
+        < clear.index("UserDefaults.standard.set(false, forKey: aheadKey)")):
+    fail("clearPending releases the hold before it has checked the queued bytes and removed them")
+
+# 7. queuePatch accumulates through mergedPatch, not mergedSettings. The helper is
+#    pinned as values in ApiSchemeHandlerCheck; this is its call site, and swapping
+#    it for the seeded merge is green everywhere else while it queues nine keys whose
+#    nulls clear the Pi's two language fields.
+queue_fn = body_of("static func queuePatch(_ patch: Data) {")
+for needle, message in [
+    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
+     "queuePatch no longer takes the queue lock, so a drain can clear a patch mid-write"),
+    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return }",
+     "queuePatch no longer accumulates through mergedPatch — the seeded merge would queue nine "
+     "keys and clear the Pi's language fields, and replacing instead of accumulating would drop "
+     "an earlier Pi-less save"),
+    ("        write(pendingQuery, accumulated)", "queuePatch no longer stores the accumulated patch"),
+    ("        UserDefaults.standard.set(true, forKey: aheadKey)",
+     "queuePatch no longer re-takes the hold under the lock, so a drain landing in the sliver "
+     "after markAheadOfServer() leaves a queued patch with the mirror unprotected"),
+]:
+    need(queue_fn, needle, message)
+if queue_fn.index("write(pendingQuery, accumulated)") > queue_fn.index("UserDefaults.standard.set(true"):
+    fail("queuePatch takes the hold before the patch is actually stored")
+
+# 8. releaseHold re-checks under the lock. Without it, a patch queued between the
+#    drain's look and this call is abandoned with the hold.
+release = body_of("static func releaseHold() {")
+need(release, "        guard read(pendingQuery) == nil else { return }",
+     "releaseHold no longer re-checks the queue under the lock, so it can release a hold that "
+     "a patch queued meanwhile still needs")
+
+# 9. The queued patch is a settings body: it carries every secret the user just typed,
+#    so it lives in the Keychain beside the mirror, never in a plist a backup hands
+#    over in the clear. The only UserDefaults line allowed near the patch is the bit.
+need(src, '    private static let pendingAccount = "api/settings.pending"',
+     "the queue is no longer its own Keychain item beside the mirror")
+need(src, "    private static var pendingQuery: [String: Any] { query(pendingAccount) }",
+     "the queue's Keychain query no longer uses its own account, so it would collide with the mirror")
+for scope, label in [(queue_fn, "queuePatch"), (clear, "clearPending"),
+                     (body_of("static func pendingPatch() -> Data? {"), "pendingPatch")]:
+    for line in scope.splitlines():
+        if "UserDefaults" in line and "aheadKey" not in line:
+            fail(label + " puts something other than the hold bit in UserDefaults; the queued patch "
+                 "carries secrets and belongs in the Keychain")
+
+need(src, "    private var drainInFlight = false",
+     "the drain lost its own single-flight flag")
+
+print("PASS: the iOS settings write-back drains before it pulls, pushes only the queued patch, "
+      "and releases the hold only against the exact bytes a push landed (#152)")
+SETTINGSWRITEBACKPY

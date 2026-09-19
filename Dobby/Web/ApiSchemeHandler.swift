@@ -61,6 +61,14 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     private let refreshing = NSLock()
     private var refreshInFlight = false
 
+    /// #152: the same single-flight rule for the write-back push. A boot that reads
+    /// settings twice must not POST the user's secrets twice either. Its own flag
+    /// rather than `refreshInFlight`, because the drain runs BEFORE the ahead guard
+    /// and the pull runs only after it — the two are never in flight for the same
+    /// reason, so sharing one flag would make a running drain silently skip a
+    /// legitimate pull.
+    private var drainInFlight = false
+
     init(server: URL) {
         self.server = server
         self.serverOrigin = Self.normalizedOrigin(server.absoluteString)
@@ -208,6 +216,14 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             }
             SettingsMirrorStore.save(merged)
             SettingsMirrorStore.markAheadOfServer()
+            // #152: the patch bytes, kept so the Pi can be told what changed once it
+            // answers. The merged document above cannot stand in for them — the Pi
+            // applies the two language keys by body presence, so a stale mirror's
+            // explicit nulls would clear live values (see `mergedPatch`). After
+            // `markAheadOfServer()` on purpose: a drain that lands and releases the
+            // hold in this sliver is one that pushed an OLDER patch, and this call
+            // re-takes the hold under the queue's own lock.
+            SettingsMirrorStore.queuePatch(patch)
             status = 200
             length = 2
             respond(task, id, status: 200, contentType: "application/json",
@@ -318,10 +334,35 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// the key stays present, which is how "cleared on this device" survives a read
     /// that distinguishes null from absent.
     static func mergedSettings(base: Data?, patch: Data) -> Data? {
+        shallowMerge(onto: settingsSeed, base: base, patch: patch)
+    }
+
+    /// The write-back queue's own accumulation (#152), and deliberately **not**
+    /// `mergedSettings`: same shallow rule, but it starts from `[:]` rather than
+    /// `settingsSeed`, and that one difference is the whole safety argument.
+    ///
+    /// `POST /api/settings` on the Pi is not symmetric across its keys. The seven
+    /// secrets are each assigned inside an `if let sanitizedSecret(...)`
+    /// (`SettingsRoutes.swift:63-76`), so a `null` for one of those no-ops — but
+    /// `preferredSubtitleLanguage` and `preferredAudioLanguage` are gated on
+    /// `rawObject?.keys.contains(...)`, body *presence* (`:86-90`), and
+    /// `sanitizedLanguage(nil)` is nil, so a body carrying either key as an
+    /// explicit null **clears** the Pi's value for it. A queued body built on the
+    /// seed would therefore wipe both language fields off a Pi for a device that
+    /// has never touched them. Only keys this device actually wrote are ever
+    /// pushed, which keeps the push purely additive.
+    ///
+    /// A `null` the user themselves put in a patch is kept: that is a clear made
+    /// here, and it is meant to reach the Pi as a clear.
+    static func mergedPatch(pending: Data?, patch: Data) -> Data? {
+        shallowMerge(onto: [:], base: pending, patch: patch)
+    }
+
+    private static func shallowMerge(onto start: [String: Any], base: Data?, patch: Data) -> Data? {
         guard let patchObject = (try? JSONSerialization.jsonObject(with: patch)) as? [String: Any] else {
             return nil
         }
-        var document = settingsSeed
+        var document = start
         if let base, !base.isEmpty,
            let existing = (try? JSONSerialization.jsonObject(with: base)) as? [String: Any] {
             for (key, value) in existing { document[key] = value }
@@ -338,18 +379,18 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         // actually about — Pi off, key saved on the phone, Pi comes back — loses
         // the key on the next GET.
         //
-        // ponytail: this is only the "mirror wins" half. Android's other half —
-        // queue the patch, push it to the Pi, and let the Pi win again the moment
-        // it lands — is `MirrorWriteBack` (dobby-android, #078) and has no iOS
-        // counterpart yet, so the flag is set and never cleared: once this iPhone
-        // has saved a setting with the Pi off, its settings document stops
-        // auto-refreshing from the Pi. Degraded and honest, and strictly better
-        // than the alternative, which is losing the user's key. Upgrade path: an
-        // iOS write-back that stores the patch bytes beside the mirror and drains
-        // them here before pulling, at which point this guard becomes "drain, then
-        // pull" and clears itself. Deliberately not built in #149 — the whole
-        // document cannot be pushed in a queue's place, because the Pi applies
-        // keys by presence and a stale mirror's `null`s would clear live values.
+        // #152 made it "drain, then pull". #149 landed only the "mirror wins"
+        // half: the bit below was set at write time and nothing could clear it, so
+        // one save made with the Pi off stopped this phone auto-refreshing from the
+        // Pi for the life of the install — a change made on the Pi, on the Shield
+        // or in a browser never reached it again. The drain is what releases it.
+        //
+        // The push runs behind this call, so the guard is still true on the way
+        // past and THIS refresh is still skipped; the next mirror-served GET finds
+        // the hold released and pulls. That is the same convergence step as
+        // Android's `dirty` flag, which also only makes the *next* read go to the
+        // Pi rather than re-reading inside the push.
+        drainPendingSettings()
         if SettingsMirrorStore.isAheadOfServer { return }
         refreshing.lock()
         if refreshInFlight { refreshing.unlock(); return }
@@ -361,6 +402,92 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             if let fresh = Self.fetchSettings(from: self.server) { SettingsMirrorStore.save(fresh) }
             self.refreshing.lock(); self.refreshInFlight = false; self.refreshing.unlock()
         }
+    }
+
+    /// The half #149 did not build: push what this device wrote while the Pi was
+    /// unreachable, and release the hold the moment the Pi takes it.
+    ///
+    /// **Only the queued patch bytes are ever sent.** The mirrored *document*
+    /// cannot stand in for them at any point — `POST /api/settings` applies
+    /// `preferredSubtitleLanguage` and `preferredAudioLanguage` by body presence
+    /// (`SettingsRoutes.swift:86-90`), so a stale mirror's explicit nulls would
+    /// clear both on the Pi for a device that never touched them. That is the
+    /// whole reason a queue exists here rather than a re-POST of what is stored.
+    ///
+    /// Reachability is an answer from the Pi, never a probe of our own — the same
+    /// rule as Android's `drain()`. This runs off a mirror-served GET, which the
+    /// page makes at every boot and after every save, so a phone that has been
+    /// holding a patch pushes it on the first page load the Pi answers.
+    private func drainPendingSettings() {
+        guard SettingsMirrorStore.isAheadOfServer else { return }
+        guard let pending = SettingsMirrorStore.pendingPatch() else {
+            // Held with nothing to push. Every phone already running the #149 build
+            // is in exactly this state — the bit was set at write time and there was
+            // no queue behind it — and so is the sliver between `markAheadOfServer()`
+            // and `queuePatch(_:)` in the POST leg. Nothing to send and nothing to
+            // protect, so let the Pi win again rather than hold forever.
+            SettingsMirrorStore.releaseHold()
+            return
+        }
+        refreshing.lock()
+        if drainInFlight { refreshing.unlock(); return }
+        drainInFlight = true
+        refreshing.unlock()
+
+        queue.async { [weak self] in
+            guard let self else { return }
+            switch Self.pushSettings(pending, to: self.server) {
+            case .landed, .refused:
+                // Landed: the Pi applied the patch to its whole document, which is
+                // more than was sent, so the Pi is now the fresher of the two and
+                // the next GET's refresh goes and takes that body.
+                //
+                // Refused shares the branch on purpose. A 4xx that is not 408 or 429
+                // is not "cannot reach the Pi" but "the Pi will never take this
+                // body", and no number of retries changes that; holding it would pin
+                // the mirror for the life of the install, which is exactly the
+                // permanent degradation this entry exists to close. The change is
+                // already lost — what is left is to stop holding the mirror hostage
+                // to it. Android drops a 4xx and marks the path dirty for the same
+                // reason; releasing the hold IS "ask the Pi" on this side.
+                SettingsMirrorStore.clearPending(ifStill: pending)
+            case .held:
+                // No answer, a 5xx, or a 408/429. The patch stays queued, the mirror
+                // stays ahead and keeps answering, and the next mirror-served GET
+                // runs this again. The queue is in the Keychain, so it also survives
+                // the app being killed.
+                break
+            }
+            self.refreshing.lock(); self.drainInFlight = false; self.refreshing.unlock()
+        }
+    }
+
+    enum PushOutcome { case landed, refused, held }
+
+    /// What a push attempt means for the queue, as a pure rule so the decision is
+    /// checkable without a socket.
+    ///
+    /// `nil` is "the Pi never answered". 408 and 429 are the two 4xx that are about
+    /// timing rather than about the body, so they hold like a 5xx does instead of
+    /// throwing the user's change away.
+    static func pushOutcome(status: Int?) -> PushOutcome {
+        guard let status else { return .held }
+        if (200...299).contains(status) { return .landed }
+        if (400...499).contains(status) && status != 408 && status != 429 { return .refused }
+        return .held
+    }
+
+    /// Blocking on purpose: this runs on `queue`, never on the WebView's thread.
+    /// The queued patch bytes, with the method and content type the page would have
+    /// sent, to the Pi's own settings route.
+    private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {
+        var request = URLRequest(url: server.appendingPathComponent("api/settings"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = patch
+        request.timeoutInterval = 8
+        let (_, http) = Transport.sendSync(request)
+        return pushOutcome(status: http?.statusCode)
     }
 
     /// Blocking on purpose: this runs on `queue`, never on the WebView's thread.
@@ -1043,33 +1170,46 @@ enum SettingsMirrorStore {
     private static let service = "eu.illegible.dobbyios.api-mirror"
     private static let account = "api/settings"
 
-    private static var baseQuery: [String: Any] {
+    /// #152: the queued patch, in a **second Keychain item** beside the mirror and
+    /// not in `UserDefaults`. A patch IS a settings body — it is the secret the
+    /// user just typed — so it belongs exactly where the mirror is, and for the
+    /// same #045 reason: not in a plist an iTunes backup hands over in the clear.
+    private static let pendingAccount = "api/settings.pending"
+
+    private static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecAttrAccount as String: account]
     }
 
-    static func load() -> Data? {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
+    private static var baseQuery: [String: Any] { query(account) }
+    private static var pendingQuery: [String: Any] { query(pendingAccount) }
+
+    private static func read(_ base: [String: Any]) -> Data? {
+        var q = base
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess else { return nil }
         return item as? Data
     }
 
-    static func save(_ body: Data) {
+    private static func write(_ base: [String: Any], _ body: Data) {
         guard !body.isEmpty else { return }
         let attributes: [String: Any] = [
             kSecValueData as String: body,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        if SecItemUpdate(baseQuery as CFDictionary, attributes as CFDictionary) == errSecSuccess { return }
-        var insert = baseQuery
+        if SecItemUpdate(base as CFDictionary, attributes as CFDictionary) == errSecSuccess { return }
+        var insert = base
         insert.merge(attributes) { _, new in new }
-        SecItemDelete(baseQuery as CFDictionary)
+        SecItemDelete(base as CFDictionary)
         SecItemAdd(insert as CFDictionary, nil)
     }
+
+    static func load() -> Data? { read(baseQuery) }
+
+    static func save(_ body: Data) { write(baseQuery, body) }
 
     /// Whether this device holds a settings change the Pi has never seen (#149).
     ///
@@ -1083,6 +1223,67 @@ enum SettingsMirrorStore {
     static var isAheadOfServer: Bool { UserDefaults.standard.bool(forKey: aheadKey) }
 
     static func markAheadOfServer() { UserDefaults.standard.set(true, forKey: aheadKey) }
+
+    // MARK: - #152: the write-back queue
+    //
+    // One pending patch, not Android's per-path queue. `MirrorWriteBack` keeps one
+    // line per path in a `<path> <METHOD> <body>` format, with a guard refusing a
+    // path carrying a space or a newline, because it has four mirrored paths
+    // reached over a JS bridge. iOS has exactly one write path — `dobby-api://settings`
+    // — so there is no path to delimit, no line format, and no per-path push set.
+
+    /// One lock over the whole queue. `queuePatch` read-merge-writes it from the
+    /// WebView's thread while `clearPending(ifStill:)` compares-and-deletes it from
+    /// the handler's own queue, and the two must never interleave: a clear landing
+    /// between a read and its write drops the newer patch AND releases the hold, so
+    /// the user's change is pushed nowhere and the mirror stops protecting it.
+    ///
+    /// ponytail: one lock over one item, contended by a page write and one push
+    /// thread. Per-item locks if a second mirrored write path ever arrives on iOS.
+    private static let pendingLock = NSLock()
+
+    /// Take a patch into the queue, accumulated over whatever is already there —
+    /// two saves made across two Pi-less sessions must both reach the Pi, and the
+    /// later value of a key the user set twice is the one they meant.
+    ///
+    /// The hold is re-taken here, under the lock, so a drain that landed and
+    /// released it between `markAheadOfServer()` and this call cannot leave a
+    /// queued patch with nothing holding the mirror for it.
+    static func queuePatch(_ patch: Data) {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return }
+        write(pendingQuery, accumulated)
+        UserDefaults.standard.set(true, forKey: aheadKey)
+    }
+
+    static func pendingPatch() -> Data? {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        return read(pendingQuery)
+    }
+
+    /// Drop the queued patch and release the hold — but only while what is queued
+    /// is still the exact bytes that were pushed.
+    ///
+    /// A save that landed while the push was in flight left a NEWER accumulated
+    /// patch under the same item. Clearing that with the confirmation of the older
+    /// one would lose the user's latest change and release the hold in the same
+    /// step, which is the worst of both: the mirror stops winning and the Pi never
+    /// heard the change. Android's `dequeueIf` is the same compare-and-remove.
+    static func clearPending(ifStill pushed: Data) {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        guard read(pendingQuery) == pushed else { return }
+        SecItemDelete(pendingQuery as CFDictionary)
+        UserDefaults.standard.set(false, forKey: aheadKey)
+    }
+
+    /// The hold with nothing behind it, released — a phone upgrading from the #149
+    /// build, whose bit was set before a queue existed. Re-checked under the lock,
+    /// so a patch queued since the caller looked is never thrown away.
+    static func releaseHold() {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        guard read(pendingQuery) == nil else { return }
+        UserDefaults.standard.set(false, forKey: aheadKey)
+    }
 
     static func imdbAuthToken() -> String? {
         imdbAuthToken(from: load())
