@@ -49,8 +49,17 @@ fi
 # Xcode stages each slice into BUILT_PRODUCTS_DIR via ProcessXCFramework (cached
 # from earlier builds, so it may be stale-shallow). Deepen those staged copies too,
 # since the Embed Frameworks phase copies from here.
+# TARGET_BUILD_DIR/BUILT_PRODUCTS_DIR/CONFIGURATION_BUILD_DIR commonly resolve to
+# the same directory across both passes below — visit each real path once, so one
+# shallow framework doesn't get the "no binary" skip logged twice or three times.
+# seen is newline-bounded (starts and ends in a newline) so a real path that is an
+# exact prefix of another can't false-match the way a space-separated list would.
+seen=$'\n'
 for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
   [ -n "$dir" ] && [ -d "$dir" ] || continue
+  real="$(cd "$dir" && pwd -P)"
+  case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
+  seen="$seen$real"$'\n'
   for fw in "$dir"/*.framework; do
     [ -d "$fw" ] && deepen "$fw"
   done
@@ -61,17 +70,13 @@ done
 # that copy can run first, embedding a still-shallow framework straight from $SRC
 # above. Whichever way it lands, fix the copy actually inside the app bundle too,
 # since that's what Validate inspects.
-# TARGET_BUILD_DIR/BUILT_PRODUCTS_DIR/CONFIGURATION_BUILD_DIR commonly resolve to
-# the same directory — visit each real path once, so one shallow framework doesn't
-# get the "no binary" skip logged three times.
-seen=""
 for dir in "${TARGET_BUILD_DIR:-}" "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
   [ -n "$dir" ] && [ -n "${FRAMEWORKS_FOLDER_PATH:-}" ] || continue
   fdir="$dir/${FRAMEWORKS_FOLDER_PATH:-}"
   [ -d "$fdir" ] || continue
   real="$(cd "$fdir" && pwd -P)"
-  case " $seen " in *" $real "*) continue ;; esac
-  seen="$seen $real"
+  case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
+  seen="$seen$real"$'\n'
   for fw in "$fdir"/*.framework; do
     [ -d "$fw" ] && deepen "$fw"
   done
