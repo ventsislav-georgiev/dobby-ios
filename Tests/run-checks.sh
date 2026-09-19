@@ -328,5 +328,17 @@ if not (false_idx > seek_idx):
     sys.stderr.write("FAIL: controls.scrubbing = false is not set after the release seek (#129)\n")
     sys.exit(1)
 
+if "controls.scheduleHide()" not in view_src:
+    sys.stderr.write("FAIL: PlayerView Slider does not re-arm the idle timer after the scrub ends (#129)\n")
+    sys.exit(1)
+hide_idx = view_src.index("controls.scheduleHide()")
+if not (hide_idx > false_idx):
+    sys.stderr.write("FAIL: PlayerView Slider does not re-arm the idle timer after the scrub ends (#129)\n")
+    sys.exit(1)
+
+if "func hide() { guard !scrubbing else { return };" not in controls_src:
+    sys.stderr.write("FAIL: PlayerControls.hide() does not guard against scrubbing (#129)\n")
+    sys.exit(1)
+
 print("PASS: PlayerControls.scheduleHide() and the PlayerView Slider guard the OSD for the whole scrub (#129)")
 SCRUBBINGPY

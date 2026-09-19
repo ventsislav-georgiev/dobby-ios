@@ -149,7 +149,10 @@ final class PlayerControls: ObservableObject {
     func forceShow() { hideTask?.cancel(); visible = true }
 
     /// Dismiss the OSD (and any open menu) immediately — first tap on the video.
-    func hide() { hideTask?.cancel(); menu = nil; visible = false }
+    /// A tap landing outside the control bar during a drag would otherwise tear the Slider
+    /// out from under the finger, and because `scrubbing` is cleared only by the Slider's release branch,
+    /// a hide mid-drag could also strand the flag set for the life of the view.
+    func hide() { guard !scrubbing else { return }; hideTask?.cancel(); menu = nil; visible = false }
 
     // MARK: Toast (web showVideoOsd equivalent)
 
