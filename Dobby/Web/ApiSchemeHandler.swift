@@ -88,6 +88,49 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         lock.lock(); active.remove(id); lock.unlock()
     }
 
+    // MARK: - Making the lane reachable at all (#067, the Mac "Load failed")
+
+    /// `dobby-api:` is not one of WebKit's a-priori-trustworthy schemes, so from a
+    /// page served over https — which is every Tailscale address, and the only
+    /// address the Mac has — a `fetch('dobby-api://…')` is *blockable mixed
+    /// content*. WebKit refuses it before `webView(_:start:)` is ever called and
+    /// `fetch` rejects with the sanitised `TypeError: Load failed`, which is exactly
+    /// what the episode list rendered. Nothing about the response, the ACAO header
+    /// or the handler's own logic is involved: the request never leaves the page.
+    ///
+    /// Over http (the LAN address the iPhone uses) the document is not a secure
+    /// context, there is no mixed content, and the same call works — which is why
+    /// this only ever showed up on the Mac. Posters kept rendering because they go
+    /// straight to the https CDN (#060), and offline audio keeps working because
+    /// media elements are *optionally*-blockable and are let through.
+    ///
+    /// Telling WebKit the scheme is trustworthy is the fix, and this SPI is the only
+    /// thing that does it — `WKWebView` refuses to register a handler for https, so
+    /// the lane cannot be moved onto a scheme WebKit already trusts. It widens
+    /// nothing: the exact-origin ACAO gate below is what decides who may read the
+    /// settings and credential lanes, and it is untouched.
+    ///
+    /// ponytail: SPI, guarded by `responds(to:)` and returning whether it took.
+    /// `Tests/ApiSchemeWebViewCheck.swift` drives a real `WKWebView` from an https
+    /// document, so a macOS that drops this selector fails `run-checks.sh` rather
+    /// than shipping a silently dead lane. Upgrade path if it ever goes: move the
+    /// two paths onto the `WKScriptMessageHandlerWithReply` bridge, taking the
+    /// caller's origin from `WKFrameInfo.securityOrigin` instead of the header.
+    @discardableResult
+    static func registerAsSecureScheme(in configuration: WKWebViewConfiguration) -> Bool {
+        // `processPool` is deprecated as a configuration *knob* — there is one pool
+        // per process now — but the object is still there and is still what owns the
+        // scheme registry, which is why one registration covers every WebView.
+        let pool = configuration.processPool
+        let selector = NSSelectorFromString("_registerURLSchemeAsSecure:")
+        guard pool.responds(to: selector) else {
+            log.error("cannot mark \(scheme, privacy: .public) as a secure scheme; it is unreachable from an https page")
+            return false
+        }
+        _ = pool.perform(selector, with: scheme)
+        return true
+    }
+
     // MARK: - dobby-api://settings
 
     private func serveSettings(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,

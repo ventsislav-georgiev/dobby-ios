@@ -58,3 +58,14 @@ if above != "#if DEBUG" or below != "#endif":
 
 print("PASS: noServerSeamActive() call site is #if DEBUG-gated")
 PY
+
+# #067: the only check that puts the handler behind a real WKWebView on the real
+# server origin, which is where the Mac bug lived — `dobby-api:` refused as mixed
+# content from the https page, before any of the logic above ran. macOS only:
+# it needs AppKit and a host that can start a web content process.
+if [ "$(uname -s)" = "Darwin" ]; then
+  OUT4="$(mktemp -d)/api-scheme-webview-check"
+  xcrun swiftc -o "$OUT4" -framework WebKit -framework AppKit \
+    Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeWebViewCheck.swift
+  "$OUT4"
+fi

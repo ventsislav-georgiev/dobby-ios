@@ -56,6 +56,12 @@ struct WebContainer {
         // being off. `url` and not AppConfig.serverURL: the refresh belongs on whichever
         // address actually answered.
         config.setURLSchemeHandler(ApiSchemeHandler(server: url), forURLScheme: ApiSchemeHandler.scheme)
+        // Before the first WKWebView on this pool exists, so the web content process
+        // starts with the scheme already trusted. Over https (every Tailscale address,
+        // and the only one the Mac has) the page's dobby-api: fetches are otherwise
+        // blockable mixed content, refused before the handler is called — #067, see
+        // ApiSchemeHandler.registerAsSecureScheme.
+        ApiSchemeHandler.registerAsSecureScheme(in: config)
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = coordinator
