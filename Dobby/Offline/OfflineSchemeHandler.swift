@@ -148,16 +148,19 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
     /// (`url.path(percentEncoded: true)` with no `map`) and both positive cases below go
     /// red — `The%20Hobbit%20%232` stops naming a directory on disk.
     ///
-    /// But note WHICH decode is load-bearing. `url.path` already decodes once, so the
-    /// `removingPercentEncoding` in the `map` is a SECOND decode, and measured it has no
-    /// legitimate case that depends on it: removing only that call left both positive
-    /// cases GREEN and closed three of the traversal rows on its own. It is what turns
-    /// `%252f` into a separator, and it also mis-resolves any filename that genuinely
-    /// contains the literal text `%2f`. It is kept here only because #156's brief made
-    /// keeping it binding; dropping it is a follow-up, and containment below is what
-    /// actually closes the hole either way.
+    /// But note WHICH decode is load-bearing, because there used to be two. `url.path`
+    /// already decodes once; the `removingPercentEncoding` that used to sit in the `map`
+    /// was a SECOND decode, and it is now gone. The producer settles it: the only thing
+    /// that mints these URLs is `BridgeInjection.swift:60`,
+    ///
+    ///     return 'dobby-offline:///' + encodeURIComponent(id) + '/' + encodeURIComponent(name);
+    ///
+    /// which encodes exactly once, so one decode is exactly right and the second had no
+    /// caller that needed it. What it DID do was turn `%252f` into a separator, and
+    /// mis-resolve any name genuinely containing the literal text `%2F` — `a%252Fb` on the
+    /// wire is the file `a%2Fb`, and the second decode split it into `a/b`. Pinned below.
     func fileURL(for url: URL) -> URL? {
-        let parts = url.path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
+        let parts = url.path.split(separator: "/").map(String.init)
         guard !parts.contains("..") else { return nil }
         if url.host == BundledShell.host {
             guard let shellRoot, !parts.isEmpty else { return nil }
