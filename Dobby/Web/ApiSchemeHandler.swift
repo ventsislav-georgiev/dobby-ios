@@ -107,8 +107,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// Telling WebKit the scheme is trustworthy is the fix, and this SPI is the only
     /// thing that does it — `WKWebView` refuses to register a handler for https, so
     /// the lane cannot be moved onto a scheme WebKit already trusts. It widens
-    /// nothing: the exact-origin ACAO gate below is what decides who may read the
-    /// settings and credential lanes, and it is untouched.
+    /// *reachability* for non-CORS subresource types (classic `<script src>` etc.)
+    /// from an https document — those were blocked outright before this call. It
+    /// does not widen *read* access: the exact-origin ACAO gate below is what
+    /// decides who may read the settings and credential lanes, and it is untouched
+    /// (a JSON body is not a valid classic script, and the Mac is app-bound, per
+    /// WebContainer.isAppBound).
     ///
     /// ponytail: SPI, guarded by `responds(to:)` and returning whether it took.
     /// `Tests/ApiSchemeWebViewCheck.swift` drives a real `WKWebView` from an https
@@ -118,9 +122,14 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// caller's origin from `WKFrameInfo.securityOrigin` instead of the header.
     @discardableResult
     static func registerAsSecureScheme(in configuration: WKWebViewConfiguration) -> Bool {
-        // `processPool` is deprecated as a configuration *knob* — there is one pool
-        // per process now — but the object is still there and is still what owns the
-        // scheme registry, which is why one registration covers every WebView.
+        // `processPool` is deprecated as a configuration *knob* — two fresh
+        // configurations hand back different WKProcessPool objects (measured), so
+        // pool identity is irrelevant. The registration is process-global: any pool
+        // object is just a receiver for the selector, which is why one call from any
+        // makeWebView covers every WebView and repeating it per makeWebView is
+        // idempotent. `WKProcessPool()` carries the same deprecation, so there is no
+        // warning-free spelling — this is the honest one, since the argument is a
+        // configuration.
         let pool = configuration.processPool
         let selector = NSSelectorFromString("_registerURLSchemeAsSecure:")
         guard pool.responds(to: selector) else {

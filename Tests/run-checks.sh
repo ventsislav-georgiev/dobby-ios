@@ -65,7 +65,56 @@ PY
 # it needs AppKit and a host that can start a web content process.
 if [ "$(uname -s)" = "Darwin" ]; then
   OUT4="$(mktemp -d)/api-scheme-webview-check"
+  # Embed a minimal Info.plist carrying the same WKAppBoundDomains entry the app
+  # ships (Dobby/Info.plist), so isAppBound(server) in the check evaluates true
+  # exactly as it does for the Mac app — App-Bound Domains is the one thing that
+  # changes what WebKit permits, and a check that ran with it off could be green
+  # while the app stayed broken (reviewer Mutant F).
+  PLIST4="$(mktemp -d)/webview-check-info.plist"
+  cat > "$PLIST4" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>WKAppBoundDomains</key>
+	<array>
+		<string>solarflare-tarpon.ts.net</string>
+	</array>
+</dict>
+</plist>
+PLIST
   xcrun swiftc -o "$OUT4" -framework WebKit -framework AppKit \
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST4" \
     Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeWebViewCheck.swift
   "$OUT4"
 fi
+
+# #067 follow-up: ApiSchemeWebViewCheck proves the primitive works, but it builds its
+# own WKWebViewConfiguration — nothing above observes whether the app itself ever
+# calls registerAsSecureScheme. Deleting the call from WebContainer.makeWebView left
+# the whole suite green (reviewer's Mutant B). Same shape as the #if DEBUG check
+# above: a textual check over the source is the only tool that can catch the call
+# site being dropped.
+python3 - <<'PY'
+import sys
+
+path = "Dobby/Web/WebContainer.swift"
+with open(path) as f:
+    lines = f.readlines()
+
+calls = [i for i, l in enumerate(lines)
+         if "registerAsSecureScheme(in:" in l and "//" not in l.split("registerAsSecureScheme")[0]]
+webviews = [i for i, l in enumerate(lines) if "WKWebView(frame:" in l]
+
+if len(calls) != 1:
+    sys.stderr.write(f"FAIL: expected exactly one non-comment call to registerAsSecureScheme(in:), found {len(calls)}\n")
+    sys.exit(1)
+if len(webviews) != 1:
+    sys.stderr.write(f"FAIL: expected exactly one WKWebView(frame: construction, found {len(webviews)}\n")
+    sys.exit(1)
+if calls[0] >= webviews[0]:
+    sys.stderr.write("FAIL: registerAsSecureScheme(in:) must be called before WKWebView(frame:\n")
+    sys.exit(1)
+
+print("PASS: WebContainer calls registerAsSecureScheme(in:) before constructing its WKWebView")
+PY

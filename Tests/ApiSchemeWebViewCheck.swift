@@ -52,6 +52,19 @@ enum ApiSchemeWebViewCheck {
         }
     }
 
+    /// Same predicate as WebContainer.isAppBound: true when `url`'s host is covered
+    /// by WKAppBoundDomains. Duplicated rather than shared because WebContainer.swift
+    /// isn't part of this check's compile unit (see run-checks.sh).
+    private static func isAppBound(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased(),
+              let domains = Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String]
+        else { return false }
+        return domains.contains { domain in
+            let d = domain.lowercased()
+            return host == d || host.hasSuffix("." + d)
+        }
+    }
+
     private static var failures = 0
 
     private static func check(_ condition: Bool, _ label: String) {
@@ -101,6 +114,12 @@ enum ApiSchemeWebViewCheck {
         // registered as secure before the first WKWebView on this pool exists.
         let config = WKWebViewConfiguration()
         config.applicationNameForUserAgent = AppConfig.userAgentSuffix
+        // Same predicate as WebContainer.isAppBound (duplicated here — WebContainer.swift
+        // pulls in SwiftUI/EnvironmentObject and isn't part of this check's compile unit).
+        // run-checks.sh links this binary with an embedded Info.plist carrying the same
+        // WKAppBoundDomains entry as the app, so this evaluates true here exactly as it
+        // does for the Mac app — reviewer Mutant F confirmed the fix holds with it on.
+        config.limitsNavigationsToAppBoundDomains = isAppBound(server)
         config.setURLSchemeHandler(handler, forURLScheme: ApiSchemeHandler.scheme)
         let registered = ApiSchemeHandler.registerAsSecureScheme(in: config)
         check(registered, "WebKit still accepts \(ApiSchemeHandler.scheme) being marked a secure scheme")
@@ -123,6 +142,7 @@ enum ApiSchemeWebViewCheck {
         let secretLane = fetchResult(webView, "\(ApiSchemeHandler.scheme)://proxy?target=imdb-graphql")
         print("secret lane:  \(secretLane)")
 
+        // display-only: the assertions are the three check(...) calls below, not this loop.
         for task in handler.started {
             let carried = task.origin ?? "<no Origin header>"
             let gate = ApiSchemeHandler.acao(origin: task.origin,
