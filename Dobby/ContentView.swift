@@ -5,6 +5,8 @@ struct ContentView: View {
     /// Origin the web view is on. Resolved from `ServerAddresses` at launch so LAN
     /// and Tailscale both work without anyone switching a setting.
     @State private var serverURL: URL?
+    /// #151: this load is the bundled shell under `serverURL`, not the Pi at it.
+    @State private var offlineShell = false
     @State private var resolving = true
     @State private var editingAddresses = false
     #if os(iOS)
@@ -14,16 +16,14 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             if let serverURL {
-                WebContainer(url: serverURL)
+                WebContainer(url: serverURL, offlineShell: offlineShell)
                     .ignoresSafeArea()
                     .background(Color.black)
             } else {
                 ServerUnreachableView(
                     resolving: resolving,
                     edit: { editingAddresses = true },
-                    // ponytail: load the last-good origin anyway — nothing answers, but the
-                    // service worker's cache is keyed to that origin, so cached content plays.
-                    offline: { serverURL = ServerAddresses.candidates().first }
+                    offline: continueOffline
                 )
             }
 
@@ -60,15 +60,31 @@ struct ContentView: View {
         #endif
     }
 
+    /// "Continue offline", and the headless seam that takes the same action. One
+    /// function because it is two writes that must happen together: the origin the app
+    /// comes up on, and that this is the bundled shell coming up on it rather than the
+    /// Pi. Setting only the first is the pre-#151 behaviour — right for a box that has
+    /// paired (the service worker's cache is keyed to that origin) and a blank page for
+    /// one that never has, which is the case the shell exists for.
+    ///
+    /// `candidates()` is the app's existing memory of where the Pi is — last known-good,
+    /// then the configured list, then the baked-in default — so this works on a fresh
+    /// install that has never seen the Pi. Same choice as Android's `loadBundledShell()`.
+    private func continueOffline() {
+        serverURL = ServerAddresses.candidates().first
+        offlineShell = true
+    }
+
     private func resolve() async {
         resolving = true
+        offlineShell = false
         serverURL = await ServerAddresses.resolve()
         resolving = false
         #if DEBUG
         // #116 device round 3 test seam: DOBBY_AUTO_OFFLINE=1 performs the same
         // action as tapping "Continue offline" below, for a headless run.
         if serverURL == nil, ServerAddresses.autoOfflineSeamActive() {
-            serverURL = ServerAddresses.candidates().first
+            continueOffline()
         }
         #endif
         #if os(iOS)

@@ -19,3 +19,9 @@ build/
 build-ios/
 build-mac/
 .omc/
+
+# Build-time copy of the PWA app shell (scripts/copy-app-shell.sh, #151). Generated
+# from the sibling ../dobby checkout on every build; only the folder itself is tracked,
+# so xcodegen's folder reference has something to point at on a fresh clone.
+Dobby/Shell/*
+!Dobby/Shell/.gitkeep

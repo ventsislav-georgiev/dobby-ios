@@ -24,7 +24,18 @@ targets:
     type: application
     supportedDestinations: [macOS, iOS]
     sources:
-      - Dobby
+      - path: Dobby
+        # Shell/ is a build-time copy (scripts/copy-app-shell.sh), not source.
+        excludes:
+          - Shell
+      # #151, the bundled app shell for a Pi-less cold start. A folder REFERENCE
+      # (`type: folder`), not a group: Xcode's resource copy flattens a group, and the
+      # shell's `js/…` and `playsvideo/assets/…` paths have to survive into the bundle —
+      # `dobby-offline://shell/js/01-state-init.js` resolves against them verbatim
+      # (OfflineSchemeHandler.fileURL). A group would put every file at the bundle root
+      # and the shell would 404 its own scripts.
+      - path: Dobby/Shell
+        type: folder
       - Shared
     dependencies:
       - package: KSPlayer
@@ -48,6 +59,11 @@ targets:
         SWIFT_VERSION: "5.0"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
     preBuildScripts:
+      # Refreshes Dobby/Shell from the sibling ../dobby checkout on every build, so the
+      # bundled shell cannot go stale against the PWA it is a copy of. Android hangs the
+      # same task off `preBuild` for the same reason (app/build.gradle:294).
+      - path: scripts/copy-app-shell.sh
+        name: Copy the PWA app shell
       - path: scripts/fix-bundle-ids.sh
         name: Fix framework bundle ids
       - path: scripts/deepen-macos-frameworks.sh

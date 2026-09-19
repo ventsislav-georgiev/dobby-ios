@@ -5,6 +5,9 @@ import WebKit
 /// representable conformance differs.
 struct WebContainer {
     let url: URL
+    /// #151: no address answered, so the app comes up out of its own bundle instead of
+    /// off the Pi — the analogue of Android's `loadBundledShell()`. See `load(_:in:)`.
+    var offlineShell = false
     @EnvironmentObject var playback: PlaybackCoordinator
     @EnvironmentObject var offline: OfflineStore
 
@@ -63,6 +66,12 @@ struct WebContainer {
         // dobby-api: fetches are otherwise blockable mixed content, refused before the
         // handler is called — #067, see ApiSchemeHandler.registerAsSecureScheme.
         ApiSchemeHandler.registerAsSecureScheme(in: config)
+        // #151, same SPI and the same reason, for the other scheme an https document has to
+        // address: the bundled shell's `<script src="dobby-offline://shell/js/…">` tags are
+        // blockable mixed content until this lands, and a blocked classic script is a blank
+        // page with nothing logged. Harmless when the Pi is up — nothing addresses the
+        // scheme until `offlineShell` puts a simulated document on the screen.
+        ApiSchemeHandler.registerAsSecureScheme(in: config, scheme: OfflineSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = coordinator
@@ -78,8 +87,32 @@ struct WebContainer {
         // (see AppConfig.startURL) so a series detail page can be reached headlessly.
         loadURL = AppConfig.startURL(origin: url)
         #endif
-        webView.load(URLRequest(url: loadURL))
+        load(loadURL, in: webView)
         return webView
+    }
+
+    /// Pi-backed: an ordinary request to the origin that answered. Pi-less: the bundled
+    /// shell, *synthesized under that same origin* by `loadSimulatedRequest`.
+    ///
+    /// The origin is the whole point and is why this is not `loadHTMLString` or a
+    /// `file://` load. #150 measured that the simulated document lands in the REAL
+    /// storage partition for that origin — `location.origin`, `document.baseURI` and
+    /// `isSecureContext` all report the Pi, and the localStorage/IndexedDB/Cache Storage
+    /// a previous *networked* load of the Pi wrote read back inside it. So progress,
+    /// bookmarks, the gallery cache and the service worker are the ones the app already
+    /// has, and no cross-origin migration is needed (§9 option (b) is off the table for
+    /// iOS because of this).
+    ///
+    /// No shell in this build → the ordinary load, which is exactly what "Continue
+    /// offline" did before #151 and still the right behaviour on a box that has paired:
+    /// nothing answers, but the service worker's cache is keyed to this origin.
+    /// Same three-outcome shape as Android's `loadBundledShell()` returning false.
+    private func load(_ loadURL: URL, in webView: WKWebView) {
+        guard offlineShell, let html = BundledShell.indexHTML() else {
+            webView.load(URLRequest(url: loadURL))
+            return
+        }
+        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)
     }
 }
 

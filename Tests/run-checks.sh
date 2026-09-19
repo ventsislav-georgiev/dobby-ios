@@ -273,6 +273,13 @@ fi
 # the whole suite green (reviewer's Mutant B). Same shape as the #if DEBUG check
 # above: a textual check over the source is the only tool that can catch the call
 # site being dropped.
+#
+# #151 added the SECOND call, for OfflineSchemeHandler.scheme, with exactly the same
+# property: BundledShellWebViewCheck builds its own configuration and marks the scheme
+# secure itself, so deleting the app's call leaves that check green while every
+# `<script src="dobby-offline://shell/...">` on the phone is refused as mixed content
+# and the Pi-less cold start is a blank page. Both calls are pinned, by scheme, and
+# both before the WKWebView.
 python3 - <<'PY'
 import sys
 
@@ -284,17 +291,29 @@ calls = [i for i, l in enumerate(lines)
          if "registerAsSecureScheme(in:" in l and "//" not in l.split("registerAsSecureScheme")[0]]
 webviews = [i for i, l in enumerate(lines) if "WKWebView(frame:" in l]
 
-if len(calls) != 1:
-    sys.stderr.write(f"FAIL: expected exactly one non-comment call to registerAsSecureScheme(in:), found {len(calls)}\n")
+if len(calls) != 2:
+    sys.stderr.write(f"FAIL: expected exactly two non-comment calls to registerAsSecureScheme(in:), found {len(calls)}\n")
     sys.exit(1)
 if len(webviews) != 1:
     sys.stderr.write(f"FAIL: expected exactly one WKWebView(frame: construction, found {len(webviews)}\n")
     sys.exit(1)
-if calls[0] >= webviews[0]:
-    sys.stderr.write("FAIL: registerAsSecureScheme(in:) must be called before WKWebView(frame:\n")
+for i in calls:
+    if i >= webviews[0]:
+        sys.stderr.write("FAIL: every registerAsSecureScheme(in:) call must come before WKWebView(frame:\n")
+        sys.exit(1)
+
+# The exact single-line constructs, argument order included. The default-argument call
+# is the dobby-api: one (#067); the scheme-carrying call is #151's. A mutant that keeps
+# two calls but points both at the same scheme loses one lane silently.
+api = "ApiSchemeHandler.registerAsSecureScheme(in: config)"
+offline = "ApiSchemeHandler.registerAsSecureScheme(in: config, scheme: OfflineSchemeHandler.scheme)"
+stripped = [lines[i].strip() for i in calls]
+if stripped != [api, offline]:
+    sys.stderr.write("FAIL: expected exactly these two calls, in this order:\n  " + api + "\n  " + offline
+                     + "\ngot:\n  " + "\n  ".join(stripped) + "\n")
     sys.exit(1)
 
-print("PASS: WebContainer calls registerAsSecureScheme(in:) before constructing its WKWebView")
+print("PASS: WebContainer marks both dobby-api: and dobby-offline: secure before constructing its WKWebView (#067, #151)")
 PY
 
 # #129: scheduleHide() re-armed the auto-hide timer on every isPlaying state change,
@@ -615,3 +634,117 @@ if "Text(timeLabel(total, matching: total))" not in src:
 
 print("PASS: PlayerView's elapsed-time label shares the total's field width so scrubbing past 1:00:00 cannot reflow the Slider (#128)")
 TIMELABELWIDTHPY
+
+# ---------------------------------------------------------------------------
+# #151 (M5-H) — the iOS Pi-less cold start: a bundled app shell, served under the
+# Pi's origin by loadSimulatedRequest, with its sub-resources on dobby-offline://shell.
+#
+# scripts/copy-app-shell.sh is run first, for two reasons: it is itself under test
+# (it parses sw.js's APP_SHELL literal, and a parser that silently produced a
+# half-empty shell would ship a blank page), and BundledShellCheck holds the rewrite
+# rule against the REAL index.html it copies rather than a fixture that can drift.
+# ---------------------------------------------------------------------------
+DOBBY_PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}"
+if [ -d "$DOBBY_PUBLIC_DIR" ]; then
+  DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
+
+  OUT7="$(mktemp -d)/bundled-shell-check"
+  xcrun swiftc -o "$OUT7" \
+    Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift Tests/BundledShellCheck.swift
+  "$OUT7" Dobby/Shell
+
+  # The measurement, not a proxy: a real WKWebView, a real dead app-bound origin, the
+  # shipped rewrite and the shipped handler. macOS only, same as ApiSchemeWebViewCheck —
+  # it needs AppKit and a host that can start a web content process. It reuses that
+  # check's embedded-Info.plist trick so App-Bound Domains is on exactly as in the app.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    OUT8="$(mktemp -d)/bundled-shell-webview-check"
+    xcrun swiftc -o "$OUT8" -framework WebKit -framework AppKit \
+      -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST4" \
+      Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift \
+      Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift \
+      Tests/BundledShellWebViewCheck.swift
+    "$OUT8"
+  fi
+else
+  echo "SKIP: no dobby checkout at $DOBBY_PUBLIC_DIR — BundledShellCheck and BundledShellWebViewCheck need the PWA's Public dir (#151)"
+fi
+
+# #151 wiring. Everything above runs the shell's pieces in isolation: the rewrite as a
+# pure function, the handler behind a WKWebView the CHECK configures. None of it observes
+# whether the app ever takes the offline branch — the exact "helper pinned, call site
+# not" shape this ledger keeps getting bitten by. Four things, each an exact single-line
+# construct, and position where position is the meaning.
+python3 - <<'SHELLWIRINGPY'
+import sys
+
+def read(path):
+    with open(path) as f:
+        return f.read()
+web = read("Dobby/Web/WebContainer.swift")
+content = read("Dobby/ContentView.swift")
+project = read("project.yml")
+
+def need(haystack, needle, why):
+    if needle not in haystack:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+# 1. makeWebView hands the load to the helper. Without this line the helper is dead code
+#    and every offline start is the pre-#151 plain load — green everywhere else.
+need(web, "        load(loadURL, in: webView)",
+     "WebContainer.makeWebView must route its load through load(_:in:)")
+
+# 2. Both branches of the helper, because the unpinned one is always the one that breaks
+#    something else. The guard is what keeps loadSimulatedRequest OFF the Pi-backed path
+#    (a mutant that drops `offlineShell,` synthesizes the shell even when the Pi answered,
+#    which is a working-looking app that never talks to the Pi), and the fallback is what
+#    a build with no bundled shell — every CI/TestFlight build today — still does.
+need(web, "        guard offlineShell, let html = BundledShell.indexHTML() else {",
+     "the simulated load must be guarded by BOTH offlineShell and a shell being present")
+need(web, "            webView.load(URLRequest(url: loadURL))",
+     "the no-shell / Pi-backed fallback must stay the ordinary load")
+need(web, "        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)",
+     "the offline branch must synthesize the shell under loadURL, not load a file: or data: URL")
+
+# 3. Position: the simulated load has to sit AFTER the guard's else-block, not before it.
+#    A mutant hoisting it above the guard passes every `need` above while hijacking the
+#    Pi-backed path, and nothing else in this suite runs WebContainer.
+guard_at = web.index("guard offlineShell, let html = BundledShell.indexHTML() else {")
+plain_at = web.index("webView.load(URLRequest(url: loadURL))")
+simulated_at = web.index("webView.loadSimulatedRequest(")
+if not guard_at < plain_at < simulated_at:
+    sys.stderr.write("FAIL: in WebContainer.load, the guard must come first, then the plain-load fallback, then the simulated load\n")
+    sys.exit(1)
+
+# 4. ContentView: the flag reaches WebContainer at all (argument order included), and
+#    "Continue offline" writes BOTH halves. Setting only serverURL is the pre-#151
+#    behaviour — right for a paired box, a blank page for the never-paired one the shell
+#    exists for — and no check above can see the difference.
+need(content, "WebContainer(url: serverURL, offlineShell: offlineShell)",
+     "ContentView must pass the offline-shell flag into WebContainer")
+need(content, "    private func continueOffline() {\n        serverURL = ServerAddresses.candidates().first\n        offlineShell = true\n    }",
+     "continueOffline() must set the origin AND the shell flag, in that order")
+need(content, "                    offline: continueOffline", "the Continue offline button must call continueOffline")
+need(content, "            continueOffline()", "the DOBBY_AUTO_OFFLINE seam must take the same action as the button")
+# ...and a successful resolve must clear it, or a retry after an offline start keeps
+# synthesizing the shell on a Pi that is now answering.
+need(content, "        resolving = true\n        offlineShell = false\n        serverURL = await ServerAddresses.resolve()",
+     "resolve() must clear offlineShell before probing, so a Pi that came back is used")
+
+# 5. project.yml: a folder REFERENCE. As a plain group Xcode's resource copy flattens
+#    the tree, every file lands at the bundle root, and `dobby-offline://shell/js/...`
+#    404s its own scripts — a blank page that builds clean.
+need(project, "      - path: Dobby/Shell\n        type: folder",
+     "Dobby/Shell must be a folder reference in project.yml, or the shell's paths are flattened")
+need(project, "      - path: scripts/copy-app-shell.sh",
+     "copy-app-shell.sh must run as a preBuildScript, or the bundled shell goes stale")
+if project.index("- path: scripts/copy-app-shell.sh") < project.index("preBuildScripts:"):
+    sys.stderr.write("FAIL: copy-app-shell.sh must be listed under preBuildScripts\n")
+    sys.exit(1)
+if "excludes:\n          - Shell" not in project:
+    sys.stderr.write("FAIL: Dobby/Shell must be excluded from the Dobby source glob, or it is added twice\n")
+    sys.exit(1)
+
+print("PASS: the Pi-less cold start is wired — makeWebView calls load(_:in:), only the offline branch synthesizes the shell, ContentView sets both halves, and Dobby/Shell ships as a folder reference (#151)")
+SHELLWIRINGPY
