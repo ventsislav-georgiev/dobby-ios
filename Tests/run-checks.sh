@@ -103,6 +103,30 @@ xcrun swiftc -o "$OUT5" \
   Dobby/Playback/ScrubState.swift Tests/ScrubStateCheck.swift
 "$OUT5"
 
+OUT6="$(mktemp -d)/offline-store-path-check"
+xcrun swiftc -o "$OUT6" \
+  Dobby/Offline/OfflinePathAnchor.swift Tests/OfflineStorePathCheck.swift
+"$OUT6"
+
+# #125 review: anchorOfflinePath is correct only because OfflineStore.root ends in
+# /Offline and the anchor splits on that same literal. Pin both ends so a reshaped
+# root or a changed split marker goes red instead of silently doubling a segment.
+python3 - <<'OFFLINEROOTPY'
+import sys
+
+store = open("Dobby/Offline/OfflineStore.swift").read()
+anchor = open("Dobby/Offline/OfflinePathAnchor.swift").read()
+
+if 'root = docs.appendingPathComponent("Offline", isDirectory: true)' not in store:
+    sys.stderr.write("FAIL: OfflineStore.root no longer ends in /Offline, the path anchor contract is broken (#125)\n")
+    sys.exit(1)
+if 'stored.range(of: "/Offline/")' not in anchor:
+    sys.stderr.write("FAIL: anchorOfflinePath no longer splits on the /Offline/ literal that OfflineStore.root ends in (#125)\n")
+    sys.exit(1)
+
+print("PASS: OfflineStore.root ends in /Offline and anchorOfflinePath splits on that literal (#125)")
+OFFLINEROOTPY
+
 # The seed only exists if PlayerView actually calls it. Deleting `scrub.begin(at:)` from
 # the Slider onEditingChanged leaves ScrubStateCheck green while the app is broken again -
 # the same mutant shape as the two textual checks below, and the only tool that catches it.
