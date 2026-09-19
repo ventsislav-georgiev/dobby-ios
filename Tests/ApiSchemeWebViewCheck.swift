@@ -120,6 +120,9 @@ enum ApiSchemeWebViewCheck {
         // WKAppBoundDomains entry as the app, so this evaluates true here exactly as it
         // does for the Mac app — reviewer Mutant F confirmed the fix holds with it on.
         config.limitsNavigationsToAppBoundDomains = isAppBound(server)
+        print("appbound:     limitsNavigationsToAppBoundDomains=\(config.limitsNavigationsToAppBoundDomains)")
+        check(config.limitsNavigationsToAppBoundDomains,
+              "the check runs app-bound like the Mac app (WKAppBoundDomains read from the embedded Info.plist)")
         config.setURLSchemeHandler(handler, forURLScheme: ApiSchemeHandler.scheme)
         let registered = ApiSchemeHandler.registerAsSecureScheme(in: config)
         check(registered, "WebKit still accepts \(ApiSchemeHandler.scheme) being marked a secure scheme")
