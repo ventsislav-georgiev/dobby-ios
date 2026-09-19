@@ -103,6 +103,11 @@ xcrun swiftc -o "$OUT5" \
   Dobby/Playback/ScrubState.swift Tests/ScrubStateCheck.swift
 "$OUT5"
 
+OUT6="$(mktemp -d)/offline-store-path-check"
+xcrun swiftc -o "$OUT6" \
+  Dobby/Offline/OfflinePathAnchor.swift Tests/OfflineStorePathCheck.swift
+"$OUT6"
+
 # The seed only exists if PlayerView actually calls it. Deleting `scrub.begin(at:)` from
 # the Slider onEditingChanged leaves ScrubStateCheck green while the app is broken again -
 # the same mutant shape as the two textual checks below, and the only tool that catches it.

@@ -156,9 +156,13 @@ final class OfflineStore: NSObject, ObservableObject {
 
     /// Full index as a JSON string (array form for `listNativeOffline`).
     func indexJSON() -> String {
-        let arr = index.values.map { $0.dict }
+        let arr = index.values.map { $0.dict(anchor: anchored) }
         return (try? jsonString(arr)) ?? "[]"
     }
+
+    /// Re-anchors a persisted absolute path onto the CURRENT container `root` —
+    /// see `OfflinePathAnchor.swift` for why the stored path goes stale (#125).
+    private func anchored(_ stored: String) -> String { anchorOfflinePath(stored, root: root) }
 
     // MARK: Bookkeeping helpers
 
@@ -358,12 +362,15 @@ private struct Entry: Codable {
     var total: Int64
     var status: String
 
-    /// JSON shape the web reads (`window.Dobby._offline` entries).
-    var dict: [String: Any] {
+    /// JSON shape the web reads (`window.Dobby._offline` entries). `anchor` re-bases
+    /// a stored absolute path onto the app's current container (#125: the container
+    /// UUID in `path`/`uri` goes stale across every app update/reinstall).
+    func dict(anchor: (String) -> String) -> [String: Any] {
         var d: [String: Any] = ["id": videoId, "videoId": videoId, "kind": kind, "title": title, "status": status]
-        if let path { d["path"] = path; d["uri"] = "file://" + path }
+        if let path { let p = anchor(path); d["path"] = p; d["uri"] = "file://" + p }
         d["subs"] = subs.map { s -> [String: Any] in
-            ["path": s.path, "uri": "file://" + s.path, "lang": s.lang, "label": s.label]
+            let p = anchor(s.path)
+            return ["path": p, "uri": "file://" + p, "lang": s.lang, "label": s.label]
         }
         if let chapters {
             d["complete"] = (status == "complete")
