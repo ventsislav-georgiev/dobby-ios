@@ -133,6 +133,11 @@ enum BundledShellCheck {
                   under: root, "shell root, encoded dots")
         traversal("\(OfflineSchemeHandler.scheme):///b/..%252f..%252fsecret", decodesTo: "/b/..%2f..%2fsecret",
                   under: docs, "Documents root, DOUBLE-encoded separator")
+        // The separator in the containment prefix is load-bearing, not decoration: drop it
+        // and a SIBLING of the root passes, since ".../Offline-secrets" has ".../Offline"
+        // as a plain string prefix. Nothing else in the suite would notice.
+        traversal("\(OfflineSchemeHandler.scheme):///..%252fOffline-secrets/x", decodesTo: "/..%2fOffline-secrets/x",
+                  under: docs, "Documents root, sibling-directory escape")
 
         // The half that breaks the shipping feature if the fix over-corrects. The web
         // percent-encodes every segment, so real book ids and filenames arrive encoded and
