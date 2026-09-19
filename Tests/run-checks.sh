@@ -288,3 +288,45 @@ if calls[0] >= webviews[0]:
 
 print("PASS: WebContainer calls registerAsSecureScheme(in:) before constructing its WKWebView")
 PY
+
+# #130: project.yml pinned KSPlayer to a revision instead of `branch: main` so every
+# checkout/CI run resolves the same commit (Dobby.xcodeproj and its Package.resolved
+# are gitignored, so nothing else pins it). Catch a regression back to a branch ref.
+python3 - <<'KSPLAYERPINPY'
+import sys
+
+path = "project.yml"
+with open(path) as f:
+    lines = f.readlines()
+
+start = None
+for i, l in enumerate(lines):
+    if l.strip() == "KSPlayer:":
+        start = i
+        break
+if start is None:
+    sys.stderr.write("FAIL: project.yml has no KSPlayer: package entry (#130)\n")
+    sys.exit(1)
+
+indent = len(lines[start]) - len(lines[start].lstrip(" "))
+end = len(lines)
+for i in range(start + 1, len(lines)):
+    line_indent = len(lines[i]) - len(lines[i].lstrip(" "))
+    if lines[i].strip() and line_indent <= indent:
+        end = i
+        break
+
+stanza = lines[start:end]
+code_lines = [l for l in stanza if not l.strip().startswith("#")]
+stanza_text = "".join(stanza)
+code_text = "".join(code_lines)
+
+if "revision: 6dda7ccca2e1c678d413db279adf03339a1194cc" not in stanza_text:
+    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)\n")
+    sys.exit(1)
+if "branch:" in code_text:
+    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)\n")
+    sys.exit(1)
+
+print("PASS: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)")
+KSPLAYERPINPY
