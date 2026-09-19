@@ -1,5 +1,6 @@
 import SwiftUI
 import KSPlayer
+import os
 #if os(macOS)
 import AppKit
 #else
@@ -20,6 +21,19 @@ struct PlayerView: View {
 
     @State private var scrub = ScrubState()
     @State private var isPlaying = true
+    /// #131: true from touch-down on the Slider until SwiftUI tears the gesture down.
+    /// `@GestureState` is reset automatically when the gesture ends *or is cancelled* —
+    /// that is the whole reason the wrapper exists over a plain `@State` set in
+    /// `onChanged` and cleared in `onEnded`. Every terminal callback SwiftUI offers
+    /// (`onEnded`, `Slider`'s `onEditingChanged(false)`) is only delivered when the
+    /// gesture *completes*, so they all fail in the same direction; the reset does not.
+    @GestureState private var sliderTouch = false
+    /// #131 diagnostics only: did the Slider report `onEditingChanged(true)` for this
+    /// touch? Separates "the release was delivered normally" from "the touch never became
+    /// a drag" in the log, so those two never share one signature.
+    @State private var sliderDidBegin = false
+
+    private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
     #if os(macOS)
     @State private var keyMonitor: Any?
     #endif
@@ -93,6 +107,10 @@ struct PlayerView: View {
         .animation(.easeInOut(duration: 0.12), value: controls.toast)
         .onAppear { controls.playback = playback; installInput() }
         .onDisappear { removeInput(); controls.exitFullscreenIfNeeded() }
+        // #131: deliberately on the root, not on the Slider. If the control bar is torn
+        // out mid-drag the Slider's gesture dies with it, but `sliderTouch` lives on this
+        // view, so the reset still reaches a handler that is still mounted.
+        .onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }
         #if os(macOS)
         .onContinuousHover { phase in
             if case .active = phase { controls.wake() }
@@ -187,12 +205,23 @@ struct PlayerView: View {
                     // from the live position or it lands wherever the last drag ended (#115).
                     if editing { controls.scrubbing = true }   // #129: hold the OSD for the whole drag
                     if editing { scrub.begin(at: current) }
-                    else { playback.seek(to: scrub.end()) }
+                    else if scrub.isScrubbing { playback.seek(to: scrub.end()) }   // #131: skip if the recovery path already committed this drag
+                    if editing {
+                        sliderDidBegin = true
+                        Self.log.info("slider scrub begin at=\(current, privacy: .public)s total=\(total, privacy: .public)s")
+                    } else {
+                        Self.log.info("slider release delivered target=\(scrub.value, privacy: .public)s")
+                    }
                     if !editing { controls.scrubbing = false }
                     controls.forceShow()
                     if !editing { controls.scheduleHide() }   // #129: resume the idle timer after release
                 }
                 .tint(accent)
+                // #131: the Slider's own release callback is the only thing that used to
+                // end a drag, and on device SwiftUI simply did not deliver it once. This
+                // rides along (never steals — `simultaneousGesture`, and the Slider keeps
+                // tracking normally) purely so `sliderTouch` exists to be reset.
+                .simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch) { _, down, _ in down = true })
                 Text(timeLabel(total)).font(.caption.monospacedDigit())
             }
 
@@ -208,6 +237,39 @@ struct PlayerView: View {
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
         .background(LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom))
+    }
+
+    // MARK: Slider release recovery (#131)
+
+    /// Every finger that goes down on the Slider comes back through here, whether the
+    /// gesture ended or was cancelled — see `sliderTouch`. On device SwiftUI dropped one
+    /// drag's `onEditingChanged(false)` entirely (`.claude-work/115-evidence/diag4-owner-drag.log`,
+    /// drag 3 at 19:08:36.942): the knob moved, the finger lifted, no seek ran, and
+    /// `controls.scrubbing` stayed set, so #129's guards kept the OSD on screen for the
+    /// rest of the session.
+    ///
+    /// Exactly-once is `ScrubState.isScrubbing`, not a second flag: `end()` clears it, so
+    /// whichever of the two release paths runs first commits and the other sees `false`
+    /// and does nothing. Both are MainActor-isolated, so the read and the clear cannot
+    /// interleave. A touch that never became a drag (a tap on the track, which iOS's
+    /// Slider ignores) leaves `isScrubbing` false and therefore cannot seek to the
+    /// *previous* drag's stale value.
+    ///
+    /// A cancelled drag still seeks, on purpose: the knob was visibly moved and the user's
+    /// last seen intent is where it sits. Snapping back would be the surprising behaviour.
+    private func sliderTouchEnded() {
+        if scrub.isScrubbing {
+            let target = scrub.end()
+            Self.log.info("slider release recovered target=\(target, privacy: .public)s — onEditingChanged(false) never arrived (#131)")
+            playback.seek(to: target)
+        } else if sliderDidBegin {
+            Self.log.info("slider touch ended, release already delivered")
+        } else {
+            Self.log.info("slider touch ended without starting a drag")
+        }
+        sliderDidBegin = false
+        controls.scrubbing = false   // #131: the one clear that cannot be lost
+        controls.scheduleHide()
     }
 
     /// Menus that make sense for the current stream: quality is only offered

@@ -149,7 +149,15 @@ if "scrubValue" in src or "@State private var scrubbing" in src:
 if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
-if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
+# #131 changed the release branch from `else {` to `else if scrub.isScrubbing {`: the
+# recovery path in sliderTouchEnded() commits the same drag when SwiftUI never delivers
+# onEditingChanged(false), and `isScrubbing` (cleared by end()) is the interlock that
+# stops whichever path runs second from seeking twice. The old needle described a branch
+# that can no longer be correct unguarded, so it is replaced rather than dropped — and
+# the replacement is strictly stronger: one literal now pins the release branch, the
+# exactly-once guard AND the seek together, so a mutant deleting the guard goes red here
+# instead of silently double-seeking.
+if "if editing { scrub.begin(at: current) }" not in src or "else if scrub.isScrubbing { playback.seek(to: scrub.end()) }" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
@@ -159,7 +167,7 @@ if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek
 # editing-toggle, after the seed.
 i = src.index("if editing { scrub.begin(at: current) }")
 j = src.index("playback.seek(to: scrub.end())")
-if not (i < j and "else {" in src[i:j]):
+if not (i < j and "else if scrub.isScrubbing {" in src[i:j]):
     sys.stderr.write("FAIL: PlayerView Slider seeks outside the release branch (#115)\n")
     sys.exit(1)
 
@@ -342,6 +350,63 @@ if "func hide() { guard !scrubbing else { return };" not in controls_src:
 
 print("PASS: PlayerControls.scheduleHide() and the PlayerView Slider guard the OSD for the whole scrub (#129)")
 SCRUBBINGPY
+
+# #131: on device SwiftUI did not deliver one drag's onEditingChanged(false) at all
+# (.claude-work/115-evidence/diag4-owner-drag.log, drag 3) — no seek ran and #129's
+# scrubbing flag stayed set, freezing the OSD. The recovery hangs off a @GestureState,
+# which SwiftUI resets when the gesture ends OR is cancelled, so it does not share the
+# failure mode of the callback it backs up. Nothing runtime-observable distinguishes a
+# shipped recovery from a deleted one (the healthy path never needs it), so pin every
+# load-bearing line: the gesture state, the simultaneous gesture that drives it, the
+# root-level onChange, and each statement in the handler — including that the flag clear
+# and the re-arm sit at function-body level, not inside the recovery branch.
+python3 - <<'RELEASEPY'
+import sys
+
+view_path = "Dobby/Playback/PlayerView.swift"
+with open(view_path) as f:
+    view_src = f.read()
+
+def need(needle, message):
+    if needle not in view_src:
+        sys.stderr.write(f"FAIL: {message} (#131)\n")
+        sys.exit(1)
+
+need("@GestureState private var sliderTouch = false",
+     "PlayerView no longer carries the @GestureState that SwiftUI resets on a cancelled drag")
+need(".simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch) { _, down, _ in down = true })",
+     "the Slider no longer rides a simultaneous DragGesture that drives sliderTouch")
+need(".onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }",
+     "PlayerView no longer recovers the lost Slider release from the gesture-state reset")
+
+if view_src.count("sliderTouchEnded()") != 2:   # the declaration and its single call site
+    sys.stderr.write("FAIL: sliderTouchEnded() must have exactly one call site (#131)\n")
+    sys.exit(1)
+
+start = view_src.index("private func sliderTouchEnded() {")
+body = view_src[start:view_src.index("\n    }\n", start)]
+
+for needle, message in [
+    ("if scrub.isScrubbing {", "the recovery does not gate on a live scrub, so a bare tap can seek to a stale value"),
+    ("let target = scrub.end()", "the recovery does not clear the scrub through end(), losing the exactly-once interlock"),
+    ("playback.seek(to: target)", "the recovery does not seek"),
+    ("slider release recovered", "the recovery does not log a line of its own for the device round"),
+    ("\n        controls.scrubbing = false", "the recovery clears controls.scrubbing conditionally instead of on every touch-up"),
+    ("\n        controls.scheduleHide()", "the recovery re-arms the idle timer conditionally instead of on every touch-up"),
+]:
+    if needle not in body:
+        sys.stderr.write(f"FAIL: sliderTouchEnded() — {message} (#131)\n")
+        sys.exit(1)
+
+if not (body.index("if scrub.isScrubbing {")
+        < body.index("playback.seek(to: target)")
+        < body.index("\n        controls.scrubbing = false")
+        < body.index("\n        controls.scheduleHide()")):
+    sys.stderr.write("FAIL: sliderTouchEnded() runs its steps out of order (#131)\n")
+    sys.exit(1)
+
+print("PASS: PlayerView recovers a Slider release SwiftUI never delivers and always clears the scrub hold (#131)")
+RELEASEPY
 
 # #130: project.yml pinned KSPlayer to a revision instead of `branch: main` so every
 # checkout/CI run resolves the same commit (Dobby.xcodeproj and its Package.resolved
