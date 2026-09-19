@@ -98,6 +98,39 @@ enum BundledShellCheck {
         check(OfflineSchemeHandler(shellRoot: nil).fileURL(for: URL(string: "\(base)/styles.css")!) == nil,
               "a build with no bundled shell serves nothing on dobby-offline://shell")
 
+        // --- the OTHER half of "this build has no shell" -----------------------------
+        //
+        // Supervisor review fix. The check above pins that the HANDLER refuses; nothing
+        // pinned that indexHTML() returns nil, and the two are not the same thing. The
+        // `let html =` half of WebContainer's guard is what routes a shell-less build back
+        // to the ordinary load — the behaviour "Continue offline" has always had, and the
+        // right one on a box that has paired, because the service worker's cache is keyed
+        // to that origin. run-checks.sh pins the guard's TEXT, which proves the code asks
+        // for an optional; only this proves one can ever come back empty.
+        //
+        // Measured: changing `return nil` to `return ""` in indexHTML() left the whole
+        // suite GREEN at 17 PASS / 43 ok / 0 FAIL, and with it every shell-less build
+        // synthesizes a BLANK document instead of falling back. That is not hypothetical —
+        // .github/workflows/testflight.yml checks out dobby-ios alone, so copy-app-shell.sh
+        // warns and exits 0 there and EVERY TestFlight build is shell-less today. The
+        // unpinned half was the shipping configuration.
+        check(BundledShell.indexHTML(root: nil) == nil,
+              "a build with no Shell folder returns no HTML, so WebContainer falls back to the ordinary load")
+
+        let emptyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bundled-shell-check-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        check(BundledShell.indexHTML(root: emptyDir) == nil,
+              "a Shell folder with no index.html returns no HTML too — a half-finished copy must fall back, not blank the screen")
+        try? FileManager.default.removeItem(at: emptyDir)
+
+        // And the nil above is not vacuous: the real shell does produce HTML, already
+        // rewritten, so the two cases are genuinely distinguishing absence from presence.
+        let shipped = BundledShell.indexHTML(root: root)
+        check(shipped != nil, "the real bundled shell does produce HTML")
+        check(shipped?.contains("src=\"\(base)/js/") == true,
+              "and that HTML is the rewritten form, not the raw markup")
+
         // --- the MIME table ----------------------------------------------------------
         //
         // Before #151 every one of these fell through to application/octet-stream.
