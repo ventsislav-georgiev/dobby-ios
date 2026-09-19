@@ -515,6 +515,74 @@ ENGINELOGPY
 # Pin both ends: the call site passing `matching: total` (the label construct) and the
 # `total >= 3600` term inside timeLabel (what actually gives it a stable width — a
 # mutant that keeps the parameter but drops this term regresses silently).
+python3 - <<'SETTINGSWRITEPY'
+import sys
+
+# #149 (M5-F) — the wiring around the settings write. The merge rule itself is
+# pinned as values in ApiSchemeHandlerCheck.swift; what cannot be reached from a
+# pure function is which methods serveSettings takes, that the write is actually
+# stored before it is acknowledged, and that a stored write cannot then be pulled
+# back over by a background refresh. Exact single-line constructs, and position
+# where position is the meaning.
+
+path = "Dobby/Web/ApiSchemeHandler.swift"
+with open(path) as f:
+    src = f.read()
+
+def need(needle, message):
+    if needle not in src:
+        sys.stderr.write(f"FAIL: {message} (#149)\n")
+        sys.exit(1)
+
+# Without this the body never reaches serveSettings and every POST 400s — the
+# write lane would be dead in a way no pure-function check can see.
+need("        let body = task.request.httpBody",
+     "webView(_:start:) no longer reads the POST body off the task request")
+
+# Both halves of the method gate: POST is taken, and everything else is still
+# refused. Dropping either literal from this one line is a separate bug.
+need('        guard method == "GET" || method == "POST" else {',
+     "serveSettings no longer takes exactly GET and POST")
+need('            fail(task, id, 405, "Settings mirror takes GET and POST", origin, secret: true); return',
+     "serveSettings no longer 405s a method that is neither GET nor POST")
+
+# An unmergeable body is refused, not stored: a partial or corrupt document read
+# back later is indistinguishable from a complete one.
+need('                fail(task, id, 400, "Settings write needs a JSON object body", origin, secret: true); return',
+     "a settings POST with no body, or a body that is not a JSON object, is no longer refused with a 400")
+
+need("            SettingsMirrorStore.save(merged)",
+     "the settings POST no longer stores the merged document")
+need("            SettingsMirrorStore.markAheadOfServer()",
+     "the settings POST no longer marks the mirror as ahead of the Pi, so the next background refresh can pull the pre-write body back over it")
+
+# Order is the meaning: the write must be stored and marked before the page is
+# told it succeeded, or a 200 can outlive a failed save.
+save_idx = src.index("            SettingsMirrorStore.save(merged)")
+mark_idx = src.index("            SettingsMirrorStore.markAheadOfServer()")
+ack_idx = src.index("            respond(task, id, status: 200, contentType: \"application/json\",")
+refuse_idx = src.index('fail(task, id, 400, "Settings write needs a JSON object body"')
+if not (refuse_idx < save_idx < mark_idx < ack_idx):
+    sys.stderr.write("FAIL: the settings POST acknowledges the write before storing and marking it, or refuses after storing (#149)\n")
+    sys.exit(1)
+
+# The guard has to be the FIRST thing refreshSettingsInBackground does. Below the
+# lock, or below the fetch, it still lets the pull happen and overwrite.
+body_start = src.index("private func refreshSettingsInBackground() {")
+body = src[body_start:src.index("\n    }\n", body_start)]
+if "if SettingsMirrorStore.isAheadOfServer { return }" not in body:
+    sys.stderr.write("FAIL: refreshSettingsInBackground no longer refuses to pull over a locally-written document (#149)\n")
+    sys.exit(1)
+ahead_idx = body.index("if SettingsMirrorStore.isAheadOfServer { return }")
+for later, what in [("refreshing.lock()", "the refresh lock"),
+                    ("SettingsMirrorStore.save(fresh)", "the pull's own save")]:
+    if later in body and body.index(later) < ahead_idx:
+        sys.stderr.write(f"FAIL: the ahead-of-server guard sits after {what}, so a pull can still land (#149)\n")
+        sys.exit(1)
+
+print("PASS: dobby-api://settings takes a POST, stores the merge before acknowledging it, and a locally-written document is never pulled over (#149)")
+SETTINGSWRITEPY
+
 python3 - <<'TIMELABELWIDTHPY'
 import sys
 
