@@ -448,10 +448,9 @@ for i in range(start + 1, len(lines)):
 
 stanza = lines[start:end]
 code_lines = [l for l in stanza if not l.strip().startswith("#")]
-stanza_text = "".join(stanza)
 code_text = "".join(code_lines)
 
-if "revision: 6dda7ccca2e1c678d413db279adf03339a1194cc" not in stanza_text:
+if "revision: 6dda7ccca2e1c678d413db279adf03339a1194cc" not in code_text:
     sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)\n")
     sys.exit(1)
 if "branch:" in code_text:
