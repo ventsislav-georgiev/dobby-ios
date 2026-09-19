@@ -199,7 +199,7 @@ struct PlayerView: View {
         let current = scrub.displayed(live: Double(time.currentTime))
         return VStack(spacing: 10) {
             HStack(spacing: 12) {
-                Text(timeLabel(current)).font(.caption.monospacedDigit())
+                Text(timeLabel(current, matching: total)).font(.caption.monospacedDigit())
                 Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
@@ -222,7 +222,7 @@ struct PlayerView: View {
                 // rides along (never steals — `simultaneousGesture`, and the Slider keeps
                 // tracking normally) purely so `sliderTouch` exists to be reset.
                 .simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch) { _, down, _ in down = true })
-                Text(timeLabel(total)).font(.caption.monospacedDigit())
+                Text(timeLabel(total, matching: total)).font(.caption.monospacedDigit())
             }
 
             // Portrait iPhone can't fit every button: fall back to a tighter row
@@ -534,10 +534,23 @@ struct PlayerView: View {
         return s.isEmpty ? "—" : s
     }
 
-    private func timeLabel(_ seconds: Double) -> String {
+    // #128: the elapsed label used to format itself alone, so scrubbing across the
+    // 1:00:00 mark grew it from d:dd to d:dd:dd mid-drag, reflowing the HStack and
+    // sliding the Slider under the tracking finger. `matching` pins the field width
+    // to the total's own shape (which never changes during a drag) so the elapsed
+    // label never grows independently.
+    private func timeLabel(_ seconds: Double, matching total: Double = 0) -> String {
         let s = Int(seconds.isFinite ? seconds : 0)
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+        let showHours = h > 0 || total >= 3600
+        if showHours { return String(format: "%d:%02d:%02d", h, m, sec) }
+        // Same defect one field down: under an hour the minutes are unpadded, so the
+        // elapsed label still grows from 9:59 to 10:00 mid-drag on anything over ten
+        // minutes. Pin the minutes width to the total's the way the hours field is
+        // pinned above. The total's own rendering never changes, only the elapsed
+        // label gains a leading zero, which is what makes the two labels equal width.
+        let totalMinutes = Int(total.isFinite ? total : 0) / 60
+        return String(format: totalMinutes >= 10 ? "%02d:%02d" : "%d:%02d", m, sec)
     }
 
     // MARK: Input wiring
