@@ -318,6 +318,14 @@ final class PlaybackCoordinator: ObservableObject {
 
     func onStateChanged(_ state: KSPlayerState) {
         mark("state=\(state)")
+        if state == .readyToPlay {
+            // #132: log which engine actually opened the stream. firstPlayerType above is
+            // only a request - KSPlayerLayer silently swaps to KSOptions.secondPlayerType
+            // (KSMEPlayer) when the first player fails to open, so a device round gating a
+            // KSPlayer revision move has to READ the engine, never infer it from the lane.
+            let engine = player.playerLayer.map { String(describing: type(of: $0.player)) } ?? "?"
+            mark("engine=\(engine) adaptive=\(request?.isAdaptivePair ?? false)")
+        }
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
             let start = resumeSeconds ?? request?.startSeconds ?? 0
