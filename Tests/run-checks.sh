@@ -166,15 +166,21 @@ with open(path) as f:
 if "guard seconds.isFinite, let layer = player.playerLayer else {" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not guard a non-finite target (#117)\n")
     sys.exit(1)
-if "autoPlay: layer.options.isSeekedAutoPlay" not in coordinator_src:
-    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not pass layer.options.isSeekedAutoPlay (#117)\n")
-    sys.exit(1)
+# One needle, not two: pinning the whole call line (not just the autoPlay
+# argument as a separate substring) proves both that autoPlay is the right
+# property AND that it's still the completion-taking overload being called —
+# a mutant could otherwise keep the standalone "autoPlay: ..." substring
+# alive elsewhere (e.g. in a comment) while breaking the real call.
 if "layer.seek(time: seconds, autoPlay: layer.options.isSeekedAutoPlay) { [weak self] finished in" not in coordinator_src:
-    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not call the completion-taking KSPlayerLayer.seek (#117)\n")
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not call the completion-taking KSPlayerLayer.seek with layer.options.isSeekedAutoPlay (#117)\n")
     sys.exit(1)
 if "let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not tell a deferred seek apart from a dropped one (#117)\n")
     sys.exit(1)
+# A bare "Self.log.info(" substring is not enough on its own: this file now
+# carries TWO log calls (the non-finite-target rejection above, and this
+# one), so it survives deleting either one. Pin the case-B message text so
+# only that specific log call keeps the check green.
 if "Self.log.info(\"seek dropped" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not log the dropped seek (#117)\n")
     sys.exit(1)
