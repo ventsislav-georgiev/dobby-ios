@@ -459,3 +459,29 @@ if "branch:" in code_text:
 
 print("PASS: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)")
 KSPLAYERPINPY
+
+# #128: the elapsed label used to format itself alone (d:dd under an hour, d:dd:dd at
+# or above), so scrubbing across the 1:00:00 mark grew it by three characters mid-drag,
+# reflowing the controlBar HStack and sliding the Slider under the tracking finger.
+# Pin both ends: the call site passing `matching: total` (the label construct) and the
+# `total >= 3600` term inside timeLabel (what actually gives it a stable width — a
+# mutant that keeps the parameter but drops this term regresses silently).
+python3 - <<'TIMELABELWIDTHPY'
+import sys
+
+path = "Dobby/Playback/PlayerView.swift"
+with open(path) as f:
+    lines = f.readlines()
+
+code_lines = [l for l in lines if not l.strip().startswith("//")]
+src = "".join(code_lines)
+
+if "Text(timeLabel(current, matching: total))" not in src:
+    sys.stderr.write("FAIL: PlayerView's elapsed-time label no longer formats at the total's field width (#128)\n")
+    sys.exit(1)
+if "let showHours = h > 0 || total >= 3600" not in src:
+    sys.stderr.write("FAIL: timeLabel(_:matching:) no longer pins the hours field to the total's own duration (#128)\n")
+    sys.exit(1)
+
+print("PASS: PlayerView's elapsed-time label shares the total's field width so scrubbing past 1:00:00 cannot reflow the Slider (#128)")
+TIMELABELWIDTHPY

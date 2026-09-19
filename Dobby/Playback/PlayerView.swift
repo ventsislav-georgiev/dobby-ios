@@ -199,7 +199,7 @@ struct PlayerView: View {
         let current = scrub.displayed(live: Double(time.currentTime))
         return VStack(spacing: 10) {
             HStack(spacing: 12) {
-                Text(timeLabel(current)).font(.caption.monospacedDigit())
+                Text(timeLabel(current, matching: total)).font(.caption.monospacedDigit())
                 Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
@@ -534,10 +534,16 @@ struct PlayerView: View {
         return s.isEmpty ? "—" : s
     }
 
-    private func timeLabel(_ seconds: Double) -> String {
+    // #128: the elapsed label used to format itself alone, so scrubbing across the
+    // 1:00:00 mark grew it from d:dd to d:dd:dd mid-drag, reflowing the HStack and
+    // sliding the Slider under the tracking finger. `matching` pins the field width
+    // to the total's own shape (which never changes during a drag) so the elapsed
+    // label never grows independently.
+    private func timeLabel(_ seconds: Double, matching total: Double = 0) -> String {
         let s = Int(seconds.isFinite ? seconds : 0)
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+        let showHours = h > 0 || total >= 3600
+        return showHours ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
     }
 
     // MARK: Input wiring
