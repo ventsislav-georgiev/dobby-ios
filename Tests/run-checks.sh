@@ -125,7 +125,7 @@ if "scrubValue" in src or "@State private var scrubbing" in src:
 if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
-if "if editing { scrub.begin(at: current) }" not in src or "playback.seek(to: scrub.end())" not in src:
+if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
