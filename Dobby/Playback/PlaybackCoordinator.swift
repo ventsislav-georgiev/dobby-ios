@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import KSPlayer
 import MediaPlayer
+import os
 
 #if canImport(UIKit)
 import UIKit
@@ -233,8 +234,55 @@ final class PlaybackCoordinator: ObservableObject {
         layer.state.isPlaying ? layer.pause() : layer.play()
     }
 
-    func seek(to seconds: TimeInterval) {
-        player.seek(time: seconds)
+    private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
+
+    /// Seeks and observes the KSPlayer result. `completion` reports `true` when
+    /// the caller should leave the display alone — the seek landed, or
+    /// KSPlayerLayer will replay it once ready — and `false` only when the seek
+    /// is genuinely dropped, so the caller should restore the displayed
+    /// position to the live clock.
+    ///
+    /// KSPlayerLayer.seek(time:autoPlay:completion:) (KSPlayerLayer.swift:332-349
+    /// in the vendored checkout) calls `completion(false)` from two places:
+    ///   - :333-334 `time.isInfinite || time.isNaN` — sidestepped by the
+    ///     `isFinite` guard below, since a Slider value is always finite.
+    ///   - :344-347, the `else` of `if player.isReadyToPlay, player.seekable`,
+    ///     which ALWAYS reports false, for two different reasons:
+    ///       - CASE A, `!isReadyToPlay`: KSPlayerLayer stashes `shouldSeekTo`
+    ///         and replays it once ready (readyToPlay(player:), :382-391) — no
+    ///         restore here, or the knob would jump to a stale live value only
+    ///         to be corrected again moments later, which is worse than
+    ///         today's silence. Exception: readyToPlay only replays
+    ///         `shouldSeekTo > 0` (:383), so a target of exactly 0 is silently
+    ///         dropped even in this case — treated like CASE B below.
+    ///       - CASE B, `isReadyToPlay && !seekable`: readyToPlay(player:) has
+    ///         already fired and nothing reads `shouldSeekTo` again, so this
+    ///         seek never happens — restore the display and log it.
+    /// When `isReadyToPlay && seekable` are both true, KSPlayerLayer forwards
+    /// the real player's own completion (:337-343) instead; a `false` there
+    /// (the underlying seek was superseded by a newer one) is treated like
+    /// CASE A — silent, no restore — since whatever superseded it is already
+    /// correcting the position.
+    func seek(to seconds: TimeInterval, completion: ((Bool) -> Void)? = nil) {
+        guard seconds.isFinite, let layer = player.playerLayer else {
+            player.seek(time: seconds)
+            completion?(true)
+            return
+        }
+        let wasReadyToPlay = layer.player.isReadyToPlay
+        let wasSeekable = layer.player.seekable
+        layer.seek(time: seconds, autoPlay: layer.state.isPlaying) { [weak self] finished in
+            guard let self, !finished else {
+                completion?(true)
+                return
+            }
+            let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)
+            if dropped {
+                let live = self.player.timemodel.currentTime
+                Self.log.info("seek dropped target=\(seconds, privacy: .public)s live=\(live, privacy: .public)s")
+            }
+            completion?(!dropped)
+        }
     }
 
     /// Swap the adaptive pair's video representation (audio stream unchanged):

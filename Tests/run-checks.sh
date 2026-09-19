@@ -125,12 +125,51 @@ if "scrubValue" in src or "@State private var scrubbing" in src:
 if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
-if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
+if "if editing { scrub.begin(at: current) }" not in src or "playback.seek(to: scrub.end())" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
 print("PASS: PlayerView Slider seeds the scrub from the displayed position and seeks to its end value")
 SCRUBPY
+
+# #117: PlaybackCoordinator.seek(to:) used to call the completion-discarding
+# KSPlayerLayer convenience seek(time:) (KSPlayerLayer.swift:540-543), so a
+# dropped seek (KSPlayerLayer.swift:344-347, player ready but not seekable —
+# or the shouldSeekTo>0-never-replayed target-0 exception at :383) was never
+# noticed and the display never corrected. Pin both ends: the completion-
+# taking call PlaybackCoordinator must make, AND the line that actually reads
+# the Bool it hands back and restores the scrub — a substring anywhere in the
+# file is not enough, dropping either half must go red on its own.
+python3 - <<'SEEKPY'
+import sys
+
+path = "Dobby/Playback/PlaybackCoordinator.swift"
+with open(path) as f:
+    coordinator_src = f.read()
+
+if "layer.seek(time: seconds, autoPlay: layer.state.isPlaying) { [weak self] finished in" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not call the completion-taking KSPlayerLayer.seek (#117)\n")
+    sys.exit(1)
+if "let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not tell a deferred seek apart from a dropped one (#117)\n")
+    sys.exit(1)
+if "Self.log.info(" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not log the dropped seek (#117)\n")
+    sys.exit(1)
+
+path = "Dobby/Playback/PlayerView.swift"
+with open(path) as f:
+    view_src = f.read()
+
+if "playback.seek(to: scrub.end()) { ok in" not in view_src:
+    sys.stderr.write("FAIL: PlayerView does not read the seek completion (#117)\n")
+    sys.exit(1)
+if "if !ok { scrub.reject(to: Double(time.currentTime)) }" not in view_src:
+    sys.stderr.write("FAIL: PlayerView does not restore the scrub display on a dropped seek (#117)\n")
+    sys.exit(1)
+
+print("PASS: PlaybackCoordinator classifies+logs a dropped seek and PlayerView restores the scrub display (#117)")
+SEEKPY
 
 # #067: the only check that puts the handler behind a real WKWebView on the real
 # server origin, which is where the Mac bug lived — `dobby-api:` refused as mixed

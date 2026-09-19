@@ -32,4 +32,14 @@ struct ScrubState {
         isScrubbing = false
         return value
     }
+
+    /// #117: a seek PlaybackCoordinator reports as genuinely dropped (never
+    /// applied, never will be — see PlaybackCoordinator.seek(to:completion:))
+    /// must not leave anything behind that could still show the failed
+    /// target: drop back to the live clock explicitly rather than trust that
+    /// `isScrubbing` already got there first.
+    mutating func reject(to live: Double) {
+        value = live
+        isScrubbing = false
+    }
 }

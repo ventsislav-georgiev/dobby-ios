@@ -186,7 +186,14 @@ struct PlayerView: View {
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
                     if editing { scrub.begin(at: current) }
-                    else { playback.seek(to: scrub.end()) }
+                    else {
+                        // #117: `ok` is false only for a genuinely dropped seek (the
+                        // target will never be applied) — a merely deferred one
+                        // (player not ready yet) reports true and is left alone.
+                        playback.seek(to: scrub.end()) { ok in
+                            if !ok { scrub.reject(to: Double(time.currentTime)) }
+                        }
+                    }
                     controls.forceShow()
                 }
                 .tint(accent)
