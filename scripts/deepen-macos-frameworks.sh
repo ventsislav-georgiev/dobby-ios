@@ -49,4 +49,17 @@ for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
     [ -d "$fw" ] && deepen "$fw"
   done
 done
+
+# This script has no declared outputs, so the new build system doesn't gate the
+# app target's synthesized SPM "Embed Frameworks" copy on it — on a clean build
+# that copy can run first, embedding a still-shallow framework straight from $SRC
+# above. Whichever way it lands, fix the copy actually inside the app bundle too,
+# since that's what Validate inspects.
+for dir in "${TARGET_BUILD_DIR:-}" "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
+  fdir="$dir/${FRAMEWORKS_FOLDER_PATH:-}"
+  [ -n "$dir" ] && [ -n "${FRAMEWORKS_FOLDER_PATH:-}" ] && [ -d "$fdir" ] || continue
+  for fw in "$fdir"/*.framework; do
+    [ -d "$fw" ] && deepen "$fw"
+  done
+done
 echo "deepen: done"
