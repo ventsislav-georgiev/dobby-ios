@@ -12,6 +12,7 @@ enum ScrubStateCheck {
         idle()
         knobStartsAtTheLivePosition()
         releaseReportsWhereTheDragEnded()
+        releaseCommitsOnlyOnce()
         print("ScrubStateCheck: all checks passed")
     }
 
@@ -61,5 +62,24 @@ enum ScrubStateCheck {
         s.update(to: 360)
         check(s.end() == 360, "release reports the last dragged value")
         check(!s.isScrubbing, "release stops scrubbing")
+    }
+
+    /// #131: a drag now has TWO possible release paths — the Slider's
+    /// `onEditingChanged(false)`, and the gesture-state reset that recovers the one
+    /// SwiftUI dropped on device. `isScrubbing` is the whole interlock: the first `end()`
+    /// clears it, so the second path reads false and skips the seek. Both call sites are
+    /// MainActor-isolated, so this is an atomic check-and-clear, not a race.
+    static func releaseCommitsOnlyOnce() {
+        var s = ScrubState()
+        s.begin(at: 10)
+        s.update(to: 900)
+        check(s.isScrubbing, "a live drag reports isScrubbing, which is what both release paths gate on")
+        check(s.end() == 900, "the first release path reports the dragged-to position")
+        check(!s.isScrubbing,
+              "the second release path must see isScrubbing false and not seek again (#131)")
+
+        // And a touch that never became a drag must not resurrect the previous drag's
+        // value: iOS's Slider ignores taps on the track, so no begin() ever runs.
+        check(!s.isScrubbing, "a touch with no begin() is not a live scrub")
     }
 }
