@@ -188,6 +188,23 @@ if "Self.log.info(\"seek dropped" not in coordinator_src:
 print("PASS: PlaybackCoordinator guards non-finite targets, preserves autoplay semantics, and logs a dropped seek (#117)")
 SEEKPY
 
+# #112: a clean macOS build is the only thing that catches deepen-macos-frameworks.sh
+# losing one of its three passes (SPM checkout, staged products dir, or the app
+# bundle's own Contents/Frameworks) - every incremental build stays green regardless,
+# since the earlier pass's mutation persists on disk from a prior build. This is a
+# textual proxy standing in for that clean build.
+python3 - <<'PY'
+import sys
+src = open("scripts/deepen-macos-frameworks.sh").read()
+for needle, what in [('for dir in "${TARGET_BUILD_DIR:-}"', "the app bundle's Frameworks directory"),
+                     ('for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"', "the built products directory"),
+                     ('for xc in "$SRC"/*.xcframework', "the SPM checkout")]:
+    if needle not in src:
+        sys.stderr.write(f"FAIL: deepen-macos-frameworks.sh no longer deepens {what} (#112)\n")
+        sys.exit(1)
+print("PASS: deepen-macos-frameworks.sh deepens the checkout, the products dir and the app bundle")
+PY
+
 # #067: the only check that puts the handler behind a real WKWebView on the real
 # server origin, which is where the Mac bug lived — `dobby-api:` refused as mixed
 # content from the https page, before any of the logic above ran. macOS only:
