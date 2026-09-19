@@ -125,12 +125,68 @@ if "scrubValue" in src or "@State private var scrubbing" in src:
 if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
-if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
+if "if editing { scrub.begin(at: current) }" not in src or "playback.seek(to: scrub.end())" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
+    sys.exit(1)
+
+# #117 review: a mutant moved the seek out of the release branch (both this
+# and the seed check still passed, since both needles just had to appear
+# somewhere in the file). Pin the seek to actually sit in the else of the
+# editing-toggle, after the seed.
+i = src.index("if editing { scrub.begin(at: current) }")
+j = src.index("playback.seek(to: scrub.end())")
+if not (i < j and "else {" in src[i:j]):
+    sys.stderr.write("FAIL: PlayerView Slider seeks outside the release branch (#115)\n")
     sys.exit(1)
 
 print("PASS: PlayerView Slider seeds the scrub from the displayed position and seeks to its end value")
 SCRUBPY
+
+# #117: PlaybackCoordinator.seek(to:) used to call the completion-discarding
+# KSPlayerLayer convenience seek(time:) (KSPlayerLayer.swift:540-543), so a
+# dropped seek (KSPlayerLayer.swift:344-347, player ready but not seekable —
+# or the shouldSeekTo>0-never-replayed target-0 exception at :383) was never
+# noticed and never logged. Review HOLD on the first pass: surfacing it to
+# the UI risked restoring a knob a deferred (CASE A) seek was about to
+# correct anyway, so this only logs the genuine drop — nothing reads a
+# completion Bool. Pin every load-bearing line: the non-finite guard (a
+# non-returning completion(false) at KSPlayerLayer.swift:333-334 can double-
+# fire if we ever pass it a NaN/inf), the exact autoPlay argument (a mutant
+# swapping it back to layer.state.isPlaying breaks CASE A's replay silently,
+# since KSPlayerLayer.readyToPlay only replays/autoplays when isAutoPlay —
+# set from this argument — is true), the completion-taking call, the A/B
+# classification, and the log line.
+python3 - <<'SEEKPY'
+import sys
+
+path = "Dobby/Playback/PlaybackCoordinator.swift"
+with open(path) as f:
+    coordinator_src = f.read()
+
+if "guard seconds.isFinite, let layer = player.playerLayer else {" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not guard a non-finite target (#117)\n")
+    sys.exit(1)
+# One needle, not two: pinning the whole call line (not just the autoPlay
+# argument as a separate substring) proves both that autoPlay is the right
+# property AND that it's still the completion-taking overload being called —
+# a mutant could otherwise keep the standalone "autoPlay: ..." substring
+# alive elsewhere (e.g. in a comment) while breaking the real call.
+if "layer.seek(time: seconds, autoPlay: layer.options.isSeekedAutoPlay) { [weak self] finished in" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not call the completion-taking KSPlayerLayer.seek with layer.options.isSeekedAutoPlay (#117)\n")
+    sys.exit(1)
+if "let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not tell a deferred seek apart from a dropped one (#117)\n")
+    sys.exit(1)
+# A bare "Self.log.info(" substring is not enough on its own: this file now
+# carries TWO log calls (the non-finite-target rejection above, and this
+# one), so it survives deleting either one. Pin the case-B message text so
+# only that specific log call keeps the check green.
+if "Self.log.info(\"seek dropped" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not log the dropped seek (#117)\n")
+    sys.exit(1)
+
+print("PASS: PlaybackCoordinator guards non-finite targets, preserves autoplay semantics, and logs a dropped seek (#117)")
+SEEKPY
 
 # #112: a clean macOS build is the only thing that catches deepen-macos-frameworks.sh
 # losing one of its three passes (SPM checkout, staged products dir, or the app
