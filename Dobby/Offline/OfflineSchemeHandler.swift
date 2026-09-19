@@ -131,15 +131,40 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
     ///
     /// The two roots differ in their minimum depth on purpose: a downloaded file is always
     /// `<bookId>/<fileName>`, while the shell has `/styles.css` at depth one.
+    ///
+    /// #156. The `..` guard below is NOT enough on its own, measured: `url.path` has
+    /// already decoded once, so a DOUBLE-encoded separator survives the split as one
+    /// component (`/js/..%252f..%252fsecret` → path `/js/..%2f..%2fsecret` → parts
+    /// `["js", "../../secret"]`) and the `map` only turns it back into separators after
+    /// the guard has looked at it. `appendingPathComponent` then embeds those separators
+    /// and the result lands outside the root. That is a decoding subtlety, and any string
+    /// check invites the next one, so the load-bearing guard is `contained(_:in:)` on the
+    /// RESOLVED path instead. The `..` guard stays because it costs one line and refuses
+    /// the single-encoded forms earlier.
+    ///
+    /// Decoding itself is load-bearing and must not be dropped: the web percent-encodes
+    /// every segment, so real book ids and filenames arrive encoded (see the doc comment
+    /// on this type).
     func fileURL(for url: URL) -> URL? {
         let parts = url.path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
         guard !parts.contains("..") else { return nil }
         if url.host == BundledShell.host {
             guard let shellRoot, !parts.isEmpty else { return nil }
-            return parts.reduce(shellRoot) { $0.appendingPathComponent($1) }
+            return Self.contained(parts.reduce(shellRoot) { $0.appendingPathComponent($1) }, in: shellRoot)
         }
         guard parts.count >= 2 else { return nil }
-        return parts.reduce(root) { $0.appendingPathComponent($1) }
+        return Self.contained(parts.reduce(root) { $0.appendingPathComponent($1) }, in: root)
+    }
+
+    /// The candidate, or nil if it does not lexically resolve to something under `root`.
+    /// `standardizedFileURL` is what collapses `..`, so this is a check on where the path
+    /// actually LANDS, not on what it looked like going in. The separator in the prefix is
+    /// deliberate: without it `…/Offline-secrets` would pass as "under" `…/Offline`.
+    private static func contained(_ candidate: URL, in root: URL) -> URL? {
+        let base = root.standardizedFileURL.path
+        let landed = candidate.standardizedFileURL.path
+        guard landed.hasPrefix(base.hasSuffix("/") ? base : base + "/") else { return nil }
+        return candidate
     }
 
     private func parseRange(_ header: String?, total: Int64, start: inout Int64, end: inout Int64) -> Bool {

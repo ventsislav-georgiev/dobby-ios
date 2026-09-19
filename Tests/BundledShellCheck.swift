@@ -98,6 +98,55 @@ enum BundledShellCheck {
         check(OfflineSchemeHandler(shellRoot: nil).fileURL(for: URL(string: "\(base)/styles.css")!) == nil,
               "a build with no bundled shell serves nothing on dobby-offline://shell")
 
+        // --- #156: the double-encoded separator --------------------------------------
+        //
+        // `url.path` has already decoded once, so a DOUBLE-encoded "/" survives
+        // `split(separator: "/")` as ONE component and is only turned back into separators
+        // by the `.map`, AFTER the `..` guard has looked at it. Measured on this machine
+        // before the fix: the two single-encoded rows were refused and the two
+        // double-encoded ones resolved to /secret — on BOTH roots, and with
+        // `Access-Control-Allow-Origin: *` on the response, so the bytes were readable
+        // cross-origin. The fix is containment on the RESOLVED path, because a string
+        // check is exactly what the next decoding subtlety defeats.
+        //
+        // Each row pins three things, so no row can pass vacuously:
+        //   1. the path Foundation hands the handler after its OWN single decode — a
+        //      mutant that merely mistypes the URL literal changes this and fails here;
+        //   2. that the UNGUARDED append really does leave the root — the attack itself,
+        //      restated, so the row stays a traversal rather than "a string the handler
+        //      happens to dislike";
+        //   3. that `fileURL` refuses it.
+        func traversal(_ raw: String, decodesTo wantPath: String, under base: URL, _ label: String) {
+            let u = URL(string: raw)!
+            let parts = u.path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
+            let landed = parts.reduce(base) { $0.appendingPathComponent($1) }.standardizedFileURL.path
+            check(u.path == wantPath, "\(label): url.path is \(wantPath) after Foundation's own decode")
+            check(!landed.hasPrefix(base.standardizedFileURL.path + "/"),
+                  "\(label): the unguarded append lands outside the root, at \(landed)")
+            check(resolved(raw) == nil, "\(label): fileURL refuses it")
+        }
+        traversal("\(base)/js/..%2f..%2fsecret", decodesTo: "/js/../../secret",
+                  under: root, "shell root, single-encoded separator")
+        traversal("\(base)/js/..%252f..%252fsecret", decodesTo: "/js/..%2f..%2fsecret",
+                  under: root, "shell root, DOUBLE-encoded separator")
+        traversal("\(base)/%2e%2e/secret", decodesTo: "/../secret",
+                  under: root, "shell root, encoded dots")
+        traversal("\(OfflineSchemeHandler.scheme):///b/..%252f..%252fsecret", decodesTo: "/b/..%2f..%2fsecret",
+                  under: docs, "Documents root, DOUBLE-encoded separator")
+
+        // The half that breaks the shipping feature if the fix over-corrects. The web
+        // percent-encodes every segment, so real book ids and filenames arrive encoded and
+        // must still resolve, DECODED, to the file on disk. A fix that dropped
+        // `removingPercentEncoding`, or that refused any path containing a '%', or that
+        // compared the raw string against the root, fails right here — and on the phone
+        // that is every downloaded book refusing to play.
+        check(resolved("\(OfflineSchemeHandler.scheme):///The%20Hobbit%20%232/Ch%201%20%E2%80%93%20A%20Party.m4b")
+                == docs.appendingPathComponent("The Hobbit #2")
+                       .appendingPathComponent("Ch 1 – A Party.m4b").path,
+              "a percent-encoded book id and filename still resolve, decoded, into Documents/Offline")
+        check(resolved("\(base)/js/a%20b.js") == root.appendingPathComponent("js/a b.js").path,
+              "a percent-encoded shell sub-resource still resolves, decoded, into the shell root")
+
         // --- the OTHER half of "this build has no shell" -----------------------------
         //
         // Supervisor review fix. The check above pins that the HANDLER refuses; nothing
