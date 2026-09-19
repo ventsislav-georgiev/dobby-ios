@@ -72,7 +72,13 @@ struct WebContainer {
         webView.allowsBackForwardNavigationGestures = false
         #endif
         coordinator.attach(webView: webView)
-        webView.load(URLRequest(url: url))
+        var loadURL = url
+        #if DEBUG
+        // #116 device round 3 test seam: DOBBY_START_PATH opens a route at launch
+        // (see AppConfig.startURL) so a series detail page can be reached headlessly.
+        loadURL = AppConfig.startURL(origin: url)
+        #endif
+        webView.load(URLRequest(url: loadURL))
         return webView
     }
 }

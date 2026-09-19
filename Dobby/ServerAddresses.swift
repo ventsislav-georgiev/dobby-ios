@@ -244,6 +244,15 @@ enum ServerAddresses {
         env["DOBBY_NO_SERVER"] == "1"
     }
 
+    /// Debug-only test seam (#116 device round 3): DOBBY_AUTO_OFFLINE=1 takes the
+    /// "Continue offline" action itself instead of drawing the button, for a headless
+    /// run that cannot tap. Same compiled-everywhere/gated-call-site split as
+    /// `noServerSeamActive` above; its call site (ContentView.resolve()) is `#if DEBUG`
+    /// only. Never wired into anything shipped-path.
+    static func autoOfflineSeamActive(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        env["DOBBY_AUTO_OFFLINE"] == "1"
+    }
+
     /// Two-stage probe: stage one spends only `shortTimeout` finding out whether the Pi is
     /// there at all; a `presentSlow` verdict spends `readTimeout` finding out whether it is
     /// done thinking. Same information Android gets from one `HttpURLConnection` call with
