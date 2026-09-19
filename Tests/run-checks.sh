@@ -129,6 +129,16 @@ if "if editing { scrub.begin(at: current) }" not in src or "playback.seek(to: sc
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
+# #117 review: a mutant moved the seek out of the release branch (both this
+# and the seed check still passed, since both needles just had to appear
+# somewhere in the file). Pin the seek to actually sit in the else of the
+# editing-toggle, after the seed.
+i = src.index("if editing { scrub.begin(at: current) }")
+j = src.index("playback.seek(to: scrub.end())")
+if not (i < j and "else {" in src[i:j]):
+    sys.stderr.write("FAIL: PlayerView Slider seeks outside the release branch (#115)\n")
+    sys.exit(1)
+
 print("PASS: PlayerView Slider seeds the scrub from the displayed position and seeks to its end value")
 SCRUBPY
 
@@ -136,10 +146,16 @@ SCRUBPY
 # KSPlayerLayer convenience seek(time:) (KSPlayerLayer.swift:540-543), so a
 # dropped seek (KSPlayerLayer.swift:344-347, player ready but not seekable —
 # or the shouldSeekTo>0-never-replayed target-0 exception at :383) was never
-# noticed and the display never corrected. Pin both ends: the completion-
-# taking call PlaybackCoordinator must make, AND the line that actually reads
-# the Bool it hands back and restores the scrub — a substring anywhere in the
-# file is not enough, dropping either half must go red on its own.
+# noticed and never logged. Review HOLD on the first pass: surfacing it to
+# the UI risked restoring a knob a deferred (CASE A) seek was about to
+# correct anyway, so this only logs the genuine drop — nothing reads a
+# completion Bool. Pin every load-bearing line: the non-finite guard (a
+# non-returning completion(false) at KSPlayerLayer.swift:333-334 can double-
+# fire if we ever pass it a NaN/inf), the exact autoPlay argument (a mutant
+# swapping it back to layer.state.isPlaying breaks CASE A's replay silently,
+# since KSPlayerLayer.readyToPlay only replays/autoplays when isAutoPlay —
+# set from this argument — is true), the completion-taking call, the A/B
+# classification, and the log line.
 python3 - <<'SEEKPY'
 import sys
 
@@ -147,28 +163,23 @@ path = "Dobby/Playback/PlaybackCoordinator.swift"
 with open(path) as f:
     coordinator_src = f.read()
 
-if "layer.seek(time: seconds, autoPlay: layer.state.isPlaying) { [weak self] finished in" not in coordinator_src:
+if "guard seconds.isFinite, let layer = player.playerLayer else {" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not guard a non-finite target (#117)\n")
+    sys.exit(1)
+if "autoPlay: layer.options.isSeekedAutoPlay" not in coordinator_src:
+    sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not pass layer.options.isSeekedAutoPlay (#117)\n")
+    sys.exit(1)
+if "layer.seek(time: seconds, autoPlay: layer.options.isSeekedAutoPlay) { [weak self] finished in" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not call the completion-taking KSPlayerLayer.seek (#117)\n")
     sys.exit(1)
 if "let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not tell a deferred seek apart from a dropped one (#117)\n")
     sys.exit(1)
-if "Self.log.info(" not in coordinator_src:
+if "Self.log.info(\"seek dropped" not in coordinator_src:
     sys.stderr.write("FAIL: PlaybackCoordinator.seek(to:) does not log the dropped seek (#117)\n")
     sys.exit(1)
 
-path = "Dobby/Playback/PlayerView.swift"
-with open(path) as f:
-    view_src = f.read()
-
-if "playback.seek(to: scrub.end()) { ok in" not in view_src:
-    sys.stderr.write("FAIL: PlayerView does not read the seek completion (#117)\n")
-    sys.exit(1)
-if "if !ok { scrub.reject(to: Double(time.currentTime)) }" not in view_src:
-    sys.stderr.write("FAIL: PlayerView does not restore the scrub display on a dropped seek (#117)\n")
-    sys.exit(1)
-
-print("PASS: PlaybackCoordinator classifies+logs a dropped seek and PlayerView restores the scrub display (#117)")
+print("PASS: PlaybackCoordinator guards non-finite targets, preserves autoplay semantics, and logs a dropped seek (#117)")
 SEEKPY
 
 # #067: the only check that puts the handler behind a real WKWebView on the real

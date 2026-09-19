@@ -236,16 +236,16 @@ final class PlaybackCoordinator: ObservableObject {
 
     private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
 
-    /// Seeks and observes the KSPlayer result. `completion` reports `true` when
-    /// the caller should leave the display alone — the seek landed, or
-    /// KSPlayerLayer will replay it once ready — and `false` only when the seek
-    /// is genuinely dropped, so the caller should restore the displayed
-    /// position to the live clock.
+    /// Seeks and observes the KSPlayer result, logging (never surfacing to the
+    /// UI — see #117's review HOLD) the one case where the seek is genuinely
+    /// dropped rather than merely deferred.
     ///
     /// KSPlayerLayer.seek(time:autoPlay:completion:) (KSPlayerLayer.swift:332-349
     /// in the vendored checkout) calls `completion(false)` from two places:
-    ///   - :333-334 `time.isInfinite || time.isNaN` — sidestepped by the
-    ///     `isFinite` guard below, since a Slider value is always finite.
+    ///   - :333-334 `time.isInfinite || time.isNaN` — this call does NOT
+    ///     `return`, so a non-finite target falls through into :336 and can
+    ///     call `completion` a second time; guarded below so the coordinator
+    ///     never hands KSPlayerLayer a value that can double-fire.
     ///   - :344-347, the `else` of `if player.isReadyToPlay, player.seekable`,
     ///     which ALWAYS reports false, for two different reasons:
     ///       - CASE A, `!isReadyToPlay`: KSPlayerLayer stashes `shouldSeekTo`
@@ -257,31 +257,38 @@ final class PlaybackCoordinator: ObservableObject {
     ///         dropped even in this case — treated like CASE B below.
     ///       - CASE B, `isReadyToPlay && !seekable`: readyToPlay(player:) has
     ///         already fired and nothing reads `shouldSeekTo` again, so this
-    ///         seek never happens — restore the display and log it.
+    ///         seek never happens — log it.
     /// When `isReadyToPlay && seekable` are both true, KSPlayerLayer forwards
     /// the real player's own completion (:337-343) instead; a `false` there
     /// (the underlying seek was superseded by a newer one) is treated like
-    /// CASE A — silent, no restore — since whatever superseded it is already
-    /// correcting the position.
-    func seek(to seconds: TimeInterval, completion: ((Bool) -> Void)? = nil) {
+    /// CASE A — silent — since whatever superseded it is already correcting
+    /// the position.
+    ///
+    /// `autoPlay: layer.options.isSeekedAutoPlay` (not `layer.state.isPlaying`)
+    /// matches the old convenience `seek(time:)` (KSPlayerLayer.swift:540-543)
+    /// in BOTH branches: the else branch stashes it into `isAutoPlay`, and
+    /// `readyToPlay(player:)` (:382) only calls `play()`/replays the deferred
+    /// seek when `isAutoPlay` is true. `layer.state.isPlaying` is
+    /// `.buffering || .bufferFinished` and is never true pre-ready (the layer
+    /// sits in `.preparing`), so it would silently break autostart-after-seek
+    /// and the CASE A replay for every seek issued before ready — not #117's
+    /// bug to introduce.
+    func seek(to seconds: TimeInterval) {
         guard seconds.isFinite, let layer = player.playerLayer else {
-            player.seek(time: seconds)
-            completion?(true)
+            if !seconds.isFinite {
+                Self.log.info("seek rejected non-finite target=\(seconds, privacy: .public)")
+            }
             return
         }
         let wasReadyToPlay = layer.player.isReadyToPlay
         let wasSeekable = layer.player.seekable
-        layer.seek(time: seconds, autoPlay: layer.state.isPlaying) { [weak self] finished in
-            guard let self, !finished else {
-                completion?(true)
-                return
-            }
+        layer.seek(time: seconds, autoPlay: layer.options.isSeekedAutoPlay) { [weak self] finished in
+            guard let self, !finished else { return }
             let dropped = (wasReadyToPlay && !wasSeekable) || (!wasReadyToPlay && seconds == 0)
             if dropped {
                 let live = self.player.timemodel.currentTime
                 Self.log.info("seek dropped target=\(seconds, privacy: .public)s live=\(live, privacy: .public)s")
             }
-            completion?(!dropped)
         }
     }
 

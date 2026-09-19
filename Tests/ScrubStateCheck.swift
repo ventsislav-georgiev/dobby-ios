@@ -12,7 +12,6 @@ enum ScrubStateCheck {
         idle()
         knobStartsAtTheLivePosition()
         releaseReportsWhereTheDragEnded()
-        rejectRestoresTheLivePosition()
         print("ScrubStateCheck: all checks passed")
     }
 
@@ -62,21 +61,5 @@ enum ScrubStateCheck {
         s.update(to: 360)
         check(s.end() == 360, "release reports the last dragged value")
         check(!s.isScrubbing, "release stops scrubbing")
-    }
-
-    /// #117: PlaybackCoordinator reports a genuinely dropped seek (KSPlayerLayer
-    /// player ready but not seekable, or the shouldSeekTo>0-never-replayed
-    /// target-0 exception) — the failed target must not linger anywhere that
-    /// could still surface it, so `reject` drops the display straight back to
-    /// the live clock instead of the value the finger let go of.
-    static func rejectRestoresTheLivePosition() {
-        var s = ScrubState()
-        s.begin(at: 10)
-        s.update(to: 500)
-        s.reject(to: 12)
-        check(!s.isScrubbing, "a rejected seek stops scrubbing")
-        check(s.value == 12, "a rejected seek clears the held value to the live position, not the dropped target (500)")
-        check(s.displayed(live: 12) == 12,
-              "a rejected seek shows the live position, not the dropped target")
     }
 }
