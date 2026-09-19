@@ -470,6 +470,45 @@ if "branch:" in code_text:
 print("PASS: project.yml pins KSPlayer to revision 75e590e, never a branch (#130)")
 KSPLAYERPINPY
 
+# #132: the KSPlayer pin only moves on the strength of a device round, and that round's
+# gate is one log line. KSOptions.firstPlayerType is a REQUEST — KSPlayerLayer silently
+# swaps to secondPlayerType (KSMEPlayer) when the first player cannot open the stream,
+# so a direct-file MKV runs KSMEPlayer while isAdaptivePair is false. Every source change
+# in the 6dda7cc..75e590e range except the M3U scanner is under MEPlayer/ or Subtitle/,
+# which means a round that cannot READ the engine proves nothing about the move. Delete
+# this line and the next round comes back green having tested the wrong player; nothing
+# else in this file notices, which is why it is pinned here.
+python3 - <<'ENGINELOGPY'
+import re, sys
+
+with open("Dobby/Playback/PlaybackCoordinator.swift") as f:
+    src = f.read()
+
+try:
+    body_start = src.index("func onStateChanged(")
+except ValueError:
+    sys.stderr.write("FAIL: PlaybackCoordinator has no onStateChanged — the #132 engine-log check needs updating\n")
+    sys.exit(1)
+body = src[body_start:]
+
+if 'mark("engine=' not in body:
+    sys.stderr.write("FAIL: PlaybackCoordinator.onStateChanged no longer logs engine=, so a device round cannot tell which player opened the stream and the #132 gate is gone\n")
+    sys.exit(1)
+
+# It has to report the player that actually opened, not the lane that was requested:
+# reading isAdaptivePair alone would print "KSMEPlayer" for a swap it never saw.
+engine_idx = body.index('mark("engine=')
+preceding = body[:engine_idx]
+if "type(of:" not in preceding:
+    sys.stderr.write("FAIL: the #132 engine= line no longer derives the engine from type(of:) on the live player, so it reports the requested lane rather than the player that opened\n")
+    sys.exit(1)
+if ".readyToPlay" not in preceding:
+    sys.stderr.write("FAIL: the #132 engine= line is no longer under a .readyToPlay branch, so it can fire before a fallback swap has happened\n")
+    sys.exit(1)
+
+print("PASS: PlaybackCoordinator logs the engine that actually opened the stream, so a #132 device round can be gated on it")
+ENGINELOGPY
+
 # #128: the elapsed label used to format itself alone (d:dd under an hour, d:dd:dd at
 # or above), so scrubbing across the 1:00:00 mark grew it by three characters mid-drag,
 # reflowing the controlBar HStack and sliding the Slider under the tracking finger.
