@@ -8,10 +8,26 @@ import Foundation
 
 @main
 enum ServerAddressesCheck {
-    static func main() {
+    static func main() async {
+        if CommandLine.arguments.contains("--expect-no-server") {
+            await expectNoServer()
+            return
+        }
         classification()
         normalization()
+        noServerSeam()
         print("ServerAddressesCheck: all checks passed")
+    }
+
+    /// Wiring pin for the #068 seam (run-checks.sh builds a separate `-D DEBUG` binary, OUT3,
+    /// and runs `DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server`): unlike
+    /// `noServerSeam()` below, which only pins how the predicate parses its input, this exercises
+    /// the actual call site in `probe(_:)` through `resolve()` — it fails if the guard is ever
+    /// deleted or moved out from under the DEBUG gate.
+    static func expectNoServer() async {
+        let resolved = await ServerAddresses.resolve()
+        check(resolved == nil, "DOBBY_NO_SERVER=1 makes resolve() report every candidate absent")
+        print("ServerAddressesCheck --expect-no-server: seam wiring verified")
     }
 
     static func check(_ condition: Bool, _ what: String) {
@@ -55,5 +71,17 @@ enum ServerAddressesCheck {
               == "https://dobby.solarflare-tarpon.ts.net", "an explicit https origin round-trips")
         check(ServerAddresses.normalize("ftp://x") == nil, "a non-http(s) scheme is refused")
         check(ServerAddresses.normalize("   ") == nil, "blank input is refused")
+    }
+
+    /// #068 device done-condition test seam.
+    static func noServerSeam() {
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "1"]) == true,
+              "DOBBY_NO_SERVER=1 activates the seam")
+        check(ServerAddresses.noServerSeamActive([:]) == false,
+              "seam is off when the var is unset")
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "0"]) == false,
+              "any value other than exactly \"1\" leaves the seam off")
+        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "true"]) == false,
+              "no truthy-string coercion — exact match only")
     }
 }
