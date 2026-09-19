@@ -136,8 +136,15 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// than shipping a silently dead lane. Upgrade path if it ever goes: move the
     /// two paths onto the `WKScriptMessageHandlerWithReply` bridge, taking the
     /// caller's origin from `WKFrameInfo.securityOrigin` instead of the header.
+    ///
+    /// #151 passes `OfflineSchemeHandler.scheme` here as well: the Pi-less cold start
+    /// addresses the bundled shell's scripts and stylesheet on `dobby-offline:` from a
+    /// simulated document on the Pi's https origin, which is the same blockable-mixed-content
+    /// refusal this call exists to lift — and for a classic `<script src>` it is a refusal
+    /// with no `catch` anywhere, just a blank page.
     @discardableResult
-    static func registerAsSecureScheme(in configuration: WKWebViewConfiguration) -> Bool {
+    static func registerAsSecureScheme(in configuration: WKWebViewConfiguration,
+                                       scheme: String = ApiSchemeHandler.scheme) -> Bool {
         // `processPool` is deprecated as a configuration *knob* — two fresh
         // configurations hand back different WKProcessPool objects (measured), so
         // pool identity is irrelevant. The registration is process-global: any pool

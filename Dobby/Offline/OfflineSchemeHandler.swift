@@ -8,17 +8,26 @@ import WebKit
 /// URL shape: `dobby-offline:///<bookId>/<fileName>` (each segment percent-encoded by
 /// the web). Honors HTTP `Range` so audio scrubbing works. Streams in chunks so a
 /// large .m4b never loads fully into memory.
+///
+/// Since #151 it has a second root, picked by the URL's *host*: `dobby-offline://shell/…`
+/// serves the bundled app shell out of the app bundle, which is how a never-paired
+/// device's simulated document (`BundledShell`) reaches its own scripts and stylesheet.
+/// The empty-host form above is unchanged and still means Documents/Offline.
 final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "dobby-offline"
 
     private let root: URL
+    private let shellRoot: URL?
     private let queue = DispatchQueue(label: "com.solarflare.dobby.offline-scheme", qos: .userInitiated)
     private var active = Set<ObjectIdentifier>()
     private let lock = NSLock()
 
-    override init() {
+    /// `shellRoot` is injectable only so `Tests/BundledShellWebViewCheck.swift` can point
+    /// a real WKWebView at a real directory; the app always takes the default.
+    init(shellRoot: URL? = BundledShell.root) {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         root = docs.appendingPathComponent("Offline", isDirectory: true)
+        self.shellRoot = shellRoot
         super.init()
     }
 
@@ -117,10 +126,19 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
 
     // MARK: - Helpers
 
-    /// `dobby-offline:///<bookId>/<fileName>` → Offline/<bookId>/<fileName>, rejecting `..`.
-    private func fileURL(for url: URL) -> URL? {
+    /// `dobby-offline:///<bookId>/<fileName>` → Offline/<bookId>/<fileName>, and
+    /// `dobby-offline://shell/<path>` → the bundled shell's <path>. Both reject `..`.
+    ///
+    /// The two roots differ in their minimum depth on purpose: a downloaded file is always
+    /// `<bookId>/<fileName>`, while the shell has `/styles.css` at depth one.
+    func fileURL(for url: URL) -> URL? {
         let parts = url.path.split(separator: "/").map { String($0).removingPercentEncoding ?? String($0) }
-        guard parts.count >= 2, !parts.contains("..") else { return nil }
+        guard !parts.contains("..") else { return nil }
+        if url.host == BundledShell.host {
+            guard let shellRoot, !parts.isEmpty else { return nil }
+            return parts.reduce(shellRoot) { $0.appendingPathComponent($1) }
+        }
+        guard parts.count >= 2 else { return nil }
         return parts.reduce(root) { $0.appendingPathComponent($1) }
     }
 
@@ -141,8 +159,29 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
         return true
     }
 
+    /// #151 added the shell's types, and the two that matter were measured rather than
+    /// assumed (`Tests/BundledShellWebViewCheck.swift`, supervisor mutants 3 and 3b):
+    ///
+    /// - `text/css` is LOAD-BEARING. Serve the stylesheet as `application/octet-stream`
+    ///   and WebKit does not apply it — the measured mutant left the page's custom
+    ///   property unset, i.e. the shell boots unstyled.
+    /// - `text/javascript` is NOT enforced here. Deleting the `js` case left the
+    ///   classic `<script src="dobby-offline://shell/js/…">` executing anyway, so WebKit
+    ///   is lenient about a custom scheme's script MIME type. It is emitted regardless,
+    ///   because it is the correct type and nothing should rest on that leniency —
+    ///   `BundledShellCheck` is what holds it, not the WKWebView.
+    ///
+    /// Everything else here is ordinary correctness; before #151 all of it fell through
+    /// to `application/octet-stream`.
     static func mime(for ext: String) -> String {
         switch ext.lowercased() {
+        case "js", "mjs": return "text/javascript"
+        case "css": return "text/css"
+        case "html": return "text/html"
+        case "json": return "application/json"
+        case "wasm": return "application/wasm"
+        case "svg": return "image/svg+xml"
+        case "png": return "image/png"
         case "m4a", "m4b", "aac": return "audio/mp4"
         case "mp3": return "audio/mpeg"
         case "opus", "ogg": return "audio/ogg"
