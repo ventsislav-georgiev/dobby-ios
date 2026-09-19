@@ -27,22 +27,31 @@ enum ApiSchemeWebViewCheck {
     private final class SpyHandler: NSObject, WKURLSchemeHandler {
         private let inner: ApiSchemeHandler
         private let lock = NSLock()
-        private var seen: [(url: String, origin: String?)] = []
+        private var seen: [(url: String, origin: String?, method: String, body: Data?, stream: Bool)] = []
 
         init(server: URL) {
             self.inner = ApiSchemeHandler(server: server)
             super.init()
         }
 
-        var started: [(url: String, origin: String?)] {
+        var started: [(url: String, origin: String?, method: String, body: Data?, stream: Bool)] {
             lock.lock(); defer { lock.unlock() }
             return seen
         }
 
         func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
             lock.lock()
+            // #149 records the body as well. WebKit populating `httpBody` for a
+            // scheme-handled POST is the measured premise the whole iOS settings
+            // write rests on — it is why this side needs no JS bridge and no 409
+            // the way Android does, and if a future WebKit stops doing it, every
+            // save on a Pi-less iPhone turns into the handler's 400 with nothing
+            // else in the repo noticing.
             seen.append((task.request.url?.absoluteString ?? "<nil>",
-                         task.request.value(forHTTPHeaderField: "Origin")))
+                         task.request.value(forHTTPHeaderField: "Origin"),
+                         task.request.httpMethod ?? "<nil>",
+                         task.request.httpBody,
+                         task.request.httpBodyStream != nil))
             lock.unlock()
             inner.webView(webView, start: task)
         }
@@ -104,6 +113,22 @@ enum ApiSchemeWebViewCheck {
         """)
     }
 
+    /// The same, with a body — `body` is interpolated into a JS string literal, so
+    /// every fixture passed here is plain ASCII with no quotes or backslashes.
+    private static func postResult(_ webView: WKWebView, _ url: String, _ body: String) -> String {
+        evaluate(webView, """
+          try {
+            const r = await fetch('\(url)', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: '\(body)'
+            });
+            return 'status ' + r.status;
+          }
+          catch (e) { return 'error ' + e.name + ': ' + e.message; }
+        """)
+    }
+
     static func main() {
         _ = NSApplication.shared
 
@@ -145,16 +170,46 @@ enum ApiSchemeWebViewCheck {
         let secretLane = fetchResult(webView, "\(ApiSchemeHandler.scheme)://proxy?target=imdb-graphql")
         print("secret lane:  \(secretLane)")
 
-        // display-only: the assertions are the three check(...) calls below, not this loop.
+        // #149's premise, measured rather than assumed. Deliberately aimed at the
+        // PROXY host, not `settings`: `serveProxy`'s `default:` answers 400 on the
+        // unknown target before anything reads the Keychain or the mirror, so this
+        // check keeps the promise in its own header — it touches neither the
+        // network nor the Keychain — while still proving what WebKit hands a scheme
+        // handler for a POST. The settings lane's own merge is values, in
+        // ApiSchemeHandlerCheck; what cannot be proved there is that a body reaches
+        // a scheme handler AT ALL.
+        let postBody = "{\"fixture\":\"not-a-secret\"}"
+        let postLane = postResult(webView, "\(ApiSchemeHandler.scheme)://proxy?target=nonsense", postBody)
+        print("post lane:    \(postLane)")
+
+        // display-only: the assertions are the check(...) calls below, not this loop.
         for task in handler.started {
             let carried = task.origin ?? "<no Origin header>"
             let gate = ApiSchemeHandler.acao(origin: task.origin,
                                              serverOrigin: ApiSchemeHandler.normalizedOrigin(server.absoluteString),
                                              secret: true) ?? "<nil, no ACAO emitted>"
-            print("start:        \(task.url)\n              Origin: \(carried) -> acao(secret: true) = \(gate)")
+            let carriedBody = task.body.map { "\($0.count) bytes" } ?? "<nil>"
+            print("start:        \(task.method) \(task.url)\n              Origin: \(carried) -> acao(secret: true) = \(gate)"
+                  + "\n              httpBody: \(carriedBody), httpBodyStream: \(task.stream)")
         }
 
-        check(handler.started.count == 2, "both fetches reached the scheme handler")
+        check(handler.started.count == 3, "all three fetches reached the scheme handler")
+        check(postLane == "status 400", "the POST lane answers an HTTP status, not a network error")
+        let posted = handler.started.filter { $0.method == "POST" }
+        check(posted.count == 1, "exactly one task arrived as a POST")
+        if let post = posted.first {
+            // The measurement #149 was designed on. Nil here does not merely fail a
+            // test: it means the iOS settings write silently 400s on every save, and
+            // the design has to go back to Android's bridge-and-409 shape.
+            check(post.body != nil,
+                  "WKURLSchemeTask.request.httpBody is populated for a scheme-handled POST "
+                      + "(#149's premise; nil here voids the whole iOS settings-write design)")
+            check(post.body == Data(postBody.utf8),
+                  "the body WebKit delivered is the bytes the page sent, unchanged")
+            check(!post.stream,
+                  "the body arrives as httpBody, not only as httpBodyStream — the handler "
+                      + "reads httpBody and would refuse a stream-only body with a 400")
+        }
         check(publicLane == "status 400", "the public lane answers an HTTP status, not a network error")
         // The one that was broken: without the fix this rejects before the handler.
         check(secretLane == "status 400", "the secret lane answers an HTTP status, not a network error")

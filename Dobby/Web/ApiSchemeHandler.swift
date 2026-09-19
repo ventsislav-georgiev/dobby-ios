@@ -21,6 +21,12 @@ import os
 /// holding the whole `/api/settings` payload, secrets included (owner decision
 /// #045), so the credential lane below has a token with the Pi unreachable.
 ///
+/// Since #149 (M5-F) it also takes `POST`, so a phone whose Pi is off has
+/// somewhere for a settings write to land. The body is merged one key deep into
+/// the Keychain document rather than replacing it — the form only sends the
+/// fields the user filled in — and the mirror is then marked as ahead of the Pi
+/// so a background refresh cannot pull the pre-write body back over it.
+///
 /// `dobby-api://proxy?target=…` — the same two legs as `ProxyRoutes.swift` and
 /// `ApiInterceptor.java`: allowlisted IMDb artwork with nothing injected, and the
 /// credential lane, which is the only thing here that spends a secret and is
@@ -72,11 +78,21 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         let method = (task.request.httpMethod ?? "GET").uppercased()
         let origin = task.request.value(forHTTPHeaderField: "Origin")
+        // #149: read off the request here, on the thread WebKit started the task on,
+        // for the same reason `url`/`method`/`origin` are — `queue.async` below runs
+        // later and `WKURLSchemeTask`'s request is not documented as safe to touch
+        // from anywhere. Unlike Android's `WebResourceRequest`, which carries no body
+        // at all and is why `MirrorWriteBack` exists over there, WebKit does populate
+        // `httpBody` for a scheme-handled POST — measured against a real `WKWebView`
+        // before this leg was written (#149 round 1 evidence). `httpBodyStream` was
+        // nil in that measurement; a body arriving only as a stream would read here
+        // as "no body" and be refused with a 400 rather than stored empty.
+        let body = task.request.httpBody
 
         queue.async { [weak self] in
             guard let self else { return }
             switch url.host?.lowercased() {
-            case "settings": self.serveSettings(task, id, url, method, origin)
+            case "settings": self.serveSettings(task, id, url, method, origin, body)
             case "proxy": self.serveProxy(task, id, url, method, origin)
             default: self.fail(task, id, 404, "Unknown dobby-api route", origin)
             }
@@ -143,7 +159,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     // MARK: - dobby-api://settings
 
     private func serveSettings(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
-                               _ url: URL, _ method: String, _ origin: String?) {
+                               _ url: URL, _ method: String, _ origin: String?,
+                               _ body: Data?) {
         let startedAt = DispatchTime.now()
         var status = 0
         var length = 0
@@ -153,9 +170,43 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         #if DEBUG
         defer { self.logApi(route: "settings", status: status, length: length, source: source, startedAt: startedAt) }
         #endif
-        guard method == "GET" else {
+        guard method == "GET" || method == "POST" else {
             status = 405
-            fail(task, id, 405, "Settings mirror is GET only", origin, secret: true); return
+            fail(task, id, 405, "Settings mirror takes GET and POST", origin, secret: true); return
+        }
+        if method == "POST" {
+            source = "mirror"
+            // A write only ever reaches here because the page's own POST to the Pi
+            // already failed — `mirroredWrite` (`js/03-storage-net.js`) tries
+            // `API + path` first and only then the wrapper's URL. So the Pi is the
+            // write side whenever it is up, exactly as before, and this leg is the
+            // Pi-off case only.
+            //
+            // 200, not Android's 409: over there the interceptor cannot see the body,
+            // so it must refuse and let the page hand the bytes to the JS bridge
+            // instead. Here the handler IS the destination — the merge below is the
+            // write — so a 409 would be a lie the page would act on (`mirroredWrite`
+            // treats any non-ok as "not taken" and rethrows the Pi's failure, which
+            // is the user's save reported as lost while it sat safely in the
+            // Keychain). `fetchWithRetry` never retries a 200, so the answer is final.
+            guard let patch = body, !patch.isEmpty,
+                  let merged = Self.mergedSettings(base: SettingsMirrorStore.load(), patch: patch) else {
+                // Refused rather than stored: a body we cannot parse is a body we
+                // cannot merge, and storing it whole would make a partial or corrupt
+                // document indistinguishable from a complete one on the next read.
+                // 400 is not in `fetchWithRetry`'s retry list, so the page sees the
+                // failure straight away instead of backing off into it.
+                status = 400
+                fail(task, id, 400, "Settings write needs a JSON object body", origin, secret: true); return
+            }
+            SettingsMirrorStore.save(merged)
+            SettingsMirrorStore.markAheadOfServer()
+            status = 200
+            length = 2
+            respond(task, id, status: 200, contentType: "application/json",
+                    body: Data("{}".utf8), origin: origin, secret: true,
+                    extra: ["Cache-Control": "no-store"])
+            return
         }
         let mirror = SettingsMirrorStore.load()
         source = (mirror?.isEmpty == false) ? "mirror" : "network"
@@ -184,7 +235,115 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         return (503, Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8), false)
     }
 
+    /// The nine field names `GET /api/settings` always sends as an explicit JSON
+    /// `null` when unset, so a client can tell "unset" apart from "field absent"
+    /// — `SettingsRoutes.swift:39-48` in the server repo (dobby, main @ b0526e4).
+    ///
+    /// Transcribed rather than read at build time, because the two repos build
+    /// separately with nothing enforcing they stay in step; a mismatch between
+    /// this list and the Swift one on the Pi is exactly the drift
+    /// `ApiSchemeHandlerCheck.settingsSeedCoversEveryNullKey` exists to catch on
+    /// this side, by naming the count and every literal so a future edit to
+    /// either list has to touch this comment too. Android holds the same nine in
+    /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #145 @ 71e9703fb).
+    static let settingsNullKeys = [
+        "imdbAuthToken",
+        "premiumizeApiKey",
+        "openSubtitlesUsername",
+        "openSubtitlesPassword",
+        "subdlApiKey",
+        "subsourceApiKey",
+        "spotifyClientId",
+        "preferredSubtitleLanguage",
+        "preferredAudioLanguage",
+    ]
+
+    /// The document a merge starts from when nothing better exists: every
+    /// `settingsNullKeys` name present with an explicit `null`, and nothing else.
+    ///
+    /// iOS needs this for the same reason Android does (#145, M5-A), and the
+    /// decision is not inherited — it was re-taken here. §11f puts the Pi-less
+    /// *cold start* out of scope (that is #151), so a never-paired iPhone cannot
+    /// reach this code at all, which is the case the Android seed was written
+    /// for. But an *empty mirror on a loaded page* is still reachable on iOS: the
+    /// Pi served `index.html` and went away before the settings GET, or
+    /// `settingsOutcome` answered 503 and stored nothing, or the Keychain did not
+    /// survive a device restore. In that state a one-key POST merged into `{}`
+    /// would be stored as the whole document, and the page's `applyServerSettings`
+    /// (`js/14-settings.js:121-170`) treats a key it does not see as cleared — so
+    /// the next read would blank every sibling secret. Seeding with explicit nulls
+    /// is what makes a partial POST impossible to mistake for a complete document.
+    ///
+    /// Deliberately not the non-secret settings a box already has (theme, subtitle
+    /// sizing, ...): those live in the page's own localStorage and a second copy
+    /// here would only be one more thing to keep in step.
+    static var settingsSeed: [String: Any] {
+        var seed: [String: Any] = [:]
+        for key in settingsNullKeys { seed[key] = NSNull() }
+        return seed
+    }
+
+    static func seedSettingsJson() -> Data {
+        (try? JSONSerialization.data(withJSONObject: settingsSeed)) ?? Data("{}".utf8)
+    }
+
+    /// `patch` laid over `base` one key deep — the whole point of the write leg,
+    /// and the property most worth being wrong about.
+    ///
+    /// The settings form omits every secret left blank (`js/14-settings.js:490-499`
+    /// only sets a key when its field is non-empty) and `savePreferredSubtitleLanguage`
+    /// posts a single key on its own (`js/17-video-playback.js:123-127`), so a POST
+    /// body is a patch, never a document. Storing one whole would drop
+    /// `imdbAuthToken` and `premiumizeApiKey` out of the mirror precisely while the
+    /// Pi is unreachable and the mirror is the only copy of them. The Pi's own
+    /// `POST /api/settings` applies keys by presence for the same reason
+    /// (`SettingsRoutes.swift:83-106`), so this matches the server it stands in for.
+    ///
+    /// Shallow on purpose: every settings value is a scalar or an array the page
+    /// replaces whole (`serverAddresses`, `sourceOrder`), so there is no nested
+    /// object a deep merge would be needed for, and a deep merge would make an
+    /// array impossible to shorten.
+    ///
+    /// `nil` when `patch` is not a JSON object — the caller refuses the write
+    /// rather than storing something it could not read.
+    ///
+    /// A `null` in the patch is a value, not an omission: it lands as `NSNull` and
+    /// the key stays present, which is how "cleared on this device" survives a read
+    /// that distinguishes null from absent.
+    static func mergedSettings(base: Data?, patch: Data) -> Data? {
+        guard let patchObject = (try? JSONSerialization.jsonObject(with: patch)) as? [String: Any] else {
+            return nil
+        }
+        var document = settingsSeed
+        if let base, !base.isEmpty,
+           let existing = (try? JSONSerialization.jsonObject(with: base)) as? [String: Any] {
+            for (key, value) in existing { document[key] = value }
+        }
+        for (key, value) in patchObject { document[key] = value }
+        return try? JSONSerialization.data(withJSONObject: document)
+    }
+
     private func refreshSettingsInBackground() {
+        // #149: the mirror is AHEAD of the Pi once a write has landed here, and a
+        // pull now would be carrying the Pi's pre-write body — the same direction
+        // Android's `MirrorWriteBack` class doc spells out ("while a write is
+        // queued, the mirror wins"). Without this, the sequence the milestone is
+        // actually about — Pi off, key saved on the phone, Pi comes back — loses
+        // the key on the next GET.
+        //
+        // ponytail: this is only the "mirror wins" half. Android's other half —
+        // queue the patch, push it to the Pi, and let the Pi win again the moment
+        // it lands — is `MirrorWriteBack` (dobby-android, #078) and has no iOS
+        // counterpart yet, so the flag is set and never cleared: once this iPhone
+        // has saved a setting with the Pi off, its settings document stops
+        // auto-refreshing from the Pi. Degraded and honest, and strictly better
+        // than the alternative, which is losing the user's key. Upgrade path: an
+        // iOS write-back that stores the patch bytes beside the mirror and drains
+        // them here before pulling, at which point this guard becomes "drain, then
+        // pull" and clears itself. Deliberately not built in #149 — the whole
+        // document cannot be pushed in a queue's place, because the Pi applies
+        // keys by presence and a stale mirror's `null`s would clear live values.
+        if SettingsMirrorStore.isAheadOfServer { return }
         refreshing.lock()
         if refreshInFlight { refreshing.unlock(); return }
         refreshInFlight = true
@@ -904,6 +1063,19 @@ enum SettingsMirrorStore {
         SecItemDelete(baseQuery as CFDictionary)
         SecItemAdd(insert as CFDictionary, nil)
     }
+
+    /// Whether this device holds a settings change the Pi has never seen (#149).
+    ///
+    /// `UserDefaults` and not the Keychain item: it is one bit, it is not a
+    /// secret, and keeping it out of the item means the item stays exactly the
+    /// raw body the page reads back verbatim. It has to outlive a force-stop for
+    /// the same reason the mirror does — the write it guards was made with the Pi
+    /// off, so the next launch is the first chance anything has to get it wrong.
+    private static let aheadKey = "eu.illegible.dobbyios.api-mirror.aheadOfServer"
+
+    static var isAheadOfServer: Bool { UserDefaults.standard.bool(forKey: aheadKey) }
+
+    static func markAheadOfServer() { UserDefaults.standard.set(true, forKey: aheadKey) }
 
     static func imdbAuthToken() -> String? {
         imdbAuthToken(from: load())

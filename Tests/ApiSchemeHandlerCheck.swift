@@ -27,6 +27,9 @@ enum ApiSchemeHandlerCheck {
         imageCachePolicy()
         imageLaneIsolation()
         imageCacheNonSuccessNeverHits()
+        settingsSeedCoversEveryNullKey()
+        settingsPatchMergesShallowly()
+        settingsPatchIsRefusedWhenItIsNotAnObject()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -309,5 +312,147 @@ enum ApiSchemeHandlerCheck {
 
         check(ApiSchemeHandler.cachedImageAnswer(cache, request) == nil,
               "a stored 404 is never served as a cache hit")
+    }
+
+    // MARK: #149 — the local settings document a POST writes into
+    //
+    // Every fixture value here is an obvious placeholder. The real ones are
+    // secrets and never appear in this repo, in a log, or in a report.
+
+    /// Decodes a merge result the way the page would read it back, keeping
+    /// "present but null" apart from "absent" — the distinction the whole seed
+    /// exists for.
+    static func object(_ data: Data?) -> [String: Any] {
+        guard let data, let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            check(false, "merge result is not a JSON object")
+            return [:]
+        }
+        return o
+    }
+
+    static func isNull(_ o: [String: Any], _ key: String) -> Bool {
+        guard let v = o[key] else { return false }   // absent is NOT null
+        return v is NSNull
+    }
+
+    static func settingsSeedCoversEveryNullKey() {
+        // The drift guard. The count and every literal are named here as well as in
+        // ApiSchemeHandler, so an edit to either list has to touch this check too —
+        // and a rename on the Pi (SettingsRoutes.swift:39-48) that never reaches
+        // this repo shows up as a failure rather than as a silently blanked field.
+        let expected = [
+            "imdbAuthToken",
+            "premiumizeApiKey",
+            "openSubtitlesUsername",
+            "openSubtitlesPassword",
+            "subdlApiKey",
+            "subsourceApiKey",
+            "spotifyClientId",
+            "preferredSubtitleLanguage",
+            "preferredAudioLanguage",
+        ]
+        check(ApiSchemeHandler.settingsNullKeys.count == 9,
+              "SettingsRoutes.swift:39-48 declares nine null keys; this side has "
+                  + "\(ApiSchemeHandler.settingsNullKeys.count)")
+        check(ApiSchemeHandler.settingsNullKeys == expected,
+              "the transcribed null-key list drifted from the one named in this check")
+
+        let seed = object(ApiSchemeHandler.seedSettingsJson())
+        for key in expected {
+            check(seed[key] != nil, "the seed is missing \(key), so a one-key POST would blank it on the next read")
+            check(isNull(seed, key), "the seed carries \(key) as something other than an explicit null")
+        }
+        check(seed.count == expected.count,
+              "the seed carries \(seed.count) keys, not the nine declared ones — it must be the null keys and nothing else")
+    }
+
+    static func settingsPatchMergesShallowly() {
+        let patch = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
+
+        // (a) into the first-run seed: the key lands AND its eight siblings survive
+        //     as explicit nulls. Both halves — a merge that stored the patch whole
+        //     would pass the first and fail the second.
+        let ontoSeed = object(ApiSchemeHandler.mergedSettings(base: ApiSchemeHandler.seedSettingsJson(),
+                                                              patch: patch))
+        check(ontoSeed["premiumizeApiKey"] as? String == "fixture-key",
+              "a one-key POST did not apply its own key")
+        check(ontoSeed.count == 9, "the merge onto the seed lost or invented keys (\(ontoSeed.count) of 9)")
+        for key in ApiSchemeHandler.settingsNullKeys where key != "premiumizeApiKey" {
+            check(isNull(ontoSeed, key), "the merge blanked the sibling \(key) out of the document entirely")
+        }
+
+        // (b) with no mirror at all — the empty-Keychain-on-a-loaded-page case —
+        //     the seed is what the patch lands on, not `{}`.
+        let ontoNothing = object(ApiSchemeHandler.mergedSettings(base: nil, patch: patch))
+        check(ontoNothing["premiumizeApiKey"] as? String == "fixture-key",
+              "a POST with no mirror did not apply its key")
+        check(ontoNothing.count == 9,
+              "a POST with no mirror was stored as a partial document (\(ontoNothing.count) keys), "
+                  + "which the page cannot tell from a complete one")
+        let ontoEmpty = object(ApiSchemeHandler.mergedSettings(base: Data(), patch: patch))
+        check(ontoEmpty.count == 9, "an empty mirror is not treated as no mirror")
+
+        // (c) into a real document: the patched key changes and EVERY other key
+        //     keeps its own value. This is the property the entry is about.
+        let existing = Data("""
+        {"imdbAuthToken":"fixture-token","premiumizeApiKey":"fixture-old",
+         "openSubtitlesUsername":"fixture-user","openSubtitlesPassword":"fixture-pass",
+         "subdlApiKey":null,"subsourceApiKey":null,"spotifyClientId":"fixture-client",
+         "preferredSubtitleLanguage":"bg,en","preferredAudioLanguage":null,
+         "a4kDefault":true,"maxSourceSizeGiB":20,"serverAddresses":["one","two"]}
+        """.utf8)
+        let merged = object(ApiSchemeHandler.mergedSettings(base: existing, patch: patch))
+        check(merged["premiumizeApiKey"] as? String == "fixture-key", "the patched key did not change")
+        check(merged["imdbAuthToken"] as? String == "fixture-token", "the merge blanked imdbAuthToken")
+        check(merged["openSubtitlesUsername"] as? String == "fixture-user", "the merge blanked openSubtitlesUsername")
+        check(merged["openSubtitlesPassword"] as? String == "fixture-pass", "the merge blanked openSubtitlesPassword")
+        check(merged["spotifyClientId"] as? String == "fixture-client", "the merge blanked spotifyClientId")
+        check(merged["preferredSubtitleLanguage"] as? String == "bg,en",
+              "the merge blanked preferredSubtitleLanguage")
+        check(isNull(merged, "subdlApiKey"), "the merge turned an explicit null into an absent key")
+        // Keys the seed does not know about are carried too: the seed is a floor,
+        // not an allowlist, and the Pi's document is wider than the nine.
+        check(merged["a4kDefault"] as? Bool == true, "the merge dropped a non-secret key the seed does not declare")
+        check(merged["maxSourceSizeGiB"] as? Int == 20, "the merge dropped maxSourceSizeGiB")
+        check((merged["serverAddresses"] as? [String]) == ["one", "two"], "the merge dropped serverAddresses")
+
+        // (d) the seed must go UNDER the existing document, never over it. Reversing
+        //     those two lines would blank every real value with a null and still
+        //     leave every key present, so (a)-(c) above alone would not catch it.
+        check(merged.count == 12, "the merge onto a real document changed the key count (\(merged.count))")
+
+        // (e) a mirror captured before preferredAudioLanguage joined the null keys
+        //     (1766dd2 in dobby) gets the key back from the seed rather than staying
+        //     absent — absent is what applyServerSettings reads as "say nothing".
+        let preAudio = Data(#"{"imdbAuthToken":"fixture-token","premiumizeApiKey":"fixture-old"}"#.utf8)
+        let healed = object(ApiSchemeHandler.mergedSettings(base: preAudio, patch: patch))
+        check(healed["imdbAuthToken"] as? String == "fixture-token",
+              "the seed overwrote a real value instead of sitting under it")
+        check(isNull(healed, "preferredAudioLanguage"),
+              "a pre-1766dd2 mirror did not get preferredAudioLanguage back as an explicit null")
+
+        // (f) an explicit null in the PATCH is a clear, not an omission: the key
+        //     stays present and reads as null, which is how "cleared here" survives.
+        let cleared = object(ApiSchemeHandler.mergedSettings(base: existing,
+                                                             patch: Data(#"{"imdbAuthToken":null}"#.utf8)))
+        check(cleared["imdbAuthToken"] != nil, "an explicit null in the patch removed the key instead of clearing it")
+        check(isNull(cleared, "imdbAuthToken"), "an explicit null in the patch did not clear the value")
+        check(cleared["premiumizeApiKey"] as? String == "fixture-old",
+              "a clearing patch blanked a sibling it never mentioned")
+    }
+
+    static func settingsPatchIsRefusedWhenItIsNotAnObject() {
+        // The other half of the pair: a body we cannot merge is refused (the caller
+        // turns nil into a 400) rather than stored whole, and a body we CAN merge is
+        // still accepted — a guard that refused everything would pass half of this.
+        for refused in ["[]", "\"fixture\"", "17", "null", "true", "not json at all", ""] {
+            check(ApiSchemeHandler.mergedSettings(base: nil, patch: Data(refused.utf8)) == nil,
+                  "a patch that is not a JSON object was accepted: \(refused)")
+        }
+        check(ApiSchemeHandler.mergedSettings(base: nil, patch: Data("{}".utf8)) != nil,
+              "an empty JSON object is a legal (no-op) patch and must still be accepted")
+        check(ApiSchemeHandler.mergedSettings(base: nil,
+                                              patch: Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)) != nil,
+              "a well-formed patch was refused")
     }
 }
