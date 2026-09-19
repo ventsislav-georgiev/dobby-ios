@@ -379,6 +379,17 @@ need(".simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch
 need(".onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }",
      "PlayerView no longer recovers the lost Slider release from the gesture-state reset")
 
+# Supervisor review addition: the needle above pins the line but not WHERE it hangs, and
+# where is the whole point. On the Slider, the handler dies with the control bar the
+# instant a hide tears it out mid-drag — exactly the case this recovers. On the root it
+# outlives the bar. Pin the placement by position: the root modifier chain (anchored on
+# .onDisappear) comes before the control bar's Slider in this file.
+if not (view_src.index(".onDisappear {")
+        < view_src.index(".onChange(of: sliderTouch)")
+        < view_src.index("Slider(value:")):
+    sys.stderr.write("FAIL: the sliderTouch onChange moved off the root view onto the control bar, where it dies with the Slider it backs up (#131)\n")
+    sys.exit(1)
+
 if view_src.count("sliderTouchEnded()") != 2:   # the declaration and its single call site
     sys.stderr.write("FAIL: sliderTouchEnded() must have exactly one call site (#131)\n")
     sys.exit(1)
