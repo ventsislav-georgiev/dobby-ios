@@ -203,6 +203,12 @@ struct PlayerView: View {
                 Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
+                    // #131 review: a healthy release and a release the recovery already
+                    // committed both reach this branch, and SwiftUI documents no ordering
+                    // between the gesture-state reset and onEditingChanged(false). Capture
+                    // whether THIS callback is the one that seeked, so the two never share
+                    // a log signature.
+                    let seekedHere = !editing && scrub.isScrubbing
                     if editing { controls.scrubbing = true }   // #129: hold the OSD for the whole drag
                     if editing { scrub.begin(at: current) }
                     else if scrub.isScrubbing { playback.seek(to: scrub.end()) }   // #131: skip if the recovery path already committed this drag
@@ -210,7 +216,7 @@ struct PlayerView: View {
                         sliderDidBegin = true
                         Self.log.info("slider scrub begin at=\(current, privacy: .public)s total=\(total, privacy: .public)s")
                     } else {
-                        Self.log.info("slider release delivered target=\(scrub.value, privacy: .public)s")
+                        Self.log.info("slider release delivered target=\(scrub.value, privacy: .public)s seeked=\(seekedHere, privacy: .public)")
                     }
                     if !editing { controls.scrubbing = false }
                     controls.forceShow()
@@ -260,7 +266,7 @@ struct PlayerView: View {
     private func sliderTouchEnded() {
         if scrub.isScrubbing {
             let target = scrub.end()
-            Self.log.info("slider release recovered target=\(target, privacy: .public)s — onEditingChanged(false) never arrived (#131)")
+            Self.log.info("slider release recovered target=\(target, privacy: .public)s scrubWasLive=true (#131)")
             playback.seek(to: target)
         } else if sliderDidBegin {
             Self.log.info("slider touch ended, release already delivered")

@@ -79,7 +79,12 @@ enum ScrubStateCheck {
               "the second release path must see isScrubbing false and not seek again (#131)")
 
         // And a touch that never became a drag must not resurrect the previous drag's
-        // value: iOS's Slider ignores taps on the track, so no begin() ever runs.
-        check(!s.isScrubbing, "a touch with no begin() is not a live scrub")
+        // value: iOS's Slider ignores taps on the track, so no begin() ever runs. Fresh
+        // object on purpose — re-asserting on `s` two lines after the check above passes
+        // for free and says nothing about this case (#131 review).
+        var t = ScrubState()
+        check(!t.isScrubbing, "a touch with no begin() is not a live scrub")
+        t.update(to: 42)
+        check(!t.isScrubbing, "a value arriving without begin() still is not a live scrub")
     }
 }

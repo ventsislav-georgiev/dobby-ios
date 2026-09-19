@@ -384,10 +384,20 @@ need(".onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }",
 # instant a hide tears it out mid-drag — exactly the case this recovers. On the root it
 # outlives the bar. Pin the placement by position: the root modifier chain (anchored on
 # .onDisappear) comes before the control bar's Slider in this file.
-if not (view_src.index(".onDisappear {")
-        < view_src.index(".onChange(of: sliderTouch)")
-        < view_src.index("Slider(value:")):
+# Reviewer follow-up: the window between .onDisappear and Slider(value:) is not tight
+# enough. `private var osd` opens inside that window, and osd is built only under
+# `if controls.visible`, so an onChange re-attached there dies exactly when the OSD
+# hides — the case the root placement exists to survive. Anchor it instead: nothing
+# may DECLARE a new property or function between the root chain and this modifier,
+# which pins it to the root body rather than merely to a range of the file.
+anchor_idx = view_src.index(".onDisappear {")
+change_idx = view_src.index(".onChange(of: sliderTouch)")
+if not (anchor_idx < change_idx < view_src.index("Slider(value:")):
     sys.stderr.write("FAIL: the sliderTouch onChange moved off the root view onto the control bar, where it dies with the Slider it backs up (#131)\n")
+    sys.exit(1)
+between = view_src[anchor_idx:change_idx]
+if "private var " in between or "private func " in between:
+    sys.stderr.write("FAIL: the sliderTouch onChange moved into a nested view body (a declaration opens between it and the root chain); it must hang off the root so it outlives the OSD and the control bar (#131)\n")
     sys.exit(1)
 
 if view_src.count("sliderTouchEnded()") != 2:   # the declaration and its single call site
