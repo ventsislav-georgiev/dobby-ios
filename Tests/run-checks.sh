@@ -140,9 +140,9 @@ SCRUBPY
 python3 - <<'PY'
 import sys
 src = open("scripts/deepen-macos-frameworks.sh").read()
-for needle, what in [("FRAMEWORKS_FOLDER_PATH", "the app bundle's Frameworks directory"),
-                     ("BUILT_PRODUCTS_DIR", "the built products directory"),
-                     ("SourcePackages/checkouts", "the SPM checkout")]:
+for needle, what in [('for dir in "${TARGET_BUILD_DIR:-}"', "the app bundle's Frameworks directory"),
+                     ('for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"', "the built products directory"),
+                     ('for xc in "$SRC"/*.xcframework', "the SPM checkout")]:
     if needle not in src:
         sys.stderr.write(f"FAIL: deepen-macos-frameworks.sh no longer deepens {what} (#112)\n")
         sys.exit(1)

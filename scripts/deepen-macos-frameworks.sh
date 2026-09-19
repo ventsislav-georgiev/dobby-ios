@@ -9,7 +9,6 @@ set -euo pipefail
 
 SRC="${BUILD_DIR}/../../SourcePackages/checkouts/FFmpegKit/Sources"
 [ -d "$SRC" ] || SRC="${SRCROOT}/build/SourcePackages/checkouts/FFmpegKit/Sources"
-[ -d "$SRC" ] || { echo "deepen: no FFmpegKit at $SRC"; exit 0; }
 
 deepen() {
   local fw="$1" name tmp
@@ -32,13 +31,20 @@ deepen() {
   echo "deepen: $name"
 }
 
-for xc in "$SRC"/*.xcframework; do
-  m="$xc/macos-arm64_x86_64"
-  [ -d "$m" ] || continue
-  for fw in "$m"/*.framework; do
-    [ -d "$fw" ] && deepen "$fw"
+# Missing checkout only takes out pass 1 (nothing to deepen at its source) —
+# passes 2 and 3 still run below, since a populated products/app-bundle dir with no
+# checkout is the exact Validate failure state, not a reason to deepen nothing.
+if [ -d "$SRC" ]; then
+  for xc in "$SRC"/*.xcframework; do
+    m="$xc/macos-arm64_x86_64"
+    [ -d "$m" ] || continue
+    for fw in "$m"/*.framework; do
+      [ -d "$fw" ] && deepen "$fw"
+    done
   done
-done
+else
+  echo "deepen: no FFmpegKit at $SRC"
+fi
 
 # Xcode stages each slice into BUILT_PRODUCTS_DIR via ProcessXCFramework (cached
 # from earlier builds, so it may be stale-shallow). Deepen those staged copies too,
@@ -55,10 +61,17 @@ done
 # that copy can run first, embedding a still-shallow framework straight from $SRC
 # above. Whichever way it lands, fix the copy actually inside the app bundle too,
 # since that's what Validate inspects.
+# TARGET_BUILD_DIR/BUILT_PRODUCTS_DIR/CONFIGURATION_BUILD_DIR commonly resolve to
+# the same directory — visit each real path once, so one shallow framework doesn't
+# get the "no binary" skip logged three times.
+seen=""
 for dir in "${TARGET_BUILD_DIR:-}" "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
   [ -n "$dir" ] && [ -n "${FRAMEWORKS_FOLDER_PATH:-}" ] || continue
   fdir="$dir/${FRAMEWORKS_FOLDER_PATH:-}"
   [ -d "$fdir" ] || continue
+  real="$(cd "$fdir" && pwd -P)"
+  case " $seen " in *" $real "*) continue ;; esac
+  seen="$seen $real"
   for fw in "$fdir"/*.framework; do
     [ -d "$fw" ] && deepen "$fw"
   done
