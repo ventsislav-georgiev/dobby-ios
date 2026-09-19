@@ -6,6 +6,10 @@ xcrun swiftc -o "$OUT" \
   Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
 
+OUT0="$(mktemp -d)/app-config-check"
+xcrun swiftc -o "$OUT0" Dobby/AppConfig.swift Tests/AppConfigCheck.swift
+"$OUT0"
+
 # ServerAddresses.swift is compiled twice: OUT2 without -D DEBUG so the file still compiles
 # clean in release configuration (the noServerSeamActive() predicate itself is unconditional,
 # only its call site in probe(_:) is #if DEBUG-gated), and OUT3 with -D DEBUG so the
