@@ -98,6 +98,93 @@ enum BundledShellCheck {
         check(OfflineSchemeHandler(shellRoot: nil).fileURL(for: URL(string: "\(base)/styles.css")!) == nil,
               "a build with no bundled shell serves nothing on dobby-offline://shell")
 
+        // --- #156: the double-encoded separator --------------------------------------
+        //
+        // `url.path` has already decoded once, so a DOUBLE-encoded "/" survives
+        // `split(separator: "/")` as ONE component and is only turned back into separators
+        // by the `.map`, AFTER the `..` guard has looked at it. Measured on this machine
+        // before the fix: the two single-encoded rows were refused and the two
+        // double-encoded ones resolved to /secret — on BOTH roots, and with
+        // `Access-Control-Allow-Origin: *` on the response, so the bytes were readable
+        // cross-origin. The fix is containment on the RESOLVED path, because a string
+        // check is exactly what the next decoding subtlety defeats.
+        //
+        // Each row pins three things, so no row can pass vacuously:
+        //   1. the path Foundation hands the handler after its OWN single decode — a
+        //      mutant that merely mistypes the URL literal changes this and fails here;
+        //   2. that the HISTORICAL parse — the one this repo shipped before #156, with the
+        //      second `removingPercentEncoding` still in the map — really does leave the
+        //      root, so each row stays a documented traversal rather than "a string the
+        //      handler happens to dislike". It is written out here rather than referenced
+        //      because production no longer contains it;
+        //   3. that `fileURL` NEVER HANDS BACK A PATH OUTSIDE ITS ROOT. Not "returns nil":
+        //      the property is containment, and which guard achieves it is an
+        //      implementation detail. Pinning nil would couple every row to one mechanism,
+        //      and it did — removing the redundant second decode turns these inputs from
+        //      traversals into harmless in-root names that no longer need refusing, and a
+        //      nil assertion calls that a regression when it is the root-cause fix.
+        func traversal(_ raw: String, decodesTo wantPath: String, under base: URL, _ label: String) {
+            let u = URL(string: raw)!
+            let historical = u.path.split(separator: "/")
+                .map { String($0).removingPercentEncoding ?? String($0) }
+                .reduce(base) { $0.appendingPathComponent($1) }.standardizedFileURL.path
+            check(u.path == wantPath, "\(label): url.path is \(wantPath) after Foundation's own decode")
+            check(!historical.hasPrefix(base.standardizedFileURL.path + "/"),
+                  "\(label): the pre-#156 parse landed outside the root, at \(historical)")
+            let got = resolved(raw)
+            check(got == nil || got!.hasPrefix(base.standardizedFileURL.path + "/"),
+                  "\(label): fileURL never lands outside the root")
+        }
+        traversal("\(base)/js/..%2f..%2fsecret", decodesTo: "/js/../../secret",
+                  under: root, "shell root, single-encoded separator")
+        traversal("\(base)/js/..%252f..%252fsecret", decodesTo: "/js/..%2f..%2fsecret",
+                  under: root, "shell root, DOUBLE-encoded separator")
+        traversal("\(base)/%2e%2e/secret", decodesTo: "/../secret",
+                  under: root, "shell root, encoded dots")
+        traversal("\(OfflineSchemeHandler.scheme):///b/..%252f..%252fsecret", decodesTo: "/b/..%2f..%2fsecret",
+                  under: docs, "Documents root, DOUBLE-encoded separator")
+        // The separator in the containment prefix is load-bearing, not decoration: drop it
+        // and a SIBLING of the root passes, since ".../Offline-secrets" has ".../Offline"
+        // as a plain string prefix. Nothing else in the suite would notice.
+        traversal("\(OfflineSchemeHandler.scheme):///..%252fOffline-secrets/x", decodesTo: "/..%2fOffline-secrets/x",
+                  under: docs, "Documents root, sibling-directory escape")
+
+        // The half that breaks the shipping feature if the fix over-corrects. The web
+        // percent-encodes every segment, so real book ids and filenames arrive encoded and
+        // must still resolve, DECODED, to the file on disk. A fix that dropped
+        // `removingPercentEncoding`, or that refused any path containing a '%', or that
+        // compared the raw string against the root, fails right here — and on the phone
+        // that is every downloaded book refusing to play.
+        check(resolved("\(OfflineSchemeHandler.scheme):///The%20Hobbit%20%232/Ch%201%20%E2%80%93%20A%20Party.m4b")
+                == docs.appendingPathComponent("The Hobbit #2")
+                       .appendingPathComponent("Ch 1 – A Party.m4b").path,
+              "a percent-encoded book id and filename still resolve, decoded, into Documents/Offline")
+        check(resolved("\(base)/js/a%20b.js") == root.appendingPathComponent("js/a b.js").path,
+              "a percent-encoded shell sub-resource still resolves, decoded, into the shell root")
+
+        // Supervisor review fix. The map's `removingPercentEncoding` was a SECOND decode —
+        // `url.path` had already done one — and the producer settles that nothing needed
+        // it: BridgeInjection.swift:60 mints every one of these URLs as
+        //   'dobby-offline:///' + encodeURIComponent(id) + '/' + encodeURIComponent(name)
+        // which encodes exactly once. So it is removed, and this is the case that keeps it
+        // removed: a name genuinely containing the literal text "%2F" goes on the wire as
+        // "%252F", and one decode must give it back whole. The old double decode split it
+        // into two components and served a different file.
+        check(resolved("\(OfflineSchemeHandler.scheme):///book/a%252Fb.m4b")
+                == docs.appendingPathComponent("book").appendingPathComponent("a%2Fb.m4b").path,
+              "a filename literally containing %2F survives as one component — one decode, not two")
+
+        // The separator in the containment prefix, pinned directly. Through fileURL it is
+        // now unreachable — with one decode nothing can carry a "/" past the `..` guard —
+        // so a mutant dropping it left the whole suite green until this case existed. It
+        // is defence for the next caller, not for today's, and that is exactly the kind of
+        // clause this ledger keeps finding unpinned.
+        let sibling = docs.deletingLastPathComponent().appendingPathComponent("Offline-secrets")
+        check(OfflineSchemeHandler.contained(sibling.appendingPathComponent("x"), in: docs) == nil,
+              "a SIBLING of the root is not 'under' it, even though its path has the root's as a plain prefix")
+        check(OfflineSchemeHandler.contained(docs.appendingPathComponent("book/part.m4b"), in: docs) != nil,
+              "and a genuine child still passes, so the clause above is not refusing everything")
+
         // --- the OTHER half of "this build has no shell" -----------------------------
         //
         // Supervisor review fix. The check above pins that the HANDLER refuses; nothing
