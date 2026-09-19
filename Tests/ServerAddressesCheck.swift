@@ -8,11 +8,26 @@ import Foundation
 
 @main
 enum ServerAddressesCheck {
-    static func main() {
+    static func main() async {
+        if CommandLine.arguments.contains("--expect-no-server") {
+            await expectNoServer()
+            return
+        }
         classification()
         normalization()
         noServerSeam()
         print("ServerAddressesCheck: all checks passed")
+    }
+
+    /// Wiring pin for the #068 seam (run-checks.sh runs this binary a second time as
+    /// `DOBBY_NO_SERVER=1 "$OUT2" --expect-no-server`, compiled with `-D DEBUG`): unlike
+    /// `noServerSeam()` below, which only pins how the predicate parses its input, this exercises
+    /// the actual call site in `probe(_:)` through `resolve()` — it fails if the guard is ever
+    /// deleted or moved out from under the DEBUG gate.
+    static func expectNoServer() async {
+        let resolved = await ServerAddresses.resolve()
+        check(resolved == nil, "DOBBY_NO_SERVER=1 makes resolve() report every candidate absent")
+        print("ServerAddressesCheck --expect-no-server: seam wiring verified")
     }
 
     static func check(_ condition: Bool, _ what: String) {

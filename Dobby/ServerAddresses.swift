@@ -231,6 +231,19 @@ enum ServerAddresses {
         Int(Date().timeIntervalSince(started) * 1000)
     }
 
+    /// Debug-only test seam (#068 device done-condition, mirrors Android's
+    /// `debug.bookplay.pioff`, which reads `BuildConfig.DEBUG`): DOBBY_NO_SERVER=1 makes every
+    /// probe report the Pi absent without touching the network, so "Continue offline" can be
+    /// exercised on a Mac/simulator build against a Pi that is actually reachable. The predicate
+    /// itself stays compiled in every configuration so it is checkable without a socket in the
+    /// loop (see the assertions in ServerAddressesCheck); only its call site in `probe(_:)` below
+    /// is `#if DEBUG` — a persistent `launchctl setenv DOBBY_NO_SERVER 1` must not be able to
+    /// disable a shipped Dobby's ability to see a real Pi. Never wired into
+    /// `classify`/`normalize`/`candidates`/anything else shipped-path.
+    static func noServerSeamActive(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        env["DOBBY_NO_SERVER"] == "1"
+    }
+
     /// Two-stage probe: stage one spends only `shortTimeout` finding out whether the Pi is
     /// there at all; a `presentSlow` verdict spends `readTimeout` finding out whether it is
     /// done thinking. Same information Android gets from one `HttpURLConnection` call with
@@ -240,18 +253,10 @@ enum ServerAddresses {
     /// ponytail: no cross-candidate taper of the long budget (Android's
     /// `LONG_READ_WINDOW_MS` caps total `resolve()` time once several candidates each go
     /// slow) — add it if `resolve()` is ever seen running long with 3+ configured addresses.
-    /// Debug-only test seam (#068 device done-condition, mirrors Android's
-    /// `debug.bookplay.pioff`): DOBBY_NO_SERVER=1 makes every probe report the
-    /// Pi absent without touching the network, so "Continue offline" can be
-    /// exercised on a Mac/simulator build against a Pi that is actually reachable.
-    /// Pure function so it is checkable without a socket in the loop; wired into
-    /// `probe(_:)` below, never into `classify`/`normalize`/anything shipped-path.
-    static func noServerSeamActive(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
-        env["DOBBY_NO_SERVER"] == "1"
-    }
-
     private static func probe(_ origin: URL) async -> (ProbeOutcome, reason: String) {
+        #if DEBUG
         if noServerSeamActive() { return (.absent, "DOBBY_NO_SERVER=1 (seam)") }
+        #endif
         let short = await attempt(origin, budget: shortTimeout)
         switch classify(connected: short.connected, httpStatus: short.httpStatus) {
         case .present:

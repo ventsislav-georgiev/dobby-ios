@@ -11,8 +11,11 @@ xcrun swiftc -o "$OUT" \
   Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
 
-# #068: ServerAddresses' connect/read timeout-staging decision, same pattern.
+# #068: ServerAddresses' connect/read timeout-staging decision, same pattern. -D DEBUG so the
+# DOBBY_NO_SERVER guard in probe(_:) compiles in (it's #if DEBUG-gated, same as a Debug build of
+# the app) — needed for the --expect-no-server run below to exercise it at all.
 OUT2="$(mktemp -d)/server-addresses-check"
-xcrun swiftc -o "$OUT2" \
+xcrun swiftc -D DEBUG -o "$OUT2" \
   Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
 "$OUT2"
+DOBBY_NO_SERVER=1 "$OUT2" --expect-no-server
