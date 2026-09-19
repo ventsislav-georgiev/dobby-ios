@@ -17,8 +17,8 @@ packages:
     # Pinned to a revision, not a branch: Dobby.xcodeproj (and its Package.resolved) is
     # gitignored, so a branch ref resolves to whatever commit happens to be at HEAD on
     # each checkout/CI run instead of a shared, reproducible one. Upgrading later is a
-    # deliberate change (see ledger #130/#115).
-    revision: 6dda7ccca2e1c678d413db279adf03339a1194cc
+    # deliberate change (see ledger #130/#115; moved forward to origin/main tip in #132).
+    revision: 75e590e770f7f01d088ced2546deed9817b660ae
 targets:
   Dobby:
     type: application

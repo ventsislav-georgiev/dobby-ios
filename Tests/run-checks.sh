@@ -460,14 +460,14 @@ stanza = lines[start:end]
 code_lines = [l for l in stanza if not l.strip().startswith("#")]
 code_text = "".join(code_lines)
 
-if "revision: 6dda7ccca2e1c678d413db279adf03339a1194cc" not in code_text:
-    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)\n")
+if "revision: 75e590e770f7f01d088ced2546deed9817b660ae" not in code_text:
+    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 75e590e, never a branch (#130)\n")
     sys.exit(1)
 if "branch:" in code_text:
-    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)\n")
+    sys.stderr.write("FAIL: project.yml pins KSPlayer to revision 75e590e, never a branch (#130)\n")
     sys.exit(1)
 
-print("PASS: project.yml pins KSPlayer to revision 6dda7cc, never a branch (#130)")
+print("PASS: project.yml pins KSPlayer to revision 75e590e, never a branch (#130)")
 KSPLAYERPINPY
 
 # #128: the elapsed label used to format itself alone (d:dd under an hour, d:dd:dd at
