@@ -59,6 +59,37 @@ if above != "#if DEBUG" or below != "#endif":
 print("PASS: noServerSeamActive() call site is #if DEBUG-gated")
 PY
 
+# #115: the progress-bar scrub state (Dobby/Playback/ScrubState.swift) as a pure value
+# type - the Slider knob binds to it the instant a drag starts, and seeding it with the
+# live position is the whole fix.
+OUT5="$(mktemp -d)/scrub-state-check"
+xcrun swiftc -o "$OUT5" \
+  Dobby/Playback/ScrubState.swift Tests/ScrubStateCheck.swift
+"$OUT5"
+
+# The seed only exists if PlayerView actually calls it. Deleting `scrub.begin(at:)` from
+# the Slider onEditingChanged leaves ScrubStateCheck green while the app is broken again -
+# the same mutant shape as the two textual checks below, and the only tool that catches it.
+python3 - <<'SCRUBPY'
+import sys
+
+path = "Dobby/Playback/PlayerView.swift"
+with open(path) as f:
+    src = f.read()
+
+if "scrub.begin(at: Double(time.currentTime))" not in src:
+    sys.stderr.write("FAIL: PlayerView Slider does not seed the scrub from the live position (#115)\n")
+    sys.exit(1)
+if "scrub.end()" not in src:
+    sys.stderr.write("FAIL: PlayerView Slider does not seek to the scrub end value (#115)\n")
+    sys.exit(1)
+if "scrubValue" in src or "@State private var scrubbing" in src:
+    sys.stderr.write("FAIL: PlayerView still carries the pre-#115 loose scrub state\n")
+    sys.exit(1)
+
+print("PASS: PlayerView Slider seeds the scrub from the live position and seeks to its end value")
+SCRUBPY
+
 # #067: the only check that puts the handler behind a real WKWebView on the real
 # server origin, which is where the Mac bug lived — `dobby-api:` refused as mixed
 # content from the https page, before any of the logic above ran. macOS only:

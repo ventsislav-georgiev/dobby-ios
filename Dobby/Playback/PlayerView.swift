@@ -18,8 +18,7 @@ struct PlayerView: View {
     @StateObject private var controls = PlayerControls()
     let url: URL
 
-    @State private var scrubbing = false
-    @State private var scrubValue = 0.0
+    @State private var scrub = ScrubState()
     @State private var isPlaying = true
     #if os(macOS)
     @State private var keyMonitor: Any?
@@ -179,13 +178,15 @@ struct PlayerView: View {
 
     private var controlBar: some View {
         let total = max(1, Double(time.totalTime))
-        let current = scrubbing ? scrubValue : Double(time.currentTime)
+        let current = scrub.displayed(live: Double(time.currentTime))
         return VStack(spacing: 10) {
             HStack(spacing: 12) {
                 Text(timeLabel(current)).font(.caption.monospacedDigit())
-                Slider(value: Binding(get: { current }, set: { scrubValue = $0 }), in: 0...total) { editing in
-                    scrubbing = editing
-                    if !editing { playback.seek(to: scrubValue) }
+                Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
+                    // The knob binds to this value the instant the drag starts — seed it
+                    // from the live position or it lands wherever the last drag ended (#115).
+                    if editing { scrub.begin(at: Double(time.currentTime)) }
+                    else { playback.seek(to: scrub.end()) }
                     controls.forceShow()
                 }
                 .tint(accent)
