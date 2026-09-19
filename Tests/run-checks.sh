@@ -114,7 +114,7 @@ with open(path) as f:
     src = f.read()
 
 if "scrub.begin(at: current)" not in src:
-    sys.stderr.write("FAIL: PlayerView Slider does not seed the scrub from the live position (#115)\n")
+    sys.stderr.write("FAIL: PlayerView Slider does not seed the scrub from the displayed position (#115)\n")
     sys.exit(1)
 if "scrub.end()" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not seek to the scrub end value (#115)\n")
@@ -122,14 +122,14 @@ if "scrub.end()" not in src:
 if "scrubValue" in src or "@State private var scrubbing" in src:
     sys.stderr.write("FAIL: PlayerView still carries the pre-#115 loose scrub state\n")
     sys.exit(1)
-if "scrub.displayed(live:" not in src:
+if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
 if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
-print("PASS: PlayerView Slider seeds the scrub from the live position and seeks to its end value")
+print("PASS: PlayerView Slider seeds the scrub from the displayed position and seeks to its end value")
 SCRUBPY
 
 # #067: the only check that puts the handler behind a real WKWebView on the real
