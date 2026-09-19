@@ -132,6 +132,23 @@ if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek
 print("PASS: PlayerView Slider seeds the scrub from the displayed position and seeks to its end value")
 SCRUBPY
 
+# #112: a clean macOS build is the only thing that catches deepen-macos-frameworks.sh
+# losing one of its three passes (SPM checkout, staged products dir, or the app
+# bundle's own Contents/Frameworks) - every incremental build stays green regardless,
+# since the earlier pass's mutation persists on disk from a prior build. This is a
+# textual proxy standing in for that clean build.
+python3 - <<'PY'
+import sys
+src = open("scripts/deepen-macos-frameworks.sh").read()
+for needle, what in [("FRAMEWORKS_FOLDER_PATH", "the app bundle's Frameworks directory"),
+                     ("BUILT_PRODUCTS_DIR", "the built products directory"),
+                     ("SourcePackages/checkouts", "the SPM checkout")]:
+    if needle not in src:
+        sys.stderr.write(f"FAIL: deepen-macos-frameworks.sh no longer deepens {what} (#112)\n")
+        sys.exit(1)
+print("PASS: deepen-macos-frameworks.sh deepens the checkout, the products dir and the app bundle")
+PY
+
 # #067: the only check that puts the handler behind a real WKWebView on the real
 # server origin, which is where the Mac bug lived — `dobby-api:` refused as mixed
 # content from the https page, before any of the logic above ran. macOS only:

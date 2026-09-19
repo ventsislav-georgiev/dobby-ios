@@ -15,7 +15,7 @@ deepen() {
   local fw="$1" name tmp
   name="$(basename "$fw" .framework)"
   [ -d "$fw/Versions" ] && return 0   # already deep
-  [ -f "$fw/$name" ] || return 0      # no binary → skip
+  [ -f "$fw/$name" ] || { echo "deepen: skip $name (no $name binary)"; return 0; }
   tmp="$fw.deep.$$"
   rm -rf "$tmp"; mkdir -p "$tmp/Versions/A/Resources"
   mv "$fw/$name" "$tmp/Versions/A/$name"
@@ -46,6 +46,20 @@ done
 for dir in "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
   [ -n "$dir" ] && [ -d "$dir" ] || continue
   for fw in "$dir"/*.framework; do
+    [ -d "$fw" ] && deepen "$fw"
+  done
+done
+
+# This script has no declared outputs, so the new build system doesn't gate the
+# app target's synthesized SPM "Embed Frameworks" copy on it — on a clean build
+# that copy can run first, embedding a still-shallow framework straight from $SRC
+# above. Whichever way it lands, fix the copy actually inside the app bundle too,
+# since that's what Validate inspects.
+for dir in "${TARGET_BUILD_DIR:-}" "${BUILT_PRODUCTS_DIR:-}" "${CONFIGURATION_BUILD_DIR:-}"; do
+  [ -n "$dir" ] && [ -n "${FRAMEWORKS_FOLDER_PATH:-}" ] || continue
+  fdir="$dir/${FRAMEWORKS_FOLDER_PATH:-}"
+  [ -d "$fdir" ] || continue
+  for fw in "$fdir"/*.framework; do
     [ -d "$fw" ] && deepen "$fw"
   done
 done
