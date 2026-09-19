@@ -482,6 +482,12 @@ if "Text(timeLabel(current, matching: total))" not in src:
 if "let showHours = h > 0 || total >= 3600" not in src:
     sys.stderr.write("FAIL: timeLabel(_:matching:) no longer pins the hours field to the total's own duration (#128)\n")
     sys.exit(1)
+if 'String(format: totalMinutes >= 10 ? "%02d:%02d" : "%d:%02d", m, sec)' not in src:
+    sys.stderr.write("FAIL: timeLabel(_:matching:) no longer pins the minutes field, so the elapsed label still grows crossing 10:00 (#128)\n")
+    sys.exit(1)
+if "Text(timeLabel(total, matching: total))" not in src:
+    sys.stderr.write("FAIL: PlayerView's duration label no longer passes its own total, so the two labels can disagree on field width (#128)\n")
+    sys.exit(1)
 
 print("PASS: PlayerView's elapsed-time label shares the total's field width so scrubbing past 1:00:00 cannot reflow the Slider (#128)")
 TIMELABELWIDTHPY
