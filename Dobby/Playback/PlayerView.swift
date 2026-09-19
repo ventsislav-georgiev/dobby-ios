@@ -185,9 +185,12 @@ struct PlayerView: View {
                 Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
+                    if editing { controls.scrubbing = true }   // #129: hold the OSD for the whole drag
                     if editing { scrub.begin(at: current) }
                     else { playback.seek(to: scrub.end()) }
+                    if !editing { controls.scrubbing = false }
                     controls.forceShow()
+                    if !editing { controls.scheduleHide() }   // #129: resume the idle timer after release
                 }
                 .tint(accent)
                 Text(timeLabel(total)).font(.caption.monospacedDigit())

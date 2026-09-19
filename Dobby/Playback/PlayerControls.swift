@@ -89,6 +89,8 @@ final class PlayerControls: ObservableObject {
     }
 
     private static let styleKey = "dobby.subtitleStyle"
+    // #129: true while the Slider is tracking a drag; blocks auto-hide re-arm mid-scrub.
+    var scrubbing = false
     private var hideTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
     private let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
@@ -136,7 +138,7 @@ final class PlayerControls: ObservableObject {
 
     func scheduleHide() {
         hideTask?.cancel()
-        guard menu == nil, !showInfo, isPlaying else { return }   // keep visible if a menu/info is open or paused
+        guard menu == nil, !showInfo, isPlaying, !scrubbing else { return }   // keep visible if a menu/info is open, paused, or scrubbing (#129)
         hideTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             guard !Task.isCancelled else { return }
@@ -147,7 +149,10 @@ final class PlayerControls: ObservableObject {
     func forceShow() { hideTask?.cancel(); visible = true }
 
     /// Dismiss the OSD (and any open menu) immediately — first tap on the video.
-    func hide() { hideTask?.cancel(); menu = nil; visible = false }
+    /// A tap landing outside the control bar during a drag would otherwise tear the Slider
+    /// out from under the finger, and because `scrubbing` is cleared only by the Slider's release branch,
+    /// a hide mid-drag could also strand the flag set for the life of the view.
+    func hide() { guard !scrubbing else { return }; hideTask?.cancel(); menu = nil; visible = false }
 
     // MARK: Toast (web showVideoOsd equivalent)
 

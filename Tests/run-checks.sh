@@ -289,6 +289,60 @@ if calls[0] >= webviews[0]:
 print("PASS: WebContainer calls registerAsSecureScheme(in:) before constructing its WKWebView")
 PY
 
+# #129: scheduleHide() re-armed the auto-hide timer on every isPlaying state change,
+# including a rebuffer mid-drag, so a scrub longer than the 3s idle window lost the
+# Slider under the finger. Pin both ends: the scrubbing guard in scheduleHide(), and
+# the PlayerView Slider closure setting scrubbing true before it seeds the drag and
+# false after it seeks, so a mutant dropping either write goes red.
+python3 - <<'SCRUBBINGPY'
+import sys
+
+controls_path = "Dobby/Playback/PlayerControls.swift"
+with open(controls_path) as f:
+    controls_src = f.read()
+
+if "guard menu == nil, !showInfo, isPlaying, !scrubbing else { return }" not in controls_src:
+    sys.stderr.write("FAIL: PlayerControls.scheduleHide() no longer guards on scrubbing (#129)\n")
+    sys.exit(1)
+
+view_path = "Dobby/Playback/PlayerView.swift"
+with open(view_path) as f:
+    view_src = f.read()
+
+if "controls.scrubbing = true" not in view_src:
+    sys.stderr.write("FAIL: PlayerView Slider never sets controls.scrubbing = true on drag start (#129)\n")
+    sys.exit(1)
+if "controls.scrubbing = false" not in view_src:
+    sys.stderr.write("FAIL: PlayerView Slider never sets controls.scrubbing = false on release (#129)\n")
+    sys.exit(1)
+
+begin_idx = view_src.index("scrub.begin(at: current)")
+true_idx = view_src.index("controls.scrubbing = true")
+if not (true_idx < begin_idx):
+    sys.stderr.write("FAIL: controls.scrubbing = true is not set before the drag seeds scrub.begin (#129)\n")
+    sys.exit(1)
+
+seek_idx = view_src.index("playback.seek(to: scrub.end())")
+false_idx = view_src.index("controls.scrubbing = false")
+if not (false_idx > seek_idx):
+    sys.stderr.write("FAIL: controls.scrubbing = false is not set after the release seek (#129)\n")
+    sys.exit(1)
+
+if "controls.scheduleHide()" not in view_src:
+    sys.stderr.write("FAIL: PlayerView Slider does not re-arm the idle timer after the scrub ends (#129)\n")
+    sys.exit(1)
+hide_idx = view_src.index("controls.scheduleHide()")
+if not (hide_idx > false_idx):
+    sys.stderr.write("FAIL: PlayerView Slider does not re-arm the idle timer after the scrub ends (#129)\n")
+    sys.exit(1)
+
+if "func hide() { guard !scrubbing else { return };" not in controls_src:
+    sys.stderr.write("FAIL: PlayerControls.hide() does not guard against scrubbing (#129)\n")
+    sys.exit(1)
+
+print("PASS: PlayerControls.scheduleHide() and the PlayerView Slider guard the OSD for the whole scrub (#129)")
+SCRUBBINGPY
+
 # #130: project.yml pinned KSPlayer to a revision instead of `branch: main` so every
 # checkout/CI run resolves the same commit (Dobby.xcodeproj and its Package.resolved
 # are gitignored, so nothing else pins it). Catch a regression back to a branch ref.
