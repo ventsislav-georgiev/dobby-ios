@@ -19,8 +19,8 @@ enum ServerAddressesCheck {
         print("ServerAddressesCheck: all checks passed")
     }
 
-    /// Wiring pin for the #068 seam (run-checks.sh runs this binary a second time as
-    /// `DOBBY_NO_SERVER=1 "$OUT2" --expect-no-server`, compiled with `-D DEBUG`): unlike
+    /// Wiring pin for the #068 seam (run-checks.sh builds a separate `-D DEBUG` binary, OUT3,
+    /// and runs `DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server`): unlike
     /// `noServerSeam()` below, which only pins how the predicate parses its input, this exercises
     /// the actual call site in `probe(_:)` through `resolve()` — it fails if the guard is ever
     /// deleted or moved out from under the DEBUG gate.
