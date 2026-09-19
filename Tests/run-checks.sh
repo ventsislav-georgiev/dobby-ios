@@ -113,7 +113,7 @@ path = "Dobby/Playback/PlayerView.swift"
 with open(path) as f:
     src = f.read()
 
-if "scrub.begin(at: Double(time.currentTime))" not in src:
+if "scrub.begin(at: current)" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not seed the scrub from the live position (#115)\n")
     sys.exit(1)
 if "scrub.end()" not in src:
@@ -121,6 +121,12 @@ if "scrub.end()" not in src:
     sys.exit(1)
 if "scrubValue" in src or "@State private var scrubbing" in src:
     sys.stderr.write("FAIL: PlayerView still carries the pre-#115 loose scrub state\n")
+    sys.exit(1)
+if "scrub.displayed(live:" not in src:
+    sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
+    sys.exit(1)
+if "if editing { scrub.begin(at: current) }" not in src or "else { playback.seek(to: scrub.end()) }" not in src:
+    sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
 print("PASS: PlayerView Slider seeds the scrub from the live position and seeks to its end value")

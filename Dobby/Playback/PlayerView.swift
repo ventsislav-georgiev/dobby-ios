@@ -185,7 +185,7 @@ struct PlayerView: View {
                 Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
                     // The knob binds to this value the instant the drag starts — seed it
                     // from the live position or it lands wherever the last drag ended (#115).
-                    if editing { scrub.begin(at: Double(time.currentTime)) }
+                    if editing { scrub.begin(at: current) }
                     else { playback.seek(to: scrub.end()) }
                     controls.forceShow()
                 }
