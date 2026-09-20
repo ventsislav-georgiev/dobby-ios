@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-TEAM=V5XV3994L8   # REDACTED
+TEAM=V5XV3994L8
 TARGET="${1:-mac}"
 
 xcodegen generate

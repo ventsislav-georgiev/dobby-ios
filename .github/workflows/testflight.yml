@@ -38,10 +38,10 @@ jobs:
       # dobby-ios as true siblings under $GITHUB_WORKSPACE — the layout
       # copy-app-shell.sh's default path already expects, no script changes needed.
       #
-      # bookplay (the PWA repo) is private, so this needs a token wider than the
-      # default GITHUB_TOKEN, which is scoped to dobby-ios alone: a fine-grained PAT,
-      # read-only, contents scope, on ventsislav-georgiev/bookplay only, added as the
-      # DOBBY_PWA_CHECKOUT_TOKEN secret. Unlike copy-app-shell.sh's own leniency, this
+      # The default GITHUB_TOKEN is scoped to this repository alone and cannot
+      # reach the PWA repository, so this step needs its own credential: a
+      # fine-grained PAT, read-only, contents scope, narrowed to that one
+      # repository, stored as the DOBBY_PWA_CHECKOUT_TOKEN secret. Unlike copy-app-shell.sh's own leniency, this
       # step's failure is NOT swallowed — this workflow's whole job is the artifact
       # that ships, so a missing shell here is the regression #155 exists to close,
       # not an unrelated build's problem. See "Verify the app shell was bundled"
