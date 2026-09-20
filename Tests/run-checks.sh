@@ -1092,3 +1092,309 @@ if "! -s " not in wf[verify_at:export_at]:
 
 print("PASS: the TestFlight workflow checks out the PWA shell source as a sibling and refuses to export/upload an archive that shipped without it (#155)")
 WORKFLOWPY
+
+# ---------------------------------------------------------------------------
+# #158 — the Apple bridge's TWO name seams, neither of which anything checked.
+#
+# `window.Dobby` is a JavaScript object literal living inside a Swift string
+# (Dobby/Web/BridgeInjection.swift). Each of its members posts an action string
+# that WebBridge.dispatch switches on. So a PWA call has to survive two renames,
+# not one:
+#
+#   PWA call  ──seam 1──▶  JS member name  ──seam 2──▶  posted action ──▶ Swift case
+#
+# Both fail the same silent way. Seam 1: every PWA call site is `typeof`-guarded,
+# so a missing member does not throw — the feature is simply absent. Seam 2: an
+# action with no `case` lands on `default:`, which NSLogs "unhandled bridge
+# action" and returns; nothing the user or a test can see. Guarding only seam 1
+# leaves seam 2, which is why this is one block with three parts and not a patch.
+#
+# What it found on arrival (2026-09-20, the reason for the entry): the shared
+# receiver `bridge()` in 21-android-tv.js returns EITHER wrapper, and three of the
+# names it reached were not members of window.Dobby — attachAssDrawings,
+# cancelPendingNative, removeNativeOffline. The first two are Android-only and
+# have moved to `androidBridge()`; the third was a naming split (Apple said
+# deleteNativeOffline) and the Apple side now spells it removeNativeOffline.
+#
+# Part A (seam 2 + the pairing) runs ALWAYS — it is entirely inside this repo.
+# Part B (seam 1) needs the PWA, so it runs only when the sibling dobby checkout
+# is there and SKIPs otherwise, the same shape the #151 checks above use. That is
+# a real hole in CI, not a rhetorical one: until #155 gives this repo's CI a dobby
+# checkout, seam 1 is guarded on a developer machine and skipped on the runner.
+# The cost of closing it is #155's checkout, nothing more — Part B already reads
+# the PWA through $DOBBY_PUBLIC_DIR and needs no Gradle-style plumbing.
+#
+# Part A's floors are what keep Part B honest, too: Part B's "declared" set is
+# parsed out of the same object literal Part A counts, so a parser that went blind
+# would red Part A rather than quietly empty Part B.
+# ---------------------------------------------------------------------------
+
+# Declared on window.Dobby, deliberately never called from the PWA. Each entry
+# needs a reason: this list is the only thing standing between Part B's coverage
+# count and fiction, exactly as #157's bridgeMethodsWithNoCaller is on the Android
+# side. It is not a place to silence a failure unread.
+# Called by the PWA, deliberately not declared: same rule, other direction.
+DOBBY_PUBLIC_DIR_158="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+python3 - <<'BRIDGENAMESPY'
+import glob
+import os
+import re
+import sys
+
+MEMBERS_WITH_NO_PWA_CALLER = {
+    "platform": "identity string the wrapper advertises; nothing in the PWA branches on it "
+                "(canPlayNative is what every call site tests instead).",
+    "version": "same — advertised, never read. Kept so a future PWA can gate on a wrapper age.",
+    "isCarAudio": "written by the wrapper, not called: WebBridge.pushCarRoute assigns "
+                  "window.Dobby.isCarAudio and the PWA is notified through the separate "
+                  "window.bookPlayNativeAudioRoute callback. Part C pins that assignment.",
+    "_offline": "the native-pushed offline cache itself; listNativeOffline/getNativeOffline "
+                "read it from inside the literal, so no PWA call site names it.",
+    "_setOffline": "called by the WRAPPER, not the PWA — WebBridge.swift callJS pushes the "
+                   "index into it. Part C pins those two call sites.",
+}
+
+PWA_CALLS_NOT_DECLARED = {
+    "deleteNativeOffline": "#158 field-skew fallback. It is the pre-#158 Apple-only spelling of "
+                           "removeNativeOffline, kept at ONE call site "
+                           "(12-service-worker-offline.js, book removal) because the PWA rsyncs "
+                           "to the Pi instantly while a TestFlight build does not, so an app "
+                           "installed before #158 would silently lose book removal. Drop the "
+                           "else-branch there and this entry together once every installed "
+                           "build carries removeNativeOffline.",
+}
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+def fail(msg):
+    sys.stderr.write("FAIL: " + msg + "\n")
+    sys.exit(1)
+
+inject = read("Dobby/Web/BridgeInjection.swift")
+webbridge = read("Dobby/Web/WebBridge.swift")
+
+# --- the literal's members -------------------------------------------------
+# Anchored on the assignment rather than braces: if this line moves or is renamed
+# the PWA is addressing a different object entirely and every name below is stale.
+anchor = "window.Dobby = {"
+if anchor not in inject:
+    fail("BridgeInjection.swift no longer contains `%s`. The PWA addresses the wrapper as "
+         "window.Dobby; if that changed, every call site changed with it and this guard's "
+         "seed needs updating (#158)." % anchor)
+start = inject.index(anchor) + len(anchor)
+end = inject.index("\n          };", start)
+literal = inject[start:end]
+
+declared = []
+for line in literal.splitlines():
+    m = re.match(r"\s{12}([A-Za-z_][A-Za-z0-9_]*)\s*:", line)
+    if m:
+        declared.append(m.group(1))
+
+# The lyrics member reaches the literal through a Swift interpolation, so the line
+# scan above cannot see it. Resolve every interpolation by name instead of skipping
+# them: an unresolved one means a member this guard is not looking at.
+for m in re.finditer(r"\\\(([A-Za-z_][A-Za-z0-9_]*)\)", literal):
+    prop = m.group(1)
+    found = re.findall(r'"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*function', inject)
+    if not found:
+        fail("BridgeInjection.swift interpolates \\(%s) into the window.Dobby literal and no "
+             "quoted `name: function` member could be parsed out of the file — that member is "
+             "invisible to this guard (#158)." % prop)
+    declared.extend(found)
+
+declared = list(dict.fromkeys(declared))
+# A parser that silently matched nothing would make every comparison below vacuous
+# and read exactly like a clean run.
+if len(declared) < 18:
+    fail("only %d window.Dobby member(s) parsed out of BridgeInjection.swift — the member "
+         "parser needs updating (indentation changed, a member moved behind a new "
+         "interpolation?). Refusing to check %s against anything as if that were all of them "
+         "(#158)." % (len(declared), declared))
+
+# --- Part A1: every posting member posts its OWN name ----------------------
+# This is the cheap invariant that welds seam 1 to seam 2: hold it, and "the PWA
+# reaches member X" and "Swift handles action X" become the same statement.
+posting = {}
+for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*function\s*\([^)]*\)\s*\{(.*?)\}\s*,", inject, re.S):
+    name, body = m.group(1), m.group(2)
+    p = re.search(r"post\('([A-Za-z_][A-Za-z0-9_]*)'", body)
+    if p:
+        posting[name] = p.group(1)
+if len(posting) < 10:
+    fail("only %d posting member(s) parsed out of BridgeInjection.swift; the body parser is "
+         "blind and Part A2 below would be checking almost nothing (#158)." % len(posting))
+mismatched = sorted("%s posts '%s'" % (k, v) for k, v in posting.items() if k != v)
+if mismatched:
+    fail("window.Dobby members must post their own name, or a PWA call reaches a member whose "
+         "action nothing in this repo relates back to it: " + "; ".join(mismatched) + " (#158).")
+
+# --- Part A2: posted actions vs the Swift switch ---------------------------
+posted = sorted(set(re.findall(r"post\('([A-Za-z_][A-Za-z0-9_]*)'", inject)))
+if len(posted) < 12:
+    fail("only %d action string(s) parsed out of BridgeInjection.swift (#158)." % len(posted))
+
+dstart = webbridge.index("private func dispatch(action: String")
+dend = webbridge.index("        default:", dstart)
+handled = sorted(set(re.findall(r'^\s*case "([A-Za-z_][A-Za-z0-9_]*)":', webbridge[dstart:dend], re.M)))
+if len(handled) < 12:
+    fail("only %d `case` arm(s) parsed out of WebBridge.dispatch (#158)." % len(handled))
+
+unhandled = [a for a in posted if a not in handled]
+if unhandled:
+    fail("the injected bridge posts %d action(s) WebBridge.dispatch has no `case` for: %s. "
+         "Those land on `default:`, which NSLogs and returns — on device the feature silently "
+         "does nothing (#158)." % (len(unhandled), ", ".join(unhandled)))
+
+unposted = [a for a in handled if a not in posted]
+if unposted:
+    fail("WebBridge.dispatch handles %d action(s) nothing in BridgeInjection.swift posts: %s. "
+         "Either the action string was renamed on the JS side alone — in which case the web is "
+         "still posting the old one and it is now hitting `default:` — or this arm is dead. "
+         "This check is also what makes the one above falsifiable: a post() parser that went "
+         "blind empties `posted` and every arm shows up here (#158)."
+         % (len(unposted), ", ".join(unposted)))
+
+# --- Part C: the wrapper's own reaches into the literal --------------------
+# callJS strings are the native -> web direction and they name members too. Nothing
+# else checks them, and _setOffline is reached ONLY this way.
+swift_sources = [p for p in sorted(glob.glob("Dobby/**/*.swift", recursive=True))]
+if len(swift_sources) < 15:
+    fail("only %d Swift source(s) found; the callJS scan is not looking at this app (#158)."
+         % len(swift_sources))
+reached = {}
+for path in swift_sources:
+    # Comments stripped: a doc comment naming a member is drift worth noticing but not
+    # worth failing a build over, and it would otherwise inflate the count below.
+    src = "\n".join(re.sub(r"//.*", "", l) for l in read(path).splitlines())
+    for m in re.finditer(r"window\.Dobby\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", src):
+        reached.setdefault(m.group(1), set()).add(path)
+if not reached:
+    fail("no `window.Dobby.<member>` reference found in any Swift source — WebBridge pushes the "
+         "offline index and the car-audio flag that way, so the scan is blind (#158).")
+stray = sorted(n for n in reached if n not in declared)
+if stray:
+    fail("Swift reaches %d window.Dobby member(s) the injected literal does not declare: %s. "
+         "callJS evaluates that string in the page, where a missing member is `undefined` and "
+         "the `window.Dobby && …` guard in front of it swallows the whole statement (#158)."
+         % (len(stray), ", ".join("%s (%s)" % (n, ", ".join(sorted(reached[n]))) for n in stray)))
+
+print("PASS: every window.Dobby member posts its own name, all %d posted action(s) have a "
+      "WebBridge case and vice versa, and the %d member(s) Swift reaches through callJS are "
+      "declared (#158 seam 2)" % (len(posted), len(reached)))
+
+# --- Part B: seam 1, the PWA's calls vs the literal's members --------------
+pub = os.environ.get("DOBBY_PUBLIC_DIR_158", "")
+if not os.path.isdir(pub):
+    print("SKIP: no dobby checkout at %r — seam 1 (PWA calls vs window.Dobby members) needs the "
+          "PWA's Public dir. Until #155 gives CI a dobby checkout this half is developer-machine "
+          "only (#158)." % pub)
+    sys.exit(0)
+
+def strip_js(js):
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    return "\n".join(re.sub(r"//.*", "", l) for l in js.splitlines())
+
+sources = sorted(glob.glob(os.path.join(pub, "js", "*.js"))) + [os.path.join(pub, "index.html")]
+if len(sources) < 10:
+    fail("only %d source file(s) under %s — that is not the PWA, refusing to call the bridge "
+         "uncalled (#158)." % (len(sources), pub))
+
+# The receiver rules are #157's, mirrored onto window.Dobby, with one thing added.
+# #157 matches a receiver NAME across the whole file; here that over-approximation
+# is not survivable — 21-android-tv.js binds the same local `b` to bridge() and to
+# the new androidBridge(), and 12-service-worker-offline.js binds `b` to a DOM node
+# hundreds of lines further down. So a receiver binding's window ends at whichever
+# comes first: the next binding of that same name, or the next `}` in column 1 (the
+# end of the enclosing top-level function in this codebase's layout). Measured:
+# without it, attachAssDrawings and cancelPendingNative are still reported as Dobby
+# calls after they moved to androidBridge(), plus four DOM members.
+calls = {}
+files_with_receivers = 0
+for path in sources:
+    text = strip_js(read(path))
+    if "window.Dobby" not in text:
+        continue
+    files_with_receivers += 1
+    fn_aliases = []
+    for m in re.finditer(r"return\b[^;]*?window\.Dobby[^;]*?;", text, re.S):
+        enclosing = None
+        for f in re.finditer(r"function\s+([A-Za-z0-9_]+)\s*\(", text[:m.start()]):
+            enclosing = f.group(1)
+        if enclosing:
+            fn_aliases.append(enclosing)
+    fn_aliases = list(dict.fromkeys(fn_aliases))
+    dobby_expr = re.compile(r"window\.Dobby" + "".join(
+        "|" + re.escape(f) + r"\s*\(" for f in fn_aliases))
+    closers = [m.start() for m in re.finditer(r"^\}", text, re.M)]
+    binds = [(m.start(), m.group(1), bool(dobby_expr.search(m.group(2))))
+             for m in re.finditer(r"\b(?:var|let|const)\s+([A-Za-z0-9_]+)\s*=\s*([^;]*?);", text, re.S)]
+    windows = [(r"window\.Dobby", 0, len(text))]
+    windows += [(re.escape(f) + r"\s*\(\s*\)", 0, len(text)) for f in fn_aliases]
+    for i, (pos, name, is_dobby) in enumerate(binds):
+        if not is_dobby:
+            continue
+        stop = len(text)
+        for pos2, name2, _ in binds[i + 1:]:
+            if name2 == name:
+                stop = min(stop, pos2)
+                break
+        for c in closers:
+            if c > pos:
+                stop = min(stop, c)
+                break
+        windows.append((re.escape(name), pos, stop))
+    for recv, lo, hi in windows:
+        for m in re.finditer(r"(?<![A-Za-z0-9_$.])" + recv + r"\s*\.\s*([A-Za-z0-9_]+)", text[lo:hi]):
+            line = text[:lo + m.start()].count("\n") + 1
+            calls.setdefault(m.group(1), set()).add("%s:%d" % (os.path.basename(path), line))
+
+if len(calls) < 12:
+    fail("only %d name(s) reached on a window.Dobby receiver across the PWA — the call-site "
+         "matcher has gone blind and the comparisons below would pass on nothing (#158)." % len(calls))
+
+undeclared = sorted(n for n in calls if n not in declared and n not in PWA_CALLS_NOT_DECLARED)
+if undeclared:
+    fail("the PWA calls %d name(s) on a window.Dobby receiver that BridgeInjection.swift does "
+         "not declare: %s. Either it was renamed on the Apple side alone, or it was never added, "
+         "or it is Android-only and is reaching a SHARED receiver it should not be "
+         "(21-android-tv.js has androidBridge() for that). Every call site is typeof-guarded, so "
+         "on device this does not throw — the feature silently does not exist (#158)."
+         % (len(undeclared), "; ".join("%s() at %s" % (n, " and ".join(sorted(calls[n])))
+                                       for n in undeclared)))
+
+uncovered = sorted(n for n in declared
+                   if n not in calls and n not in MEMBERS_WITH_NO_PWA_CALLER)
+if uncovered:
+    fail("BridgeInjection.swift declares %d window.Dobby member(s) nothing under %s calls: %s. "
+         "If one was renamed on the Apple side alone, the PWA is still calling the old name and "
+         "the feature is dead on device — rename it back, or rename the call sites. If it is "
+         "genuinely not wired up yet, add it to MEMBERS_WITH_NO_PWA_CALLER in Tests/run-checks.sh "
+         "WITH A REASON: this check is not policing dead code, it is the falsifiability check on "
+         "the one above — a matcher that stops matching a file reads exactly like a clean run, "
+         "and shows up here instead (#158)." % (len(uncovered), pub, ", ".join(uncovered)))
+
+for name, why in sorted(MEMBERS_WITH_NO_PWA_CALLER.items()):
+    if name not in declared:
+        sys.stderr.write("WARN: MEMBERS_WITH_NO_PWA_CALLER lists %s, which BridgeInjection.swift "
+                         "no longer declares — drop the entry.\n" % name)
+    elif name in calls:
+        sys.stderr.write("WARN: MEMBERS_WITH_NO_PWA_CALLER lists %s, but the PWA now calls it "
+                         "(%s) — drop the entry.\n" % (name, ", ".join(sorted(calls[name]))))
+for name, why in sorted(PWA_CALLS_NOT_DECLARED.items()):
+    if name not in calls:
+        sys.stderr.write("WARN: PWA_CALLS_NOT_DECLARED lists %s, which no PWA call site names any "
+                         "more — drop the entry.\n" % name)
+    elif name in declared:
+        sys.stderr.write("WARN: PWA_CALLS_NOT_DECLARED lists %s, but BridgeInjection.swift now "
+                         "declares it — drop the entry.\n" % name)
+
+covered = [n for n in declared if n in calls]
+occurrences = sum(len(v) for v in calls.values())
+print("PASS: %d of %d window.Dobby member(s) reached at %d call site(s) across %d PWA file(s); "
+      "uncalled by design: %s (#158 seam 1)"
+      % (len(covered), len(declared), occurrences, files_with_receivers,
+         ", ".join(sorted(MEMBERS_WITH_NO_PWA_CALLER)) or "none"))
+BRIDGENAMESPY

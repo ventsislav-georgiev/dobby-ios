@@ -106,7 +106,7 @@ extension WebBridge: WKScriptMessageHandler {
             if let json = payload as? String { offline.startDownload(json) }
         case "downloadNativeBook":
             if let json = payload as? String { offline.startBookDownload(json) }
-        case "deleteNativeOffline":
+        case "removeNativeOffline":
             if let id = payload as? String { offline.delete(id) }
         case "cancelNativeOfflineDownload":
             if let id = payload as? String { offline.cancel(id) }
