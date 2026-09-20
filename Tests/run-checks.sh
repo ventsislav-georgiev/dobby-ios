@@ -1078,5 +1078,17 @@ if "exit 1" not in wf[verify_at:export_at]:
     sys.stderr.write("FAIL: the shell guard must actually fail the job (exit 1) when the shell is missing, not just warn (#155)\n")
     sys.exit(1)
 
+# -s and not -e, and pinned because the two halves are not the same guard. A
+# shell that is MISSING and a shell that is PRESENT BUT EMPTY reach TestFlight
+# the same way and blank the same never-paired phone, and an empty file is the
+# likelier of the two: copy-app-shell.sh recreates the directory before it
+# copies, so an interrupted or partial copy leaves exactly a zero-byte
+# index.html. Measured: with -e in place of -s every check in this suite still
+# passed (#155 review).
+if "! -s " not in wf[verify_at:export_at]:
+    sys.stderr.write("FAIL: the shell guard tests existence rather than content, so a zero-byte "
+                     "index.html ships to TestFlight and blanks a never-paired phone (#155)\n")
+    sys.exit(1)
+
 print("PASS: the TestFlight workflow checks out the PWA shell source as a sibling and refuses to export/upload an archive that shipped without it (#155)")
 WORKFLOWPY
