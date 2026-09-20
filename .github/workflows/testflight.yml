@@ -94,9 +94,14 @@ jobs:
           # Fail loudly here rather than let a missing/extra bundle file
           # surface as an opaque Python traceback three steps later in
           # copy-app-shell.sh (which is exactly how #167 was first found).
-          mapfile -t bundles < <(find "$dest" -maxdepth 1 -name 'bundle-*.js' | sort)
-          if [ "${#bundles[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one $dest/bundle-*.js after extracting the playsvideo bundle-latest release, found ${#bundles[@]}: ${bundles[*]}" >&2
+          # No mapfile/readarray here: this job runs on macOS, whose /bin/bash
+          # is 3.2 and has neither, and which bash a runner step actually gets
+          # is not something this repo can verify from here. find + wc works
+          # on every bash.
+          bundles=$(find "$dest" -maxdepth 1 -name 'bundle-*.js' | sort)
+          bundle_count=$(printf '%s' "$bundles" | grep -c . || true)
+          if [ "$bundle_count" -ne 1 ]; then
+            echo "::error::expected exactly one $dest/bundle-*.js after extracting the playsvideo bundle-latest release, found $bundle_count: $(printf '%s' "$bundles" | tr '\n' ' ')" >&2
             exit 1
           fi
 

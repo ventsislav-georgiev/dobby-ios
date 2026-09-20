@@ -1111,7 +1111,18 @@ python3 - <<'BUNDLEFETCHPY'
 import sys
 
 def strip_comments(text):
-    return "\n".join(line.split(" #", 1)[0] for line in text.splitlines())
+    # Two shapes, and the second one is why: a trailing " #" comment is the
+    # common case, but a WHOLE-LINE comment starting at column zero has no
+    # space before its "#", so splitting on " #" leaves it intact and a pin
+    # reading this text is satisfied by a comment quoting the literal with
+    # the real line deleted. Measured: that mutant passed the six checks
+    # below before this branch was added.
+    kept = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(line.split(" #", 1)[0])
+    return "\n".join(kept)
 
 wf_path = ".github/workflows/testflight.yml"
 with open(wf_path) as f:
