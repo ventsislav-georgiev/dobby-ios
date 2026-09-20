@@ -25,3 +25,6 @@ build-mac/
 # so xcodegen's folder reference has something to point at on a fresh clone.
 Dobby/Shell/*
 !Dobby/Shell/.gitkeep
+
+# Agent scratch/evidence, never published
+.claude-work/
