@@ -1094,6 +1094,100 @@ print("PASS: the TestFlight workflow checks out the PWA shell source as a siblin
 WORKFLOWPY
 
 # ---------------------------------------------------------------------------
+# #167 — TestFlight could never build at all: the app shell manifest resolves
+# /playsvideo/assets/bundle.js against Public/playsvideo/assets, which is
+# gitignored in the PWA repo (build output, not source), so no checkout —
+# CI's included — ever had it. The playsvideo repo now publishes that
+# directory as a release asset; testflight.yml fetches it before Archive.
+#
+# Six separate assertions, not one combined check: a single check cannot
+# tell WHICH of six ways this silently regresses, and this ledger already
+# has eighteen recorded instances of exactly that failure mode.
+#
+# Comments are stripped before every textual pin below. A pin that reads raw
+# source is satisfied by a comment quoting the literal with the real thing
+# missing — a defect this ledger has already paid for once.
+python3 - <<'BUNDLEFETCHPY'
+import sys
+
+def strip_comments(text):
+    # Two shapes, and the second one is why: a trailing " #" comment is the
+    # common case, but a WHOLE-LINE comment starting at column zero has no
+    # space before its "#", so splitting on " #" leaves it intact and a pin
+    # reading this text is satisfied by a comment quoting the literal with
+    # the real line deleted. Measured: that mutant passed the six checks
+    # below before this branch was added.
+    kept = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(line.split(" #", 1)[0])
+    return "\n".join(kept)
+
+wf_path = ".github/workflows/testflight.yml"
+with open(wf_path) as f:
+    wf = strip_comments(f.read())
+
+sh_path = "scripts/copy-app-shell.sh"
+with open(sh_path) as f:
+    sh = strip_comments(f.read())
+
+def need(haystack, needle, why):
+    if needle not in haystack:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+need(wf, "name: Fetch playsvideo bundle asset",
+     "the step that fetches the playsvideo bundle release asset was removed or renamed (#167)")
+
+# 1. Names the source repo the asset comes from.
+need(wf, "--repo ventsislav-georgiev/playsvideo",
+     "the download must name ventsislav-georgiev/playsvideo explicitly (#167)")
+
+# 2. Pins the rolling tag. An untagged `gh release download` takes the newest
+#    release by creation time, and this repo also cuts plain version-tag
+#    releases carrying no bundle asset at all — silently downloading nothing.
+need(wf, "gh release download bundle-latest",
+     "the download must pin the bundle-latest tag explicitly, or it can silently resolve to a non-bundle release (#167)")
+
+# 3. Extracts into the exact path copy-app-shell.sh reads — pinned on BOTH
+#    ends so the workflow and the script cannot drift apart.
+need(wf, 'dest="dobby/Sources/BookPlayServer/Public/playsvideo/assets"',
+     "the extraction target must be dobby/Sources/BookPlayServer/Public/playsvideo/assets (#167)")
+need(sh, 'os.path.join(public_dir, "playsvideo/assets")',
+     "copy-app-shell.sh must still read playsvideo/assets under Public — if this literal moves, the workflow's extraction target has to move with it (#167)")
+
+fetch_at = wf.index("name: Fetch playsvideo bundle asset")
+install_xcodegen_at = wf.index("name: Install xcodegen")
+fetch_step = wf[fetch_at:install_xcodegen_at]
+
+# 4. The job's own default working-directory is dobby-ios (see the #155
+#    checks above); without an override here, this step's relative paths
+#    land inside the wrong checkout.
+need(fetch_step, "working-directory: .",
+     "the fetch step must set working-directory: . to escape the job's dobby-ios default, or it writes into the wrong checkout (#167)")
+
+# 5. Position: before Archive. copy-app-shell.sh runs as a preBuildScript
+#    DURING Archive, so after Archive the download is useless — the file
+#    compiles and reads fine either way, which is exactly why position, not
+#    presence, is the thing that has to be pinned here.
+checkout_dobby_at = wf.index("name: Check out dobby (PWA app shell source)")
+archive_at = wf.index("name: Archive")
+if not (checkout_dobby_at < fetch_at < archive_at):
+    sys.stderr.write("FAIL: the bundle fetch must run after checking out dobby and before Archive, or copy-app-shell.sh runs before the asset exists (#167)\n")
+    sys.exit(1)
+
+# 6. Asserts rather than continues on a miss.
+if "exit 1" not in fetch_step:
+    sys.stderr.write("FAIL: the fetch step must fail the job (exit 1) when the bundle didn't extract cleanly, not just warn (#167)\n")
+    sys.exit(1)
+need(fetch_step, "::error::",
+     "the fetch step must report what it found with ::error:: when the extracted bundle count is wrong, not fail silently (#167)")
+
+print("PASS: TestFlight fetches the playsvideo bundle-latest release asset into the exact path copy-app-shell.sh reads, before Archive, from the correct working directory (#167)")
+BUNDLEFETCHPY
+
+# ---------------------------------------------------------------------------
 # #158 — the Apple bridge's TWO name seams, neither of which anything checked.
 #
 # `window.Dobby` is a JavaScript object literal living inside a Swift string
