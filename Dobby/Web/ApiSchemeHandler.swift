@@ -258,17 +258,18 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         return (503, Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8), false)
     }
 
-    /// The nine field names `GET /api/settings` always sends as an explicit JSON
+    /// The eight field names `GET /api/settings` always sends as an explicit JSON
     /// `null` when unset, so a client can tell "unset" apart from "field absent"
-    /// — `SettingsRoutes.swift:39-48` in the server repo (dobby, main @ b0526e4).
+    /// — `SettingsRoutes.swift:37-44` in the server repo (dobby, main @ c8a504f).
+    /// Nine until #174; the ninth key went with the service it belonged to.
     ///
     /// Transcribed rather than read at build time, because the two repos build
     /// separately with nothing enforcing they stay in step; a mismatch between
     /// this list and the Swift one on the Pi is exactly the drift
     /// `ApiSchemeHandlerCheck.settingsSeedCoversEveryNullKey` exists to catch on
     /// this side, by naming the count and every literal so a future edit to
-    /// either list has to touch this comment too. Android holds the same nine in
-    /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #145 @ 71e9703fb).
+    /// either list has to touch this comment too. Android holds the same eight in
+    /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #174 @ c6525be13).
     static let settingsNullKeys = [
         "imdbAuthToken",
         "premiumizeApiKey",
@@ -276,7 +277,6 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         "openSubtitlesPassword",
         "subdlApiKey",
         "subsourceApiKey",
-        "spotifyClientId",
         "preferredSubtitleLanguage",
         "preferredAudioLanguage",
     ]
