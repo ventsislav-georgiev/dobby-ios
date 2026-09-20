@@ -750,6 +750,350 @@ print("PASS: the Pi-less cold start is wired — makeWebView calls load(_:in:), 
 SHELLWIRINGPY
 
 # ---------------------------------------------------------------------------
+# #152 (M5 follow-up) — the iOS settings write-back: drain, then pull.
+#
+# ApiSchemeHandlerCheck pins the two pure rules as values: what the queue
+# accumulates (patches, never the seed), and what a push status means for the hold.
+# What no value-level check can reach is the wiring — that the drain runs at all,
+# that it runs BEFORE the #149 ahead-guard rather than after the `return`, that what
+# goes on the wire is the queued PATCH and never the mirrored document, and that the
+# hold is released only by a push the Pi actually answered. Exact single-line
+# constructs, and position where position is the meaning.
+# ---------------------------------------------------------------------------
+python3 - <<'SETTINGSWRITEBACKPY'
+import sys
+
+path = "Dobby/Web/ApiSchemeHandler.swift"
+with open(path) as f:
+    src = f.read()
+
+def fail(message, needle=None):
+    sys.stderr.write("FAIL: " + message + " (#152)\n")
+    if needle is not None:
+        sys.stderr.write("expected to find, verbatim:\n  " + needle + "\n")
+    sys.exit(1)
+
+def need(haystack, needle, message):
+    if needle not in haystack:
+        fail(message, needle)
+
+def body_of(signature):
+    if signature not in src:
+        fail("no such declaration any more: " + signature, signature)
+    start = src.index(signature)
+    return src[start:src.index("\n    }\n", start)]
+
+# 1. The POST leg keeps the PATCH BYTES. Without this line the merge is still stored
+#    and the mirror still marked ahead — every #149 check stays green — while there
+#    is nothing to push, so the hold never releases and the phone is exactly as
+#    permanently stuck as before. The argument is the raw `patch`, not `merged`:
+#    pushing the merged document would carry the seed's explicit nulls.
+need(src, "            SettingsMirrorStore.queuePatch(patch)",
+     "the settings POST no longer queues the patch bytes, so a write made with the Pi off "
+     "is never pushed and the ahead-of-server hold never releases")
+
+# ...and it comes AFTER markAheadOfServer() and before the acknowledgement. Queue
+# before mark leaves a window in which a drain can land, clear the queue and release
+# the hold, and then markAheadOfServer() re-takes a hold with nothing queued behind
+# it — held forever, the exact bug. queuePatch re-takes the hold itself, under the
+# queue's own lock, which is what makes this order the safe one.
+mark_idx = src.index("            SettingsMirrorStore.markAheadOfServer()")
+queue_idx = src.index("            SettingsMirrorStore.queuePatch(patch)")
+ack_idx = src.index('            respond(task, id, status: 200, contentType: "application/json",')
+if not mark_idx < queue_idx < ack_idx:
+    fail("the settings POST queues the patch before it marks the mirror ahead, or after it has "
+         "already acknowledged the write")
+
+# 2. The drain is RUN, and it runs before the guard that returns. Below the guard it
+#    is unreachable code in the only state it exists for, and nothing else in this
+#    suite executes refreshSettingsInBackground.
+refresh = body_of("private func refreshSettingsInBackground() {")
+need(refresh, "        drainPendingSettings()",
+     "refreshSettingsInBackground no longer drains the queued patch, so the #149 hold is "
+     "still set once and never cleared")
+guard_line = "if SettingsMirrorStore.isAheadOfServer { return }"
+if refresh.index("        drainPendingSettings()") > refresh.index(guard_line):
+    fail("the drain sits after the ahead-of-server guard, which returns — so it never runs")
+
+# 3. The drain's own body. Both halves: the patch is read from the QUEUE, and the
+#    legacy hold with nothing behind it is released rather than held forever (every
+#    phone already running the #149 build is in that state after upgrading).
+drain = body_of("private func drainPendingSettings() {")
+for needle, message in [
+    ("        guard SettingsMirrorStore.isAheadOfServer else { return }",
+     "the drain no longer starts from the hold, so it pushes on every settings GET"),
+    ("        guard let pending = SettingsMirrorStore.pendingPatch() else {",
+     "the drain no longer takes its bytes from the queue"),
+    ("            SettingsMirrorStore.releaseHold()",
+     "a hold with nothing queued behind it is no longer released, so a phone upgrading from "
+     "the #149 build stays permanently stuck"),
+    ("            switch Self.pushSettings(pending, to: self.server) {",
+     "the drain no longer pushes the queued patch to the Pi"),
+    ("            case .landed, .refused:", "the drain no longer distinguishes a push that ended the hold"),
+    ("                SettingsMirrorStore.clearPending(ifStill: pending)",
+     "the drain no longer releases the hold against the exact bytes it pushed"),
+    ("            case .held:", "the drain no longer has a branch that keeps the patch queued"),
+    ("        if drainInFlight { refreshing.unlock(); return }",
+     "the drain lost its single-flight guard, so a boot that reads settings twice POSTs the "
+     "user's secrets twice"),
+]:
+    need(drain, needle, message)
+
+# THE trap, as an absence. Pushing the mirrored document in the queue's place is the
+# naive fix that looks right and clears live values on the Pi: POST /api/settings
+# applies preferredSubtitleLanguage and preferredAudioLanguage by body PRESENCE
+# (SettingsRoutes.swift:86-90), so the seed's explicit nulls would blank both for a
+# device that never touched either.
+push = body_of("private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {")
+for scope, label in [(drain, "the drain"), (push, "the push")]:
+    for forbidden in ["SettingsMirrorStore.load()", "mergedSettings", "seedSettingsJson", "settingsSeed"]:
+        if forbidden in scope:
+            fail(label + " reaches for the mirrored document (" + forbidden + "); only the queued "
+                 "patch may be pushed, or the Pi's live language values are cleared by a stale "
+                 "mirror's nulls")
+
+# 4. The push sends the patch as the body, with the method the Pi's route takes.
+for needle, message in [
+    ('        request.httpMethod = "POST"', "the push no longer uses the method POST /api/settings takes"),
+    ("        request.httpBody = patch", "the push no longer sends the queued patch as its body"),
+    ("        return pushOutcome(status: http?.statusCode)",
+     "the push no longer routes its status through the pinned outcome rule"),
+]:
+    need(push, needle, message)
+
+# 5. Position inside the drain: the clear is INSIDE the landed/refused case and after
+#    the push. Hoisted above the switch — or added to the .held branch — it releases
+#    the hold for a change the Pi never took, which loses the user's key. That mutant
+#    passes every `need` above.
+push_at = drain.index("            switch Self.pushSettings(pending, to: self.server) {")
+landed_at = drain.index("            case .landed, .refused:")
+clear_at = drain.index("                SettingsMirrorStore.clearPending(ifStill: pending)")
+held_at = drain.index("            case .held:")
+if not push_at < landed_at < clear_at < held_at:
+    fail("the queue is cleared outside the landed/refused case, or before the push — the hold "
+         "must only be released by a push the Pi actually answered")
+if drain.count("SettingsMirrorStore.clearPending(") != 1:
+    fail("there is more than one path that releases the hold in the drain")
+
+# 6. clearPending is a compare-and-delete, in that order. The compare is what stops a
+#    save that landed mid-push from being thrown away with the confirmation of the
+#    older one — that mutant loses the user's latest change AND releases the hold in
+#    the same step. Clearing the bit before the delete leaves the mirror unprotected
+#    with the patch still queued.
+clear = body_of("static func clearPending(ifStill pushed: Data) {")
+for needle, message in [
+    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
+     "clearPending no longer takes the queue lock, so it can interleave with a page write"),
+    ("        guard read(pendingQuery) == pushed else { return }",
+     "clearPending no longer checks that what is queued is still what was pushed"),
+    ("        SecItemDelete(pendingQuery as CFDictionary)", "clearPending no longer removes the queued patch"),
+    ("        UserDefaults.standard.set(false, forKey: aheadKey)", "clearPending no longer releases the hold"),
+]:
+    need(clear, needle, message)
+if not (clear.index("pendingLock.lock()")
+        < clear.index("guard read(pendingQuery) == pushed")
+        < clear.index("SecItemDelete(pendingQuery")
+        < clear.index("UserDefaults.standard.set(false, forKey: aheadKey)")):
+    fail("clearPending releases the hold before it has checked the queued bytes and removed them")
+
+# 7. queuePatch accumulates through mergedPatch, not mergedSettings. The helper is
+#    pinned as values in ApiSchemeHandlerCheck; this is its call site, and swapping
+#    it for the seeded merge is green everywhere else while it queues nine keys whose
+#    nulls clear the Pi's two language fields.
+queue_fn = body_of("static func queuePatch(_ patch: Data) {")
+for needle, message in [
+    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
+     "queuePatch no longer takes the queue lock, so a drain can clear a patch mid-write"),
+    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return }",
+     "queuePatch no longer accumulates through mergedPatch — the seeded merge would queue nine "
+     "keys and clear the Pi's language fields, and replacing instead of accumulating would drop "
+     "an earlier Pi-less save"),
+    ("        write(pendingQuery, accumulated)", "queuePatch no longer stores the accumulated patch"),
+    ("        UserDefaults.standard.set(true, forKey: aheadKey)",
+     "queuePatch no longer re-takes the hold under the lock, so a drain landing in the sliver "
+     "after markAheadOfServer() leaves a queued patch with the mirror unprotected"),
+]:
+    need(queue_fn, needle, message)
+if queue_fn.index("write(pendingQuery, accumulated)") > queue_fn.index("UserDefaults.standard.set(true"):
+    fail("queuePatch takes the hold before the patch is actually stored")
+
+# 8. releaseHold re-checks under the lock. Without it, a patch queued between the
+#    drain's look and this call is abandoned with the hold.
+release = body_of("static func releaseHold() {")
+need(release, "        guard read(pendingQuery) == nil else { return }",
+     "releaseHold no longer re-checks the queue under the lock, so it can release a hold that "
+     "a patch queued meanwhile still needs")
+
+# 9. The queued patch is a settings body: it carries every secret the user just typed,
+#    so it lives in the Keychain beside the mirror, never in a plist a backup hands
+#    over in the clear. The only UserDefaults line allowed near the patch is the bit.
+need(src, '    private static let pendingAccount = "api/settings.pending"',
+     "the queue is no longer its own Keychain item beside the mirror")
+need(src, "    private static var pendingQuery: [String: Any] { query(pendingAccount) }",
+     "the queue's Keychain query no longer uses its own account, so it would collide with the mirror")
+for scope, label in [(queue_fn, "queuePatch"), (clear, "clearPending"),
+                     (body_of("static func pendingPatch() -> Data? {"), "pendingPatch")]:
+    for line in scope.splitlines():
+        if "UserDefaults" in line and "aheadKey" not in line:
+            fail(label + " puts something other than the hold bit in UserDefaults; the queued patch "
+                 "carries secrets and belongs in the Keychain")
+
+need(src, "    private var drainInFlight = false",
+     "the drain lost its own single-flight flag")
+
+print("PASS: the iOS settings write-back drains before it pulls, pushes only the queued patch, "
+      "and releases the hold only against the exact bytes a push landed (#152)")
+SETTINGSWRITEBACKPY
+
+# ---------------------------------------------------------------------------
+# #155 — the TestFlight release actually carries the #151 shell, and a build that
+# doesn't gets said out loud somewhere a human sees it without a debugger.
+# ---------------------------------------------------------------------------
+
+# 1. copy-app-shell.sh's no-sibling branch must WIPE Dobby/Shell before bailing, not
+#    just ensure the directory exists — otherwise a rebuild that LOSES the sibling
+#    (a CI checkout step failing after an earlier one succeeded, a local sibling
+#    removed between builds) keeps whatever shell an earlier build already copied
+#    here, silently stale instead of correctly degrading to none. Proven live:
+#    pre-seed Dobby/Shell with a stray file, run the script pointed at a sibling
+#    that does not exist, and check the file is gone.
+python3 - <<'SHELLWIPEPY'
+import os
+import subprocess
+import sys
+import tempfile
+
+repo = os.getcwd()
+shell_dir = os.path.join(repo, "Dobby/Shell")
+os.makedirs(shell_dir, exist_ok=True)
+stray = os.path.join(shell_dir, "stale-from-a-previous-build.txt")
+with open(stray, "w") as f:
+    f.write("leftover")
+
+env = dict(os.environ)
+env["DOBBY_PUBLIC_DIR"] = tempfile.mkdtemp() + "-does-not-exist"
+result = subprocess.run(["./scripts/copy-app-shell.sh"], cwd=repo, env=env, capture_output=True, text=True)
+if result.returncode != 0:
+    sys.stderr.write(f"FAIL: copy-app-shell.sh must exit 0 with no sibling checkout, got {result.returncode}\n{result.stderr}\n")
+    sys.exit(1)
+if os.path.exists(stray):
+    sys.stderr.write("FAIL: copy-app-shell.sh's no-sibling branch left a stale Dobby/Shell file in place instead of wiping it (#155)\n")
+    sys.exit(1)
+if not os.path.isfile(os.path.join(shell_dir, ".gitkeep")):
+    sys.stderr.write("FAIL: copy-app-shell.sh's no-sibling branch must still leave Dobby/Shell/.gitkeep so the folder reference survives (#155)\n")
+    sys.exit(1)
+
+print("PASS: copy-app-shell.sh wipes a stale Dobby/Shell when the sibling checkout is gone, instead of shipping stale content (#155)")
+SHELLWIPEPY
+
+# This check's own fixture must not be the reason a human re-running checks locally
+# right after sees an empty Dobby/Shell — put the real one back, same guard as the
+# #151 block above uses to decide whether it has one to put back at all.
+if [ -d "$DOBBY_PUBLIC_DIR" ]; then
+  DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
+fi
+
+# 2. ContentView: the screen a never-paired device actually lands on must say
+#    whether THIS build can cold-start Pi-less at all, driven by the same
+#    BundledShell.root the offline load itself branches on, or the two can disagree.
+python3 - <<'CONTENTVIEWPY'
+import sys
+
+path = "Dobby/ContentView.swift"
+with open(path) as f:
+    src = f.read()
+
+def need(needle, why):
+    if needle not in src:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+need("if BundledShell.root == nil {",
+     "ServerUnreachableView must gate a signal on BundledShell.root, or a shell-less build says nothing on the screen a never-paired device lands on (#155)")
+need('Text("This build has no offline shell — Continue offline will be blank.")',
+     "the no-shell caption text changed or was removed (#155)")
+
+# Position, scoped to ServerUnreachableView itself (ContentView's own top-level
+# `} else {` sits earlier in the file, around its WebContainer/ServerUnreachableView
+# switch, and would satisfy an unscoped ordering check without the caption existing
+# in the right branch at all). The caption must sit in the not-resolving branch,
+# after the "Continue offline" button — a mutant that hoists the BundledShell.root
+# check above `if resolving` would show it on the "Finding Dobby…" screen too,
+# before the app has even decided offline mode is in play.
+view_at = src.index("struct ServerUnreachableView")
+scoped = src[view_at:]
+resolving_at = scoped.index("if resolving {")
+else_at = scoped.index("} else {")
+offline_button_at = scoped.index('Button("Continue offline", action: offline)')
+guard_at = scoped.index("if BundledShell.root == nil {")
+if not (resolving_at < else_at < offline_button_at < guard_at):
+    sys.stderr.write("FAIL: the no-shell caption must sit after 'Continue offline', inside the not-resolving branch (#155)\n")
+    sys.exit(1)
+
+print("PASS: ServerUnreachableView tells a never-paired device whether this build has an offline shell before it taps Continue offline (#155)")
+CONTENTVIEWPY
+
+# 3. The workflow: a sibling checkout that lands where copy-app-shell.sh already
+#    looks, and an archive-time guard that refuses to export/upload a shell-less
+#    build rather than letting it through the way #151 review deliberately let the
+#    SCRIPT do for an ordinary dobby-ios-only build. Textual only — run-checks.sh
+#    does not invoke xcodebuild, so this cannot see whether GitHub Actions itself
+#    accepts the YAML; that was checked separately with a real xcodebuild archive.
+python3 - <<'WORKFLOWPY'
+import sys
+
+path = ".github/workflows/testflight.yml"
+with open(path) as f:
+    wf = f.read()
+
+def need(needle, why):
+    if needle not in wf:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+need("repository: ventsislav-georgiev/bookplay",
+     "testflight.yml must check out the PWA repo as a sibling, or scripts/copy-app-shell.sh finds no dobby checkout and every release still ships without the #151 shell (#155)")
+need("token: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}",
+     "the sibling checkout needs a token wider than the default GITHUB_TOKEN to reach a private repo (#155)")
+need("path: dobby-ios",
+     "the dobby-ios checkout must get its own explicit path so the sibling checkout lands next to it, not inside it (#155)")
+need("path: dobby\n",
+     "the sibling checkout must land at a path literally named dobby, matching copy-app-shell.sh's default ../dobby (#155)")
+need("working-directory: dobby-ios",
+     "moving the checkout to its own path without pointing every run: step back at it would break the whole workflow (#155)")
+
+need("name: Verify the app shell was bundled", "the archive-time shell guard step was removed or renamed (#155)")
+need("build/Dobby.xcarchive/Products/Applications/Dobby.app/Shell/index.html",
+     "the shell guard must check the shipped .app bundle's Shell/index.html, not a pre-archive path (#155)")
+# The step name is quoted in a comment above the earlier checkout step too (it
+# points forward at this one), so anchor on the actual "name:" key, not the bare
+# phrase, or this passes on the comment alone with the real step missing.
+verify_at = wf.index("name: Verify the app shell was bundled")
+archive_at = wf.index("name: Archive")
+export_at = wf.index("name: Export .ipa")
+if not (archive_at < verify_at < export_at):
+    sys.stderr.write("FAIL: the shell guard must run after Archive and before Export .ipa, or a shell-less build still gets exported and uploaded (#155)\n")
+    sys.exit(1)
+if "exit 1" not in wf[verify_at:export_at]:
+    sys.stderr.write("FAIL: the shell guard must actually fail the job (exit 1) when the shell is missing, not just warn (#155)\n")
+    sys.exit(1)
+
+# -s and not -e, and pinned because the two halves are not the same guard. A
+# shell that is MISSING and a shell that is PRESENT BUT EMPTY reach TestFlight
+# the same way and blank the same never-paired phone, and an empty file is the
+# likelier of the two: copy-app-shell.sh recreates the directory before it
+# copies, so an interrupted or partial copy leaves exactly a zero-byte
+# index.html. Measured: with -e in place of -s every check in this suite still
+# passed (#155 review).
+if "! -s " not in wf[verify_at:export_at]:
+    sys.stderr.write("FAIL: the shell guard tests existence rather than content, so a zero-byte "
+                     "index.html ships to TestFlight and blanks a never-paired phone (#155)\n")
+    sys.exit(1)
+
+print("PASS: the TestFlight workflow checks out the PWA shell source as a sibling and refuses to export/upload an archive that shipped without it (#155)")
+WORKFLOWPY
+
+# ---------------------------------------------------------------------------
 # #158 — the Apple bridge's TWO name seams, neither of which anything checked.
 #
 # `window.Dobby` is a JavaScript object literal living inside a Swift string

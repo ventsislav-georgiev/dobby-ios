@@ -112,6 +112,19 @@ private struct ServerUnreachableView: View {
                     .multilineTextAlignment(.center)
                 Button("Edit addresses", action: edit)
                 Button("Continue offline", action: offline)
+                // #155: a build made without the sibling dobby checkout
+                // (scripts/copy-app-shell.sh) has no shell to synthesize, so
+                // "Continue offline" is a blank page here, not a bug. Say so on the
+                // exact screen a never-paired device lands on, driven by the same
+                // BundledShell.root the offline load itself branches on — or a
+                // device round spends itself deciding whether the feature or the
+                // build is what is missing.
+                if BundledShell.root == nil {
+                    Text("This build has no offline shell — Continue offline will be blank.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -16,8 +16,42 @@ jobs:
       TEAM_ID: V5XV3994L8
       KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
       ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+    # Every existing `run:` step below assumed it started in the checkout root;
+    # giving dobby-ios its own path (#155, next) moves that root, so this keeps
+    # every one of them working unchanged instead of prefixing each with cd.
+    defaults:
+      run:
+        working-directory: dobby-ios
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: dobby-ios
+
+      # #155: scripts/copy-app-shell.sh (invoked as a preBuildScript below) bundles
+      # the PWA app shell for the Pi-less cold start (#151) by reading a SIBLING
+      # dobby checkout at ../dobby — the same arrangement dobby-android's
+      # copyAppShell depends on. A single-repo checkout, which is all this workflow
+      # had before, can never have that sibling, so every TestFlight build shipped
+      # without the shell: the script warns and exits 0 (it must — dobby-ios-only
+      # changes with no PWA checkout still have to build), and the archive silently
+      # got an empty Dobby/Shell. This checkout gives it one, landing dobby and
+      # dobby-ios as true siblings under $GITHUB_WORKSPACE — the layout
+      # copy-app-shell.sh's default path already expects, no script changes needed.
+      #
+      # bookplay (the PWA repo) is private, so this needs a token wider than the
+      # default GITHUB_TOKEN, which is scoped to dobby-ios alone: a fine-grained PAT,
+      # read-only, contents scope, on ventsislav-georgiev/bookplay only, added as the
+      # DOBBY_PWA_CHECKOUT_TOKEN secret. Unlike copy-app-shell.sh's own leniency, this
+      # step's failure is NOT swallowed — this workflow's whole job is the artifact
+      # that ships, so a missing shell here is the regression #155 exists to close,
+      # not an unrelated build's problem. See "Verify the app shell was bundled"
+      # below for the other half of that guard.
+      - name: Check out dobby (PWA app shell source)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: ventsislav-georgiev/bookplay
+          token: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}
+          path: dobby
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -76,6 +110,21 @@ jobs:
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CURRENT_PROJECT_VERSION="$(date +%Y%m%d%H%M)" \
             -allowProvisioningUpdates
+
+      # #155: the other half of the checkout guard above. A shell that failed to
+      # bundle for ANY reason — the checkout step above, a drifted sibling, a
+      # project.yml change to how Shell is wired — must not reach TestFlight
+      # silently; it already reached this point once with no failure anywhere.
+      - name: Verify the app shell was bundled
+        run: |
+          shell_html="build/Dobby.xcarchive/Products/Applications/Dobby.app/Shell/index.html"
+          if [ ! -s "$shell_html" ]; then
+            echo "::error::No app shell in this archive ($shell_html missing or empty)." \
+                 "The Pi-less cold start (#151) will not work on this build." \
+                 "Check the 'Check out dobby (PWA app shell source)' step and the" \
+                 "DOBBY_PWA_CHECKOUT_TOKEN secret." >&2
+            exit 1
+          fi
 
       - name: Export .ipa
         run: |
