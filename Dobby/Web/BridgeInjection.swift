@@ -52,7 +52,7 @@ enum BridgeInjection {
             _setOffline: function (arr) { this._offline = Array.isArray(arr) ? arr : []; },
             downloadNativeOffline: function (json) { post('downloadNativeOffline', json); },
             downloadNativeBook: function (json) { post('downloadNativeBook', json); },
-            deleteNativeOffline: function (id) { post('deleteNativeOffline', id); },
+            removeNativeOffline: function (id) { post('removeNativeOffline', id); },
             cancelNativeOfflineDownload: function (id) { post('cancelNativeOfflineDownload', id); },
             // Offline playback URL for a natively-downloaded file (custom scheme; the
             // https page can't load file://). Segments are percent-encoded.
