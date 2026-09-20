@@ -944,3 +944,151 @@ need(src, "    private var drainInFlight = false",
 print("PASS: the iOS settings write-back drains before it pulls, pushes only the queued patch, "
       "and releases the hold only against the exact bytes a push landed (#152)")
 SETTINGSWRITEBACKPY
+
+# ---------------------------------------------------------------------------
+# #155 — the TestFlight release actually carries the #151 shell, and a build that
+# doesn't gets said out loud somewhere a human sees it without a debugger.
+# ---------------------------------------------------------------------------
+
+# 1. copy-app-shell.sh's no-sibling branch must WIPE Dobby/Shell before bailing, not
+#    just ensure the directory exists — otherwise a rebuild that LOSES the sibling
+#    (a CI checkout step failing after an earlier one succeeded, a local sibling
+#    removed between builds) keeps whatever shell an earlier build already copied
+#    here, silently stale instead of correctly degrading to none. Proven live:
+#    pre-seed Dobby/Shell with a stray file, run the script pointed at a sibling
+#    that does not exist, and check the file is gone.
+python3 - <<'SHELLWIPEPY'
+import os
+import subprocess
+import sys
+import tempfile
+
+repo = os.getcwd()
+shell_dir = os.path.join(repo, "Dobby/Shell")
+os.makedirs(shell_dir, exist_ok=True)
+stray = os.path.join(shell_dir, "stale-from-a-previous-build.txt")
+with open(stray, "w") as f:
+    f.write("leftover")
+
+env = dict(os.environ)
+env["DOBBY_PUBLIC_DIR"] = tempfile.mkdtemp() + "-does-not-exist"
+result = subprocess.run(["./scripts/copy-app-shell.sh"], cwd=repo, env=env, capture_output=True, text=True)
+if result.returncode != 0:
+    sys.stderr.write(f"FAIL: copy-app-shell.sh must exit 0 with no sibling checkout, got {result.returncode}\n{result.stderr}\n")
+    sys.exit(1)
+if os.path.exists(stray):
+    sys.stderr.write("FAIL: copy-app-shell.sh's no-sibling branch left a stale Dobby/Shell file in place instead of wiping it (#155)\n")
+    sys.exit(1)
+if not os.path.isfile(os.path.join(shell_dir, ".gitkeep")):
+    sys.stderr.write("FAIL: copy-app-shell.sh's no-sibling branch must still leave Dobby/Shell/.gitkeep so the folder reference survives (#155)\n")
+    sys.exit(1)
+
+print("PASS: copy-app-shell.sh wipes a stale Dobby/Shell when the sibling checkout is gone, instead of shipping stale content (#155)")
+SHELLWIPEPY
+
+# This check's own fixture must not be the reason a human re-running checks locally
+# right after sees an empty Dobby/Shell — put the real one back, same guard as the
+# #151 block above uses to decide whether it has one to put back at all.
+if [ -d "$DOBBY_PUBLIC_DIR" ]; then
+  DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
+fi
+
+# 2. ContentView: the screen a never-paired device actually lands on must say
+#    whether THIS build can cold-start Pi-less at all, driven by the same
+#    BundledShell.root the offline load itself branches on, or the two can disagree.
+python3 - <<'CONTENTVIEWPY'
+import sys
+
+path = "Dobby/ContentView.swift"
+with open(path) as f:
+    src = f.read()
+
+def need(needle, why):
+    if needle not in src:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+need("if BundledShell.root == nil {",
+     "ServerUnreachableView must gate a signal on BundledShell.root, or a shell-less build says nothing on the screen a never-paired device lands on (#155)")
+need('Text("This build has no offline shell — Continue offline will be blank.")',
+     "the no-shell caption text changed or was removed (#155)")
+
+# Position, scoped to ServerUnreachableView itself (ContentView's own top-level
+# `} else {` sits earlier in the file, around its WebContainer/ServerUnreachableView
+# switch, and would satisfy an unscoped ordering check without the caption existing
+# in the right branch at all). The caption must sit in the not-resolving branch,
+# after the "Continue offline" button — a mutant that hoists the BundledShell.root
+# check above `if resolving` would show it on the "Finding Dobby…" screen too,
+# before the app has even decided offline mode is in play.
+view_at = src.index("struct ServerUnreachableView")
+scoped = src[view_at:]
+resolving_at = scoped.index("if resolving {")
+else_at = scoped.index("} else {")
+offline_button_at = scoped.index('Button("Continue offline", action: offline)')
+guard_at = scoped.index("if BundledShell.root == nil {")
+if not (resolving_at < else_at < offline_button_at < guard_at):
+    sys.stderr.write("FAIL: the no-shell caption must sit after 'Continue offline', inside the not-resolving branch (#155)\n")
+    sys.exit(1)
+
+print("PASS: ServerUnreachableView tells a never-paired device whether this build has an offline shell before it taps Continue offline (#155)")
+CONTENTVIEWPY
+
+# 3. The workflow: a sibling checkout that lands where copy-app-shell.sh already
+#    looks, and an archive-time guard that refuses to export/upload a shell-less
+#    build rather than letting it through the way #151 review deliberately let the
+#    SCRIPT do for an ordinary dobby-ios-only build. Textual only — run-checks.sh
+#    does not invoke xcodebuild, so this cannot see whether GitHub Actions itself
+#    accepts the YAML; that was checked separately with a real xcodebuild archive.
+python3 - <<'WORKFLOWPY'
+import sys
+
+path = ".github/workflows/testflight.yml"
+with open(path) as f:
+    wf = f.read()
+
+def need(needle, why):
+    if needle not in wf:
+        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
+        sys.exit(1)
+
+need("repository: ventsislav-georgiev/bookplay",
+     "testflight.yml must check out the PWA repo as a sibling, or scripts/copy-app-shell.sh finds no dobby checkout and every release still ships without the #151 shell (#155)")
+need("token: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}",
+     "the sibling checkout needs a token wider than the default GITHUB_TOKEN to reach a private repo (#155)")
+need("path: dobby-ios",
+     "the dobby-ios checkout must get its own explicit path so the sibling checkout lands next to it, not inside it (#155)")
+need("path: dobby\n",
+     "the sibling checkout must land at a path literally named dobby, matching copy-app-shell.sh's default ../dobby (#155)")
+need("working-directory: dobby-ios",
+     "moving the checkout to its own path without pointing every run: step back at it would break the whole workflow (#155)")
+
+need("name: Verify the app shell was bundled", "the archive-time shell guard step was removed or renamed (#155)")
+need("build/Dobby.xcarchive/Products/Applications/Dobby.app/Shell/index.html",
+     "the shell guard must check the shipped .app bundle's Shell/index.html, not a pre-archive path (#155)")
+# The step name is quoted in a comment above the earlier checkout step too (it
+# points forward at this one), so anchor on the actual "name:" key, not the bare
+# phrase, or this passes on the comment alone with the real step missing.
+verify_at = wf.index("name: Verify the app shell was bundled")
+archive_at = wf.index("name: Archive")
+export_at = wf.index("name: Export .ipa")
+if not (archive_at < verify_at < export_at):
+    sys.stderr.write("FAIL: the shell guard must run after Archive and before Export .ipa, or a shell-less build still gets exported and uploaded (#155)\n")
+    sys.exit(1)
+if "exit 1" not in wf[verify_at:export_at]:
+    sys.stderr.write("FAIL: the shell guard must actually fail the job (exit 1) when the shell is missing, not just warn (#155)\n")
+    sys.exit(1)
+
+# -s and not -e, and pinned because the two halves are not the same guard. A
+# shell that is MISSING and a shell that is PRESENT BUT EMPTY reach TestFlight
+# the same way and blank the same never-paired phone, and an empty file is the
+# likelier of the two: copy-app-shell.sh recreates the directory before it
+# copies, so an interrupted or partial copy leaves exactly a zero-byte
+# index.html. Measured: with -e in place of -s every check in this suite still
+# passed (#155 review).
+if "! -s " not in wf[verify_at:export_at]:
+    sys.stderr.write("FAIL: the shell guard tests existence rather than content, so a zero-byte "
+                     "index.html ships to TestFlight and blanks a never-paired phone (#155)\n")
+    sys.exit(1)
+
+print("PASS: the TestFlight workflow checks out the PWA shell source as a sibling and refuses to export/upload an archive that shipped without it (#155)")
+WORKFLOWPY

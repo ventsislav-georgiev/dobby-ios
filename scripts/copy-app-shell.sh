@@ -35,6 +35,11 @@ SHELL_DIR="$PWD/Dobby/Shell"
 
 if [ ! -d "$PUBLIC_DIR" ]; then
   echo "warning: copy-app-shell: no dobby checkout at $PUBLIC_DIR; this build ships without an app shell and cannot cold-start Pi-less." >&2
+  # #155: wipe first, or a rebuild that LOSES the sibling (a checkout step failing
+  # after a prior successful one, a local checkout removed between builds) keeps
+  # whatever shell an earlier build already copied here instead of degrading to
+  # none — a stale shell being silently worse than no shell at all.
+  rm -rf "$SHELL_DIR"
   mkdir -p "$SHELL_DIR" && : > "$SHELL_DIR/.gitkeep"
   exit 0
 fi
