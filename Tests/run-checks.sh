@@ -1287,9 +1287,11 @@ for line in literal.splitlines():
     if m:
         declared.append(m.group(1))
 
-# The lyrics member reaches the literal through a Swift interpolation, so the line
-# scan above cannot see it. Resolve every interpolation by name instead of skipping
-# them: an unresolved one means a member this guard is not looking at.
+# A member can reach the literal through a Swift interpolation instead of a plain
+# line, and the line scan above cannot see it. No member does today — the lyrics
+# one did until #174 — so this loop finds nothing, and that is the point: it is
+# what keeps the guard honest the next time someone adds one, rather than letting
+# the member go silently unchecked.
 for m in re.finditer(r"\\\(([A-Za-z_][A-Za-z0-9_]*)\)", literal):
     prop = m.group(1)
     found = re.findall(r'"\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*function', inject)
@@ -1595,3 +1597,105 @@ if problems:
 print("PASS: %d WKURLSchemeTask call(s) across %d handler(s) are made inside onMain, "
       "which still branches on Thread.isMainThread (#169)" % (pinned, len(FILES)))
 SCHEMEMAINPY
+
+# ---------------------------------------------------------------------------
+# #174: Spotify stays deleted.
+#
+# The owner's call was "remove all functionality related to spotify as a whole".
+# The PWA (dobby, main @ c8a504f) deleted the `Dobby.openSpotifyLyrics` call and
+# every `/api/spotify/*` route; Android (dobby-android @ c6525be13) dropped its
+# `spotifyClientId` mirror key. This side deleted `Dobby/Spotify/` whole, the
+# bridge member and its dispatch case, the `"lyrics"` Live Activity kind, and the
+# ninth settings null key.
+#
+# The parts that would come back quietly are pinned by NAME, not by a blanket
+# "no such string anywhere" — a grep is only a guard if it names what it forbids:
+#   (a) no source file declares a Spotify symbol or mentions the service,
+#   (b) `openSpotifyLyrics` appears in neither end of the bridge, and
+#   (c) the Live Activity contract carries no `"lyrics"` kind, which is the one
+#       piece with no "spotify" in its spelling — CARPLAY.md's lane 7 is gone,
+#       so nothing else records that the kind was Spotify-only.
+# The CarPlay Dashboard lane itself is NOT Spotify and is deliberately not
+# forbidden here: `kind` is still "book" | "video", both live.
+#
+# The floors matter more than the matches: an empty scan reads exactly like a
+# clean tree, so the check fails if it did not actually inspect the files.
+# ---------------------------------------------------------------------------
+python3 - <<'NOSPOTIFYPY'
+import glob
+import os
+import re
+import sys
+
+ROOTS = ["Dobby", "DobbyWidgets", "Shared", "Tests"]
+EXTS = (".swift", ".plist", ".js", ".entitlements")
+SKIP = os.path.join("Dobby", "Shell") + os.sep   # build-time PWA copy, not source
+
+files = []
+for root in ROOTS:
+    for path in sorted(glob.glob(root + "/**/*", recursive=True)):
+        if path.startswith(SKIP) or not path.endswith(EXTS) or not os.path.isfile(path):
+            continue
+        files.append(path)
+for extra in ["project.yml"]:
+    if os.path.isfile(extra):
+        files.append(extra)
+
+# This file names Spotify on purpose (the comment above), so it cannot scan itself.
+SPOTIFY = re.compile(r"spotify", re.I)
+BRIDGE = re.compile(r"\bopenSpotifyLyrics\b")
+LYRICS_KIND = re.compile(r'"lyrics"')
+
+problems = []
+for path in files:
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError as exc:
+        problems.append("%s: unreadable (%s)" % (path, exc))
+        continue
+    for i, line in enumerate(text.splitlines(), 1):
+        if SPOTIFY.search(line):
+            problems.append(
+                "%s:%d: Spotify is back — #174 removed it whole, and the server "
+                "(dobby) and Android (dobby-android) halves are merged and closed, "
+                "so this end has nothing to talk to: %s" % (path, i, line.strip()))
+        if BRIDGE.search(line):
+            problems.append(
+                "%s:%d: the `openSpotifyLyrics` bridge method is back. Both ends went "
+                "in #174 — the `window.Dobby` member in BridgeInjection.swift and the "
+                "`WebBridge.dispatch` case — and no PWA build calls it." % (path, i))
+        if LYRICS_KIND.search(line):
+            problems.append(
+                "%s:%d: a `\"lyrics\"` Live Activity kind is back. `kind` is "
+                "\"book\" | \"video\"; the lyrics lane was the Spotify one (CARPLAY.md "
+                "lane 7, deleted in #174). The CarPlay lane itself is generic and "
+                "stays — this forbids only the Spotify kind." % (path, i))
+
+# Falsifiability: the scan must have reached the files that used to carry this.
+MUST_SCAN = [
+    "Dobby/Web/BridgeInjection.swift",   # held the `window.Dobby` lyrics member
+    "Dobby/Web/WebBridge.swift",         # held the dispatch case
+    "Dobby/Web/ApiSchemeHandler.swift",  # held the ninth settings null key
+    "Shared/DobbyPlaybackAttributes.swift",  # held `line`/`nextLine` and the kind doc
+    "DobbyWidgets/DobbyWidgetBundle.swift",  # held LyricsBody and three kind branches
+]
+for path in MUST_SCAN:
+    if path not in files:
+        problems.append(
+            "%s was not scanned — re-point ROOTS/EXTS in Tests/run-checks.sh. A scan "
+            "that misses the file reads exactly like a file with nothing in it." % path)
+if len(files) < 20:
+    problems.append(
+        "only %d source file(s) scanned; this repo has far more, so the glob is "
+        "broken and a clean result here means nothing." % len(files))
+if glob.glob("Dobby/Spotify/*"):
+    problems.append("Dobby/Spotify/ exists again; #174 deleted the directory whole.")
+
+if problems:
+    for p in problems:
+        sys.stderr.write("FAIL: %s\n" % p)
+    sys.exit(1)
+
+print("PASS: %d source file(s) carry no Spotify symbol, no openSpotifyLyrics bridge "
+      "method and no \"lyrics\" Live Activity kind (#174)" % len(files))
+NOSPOTIFYPY

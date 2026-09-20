@@ -252,125 +252,16 @@ restart destroyed the only copy — twice, mid-investigation. A drop-in at
 offered, plus a distinct line when a transfer is cut short, which separates "the
 player stopped asking" from "we stopped sending".
 
-## Lane 7 — Spotify lyrics on the Dashboard (2026-08-03)
+## Lane 7 — removed (2026-09-20)
 
-The one car experience that does not need Dobby to play anything. Spotify keeps the
-audio, the CarPlay screen and the steering-wheel controls; Dobby only answers "what
-words are these". Research notes first, because three of them decided the shape:
+Spotify lyrics on the Dashboard shipped on 2026-08-03 and was removed whole in #174,
+across the server, the Android app and this one. It is not a lane waiting to be
+switched back on: the routes, the session, the view and the `"lyrics"` Live Activity
+kind are gone, and `Tests/run-checks.sh` fails if any of them comes back. Lanes 1-6
+are unaffected — the Live Activity on the Dashboard (lane 4) is generic playback and
+still ships.
 
-**There is no way to read another app's Now Playing on iOS.** `MPNowPlayingInfoCenter`
-is write-only for your own app, and the private `MediaRemote` route that works on macOS
-is sandboxed away on iOS. Knowing what Spotify plays means asking Spotify.
-
-**The Spotify iOS SDK is the wrong tool here.** App Remote is push-based and would
-avoid polling entirely, but Spotify's own guidance is to *disconnect* it when your app
-backgrounds, and it drops the connection after ~30 s idle. Backgrounded is precisely
-when this lane has to work, so the Web API's `GET /v1/me/player/currently-playing` is
-the source instead — and the SDK's binary framework never enters the tree.
-
-**Spotify's quota is small and undocumented.** Development Mode apps (5 users, app
-owner must have Premium) share one quota per developer account; a 429 now carries
-`"reason": "QUOTA_EXCEEDED"` and often no `Retry-After`. So a reading is treated as a
-*resync*, never a tick: the phone runs its own clock and the network only disciplines it.
-
-**The Pi polls; the phone listens.** `GET /api/spotify/stream` is SSE. The Pi runs one
-watcher — 2 s while a track plays, 10 s while paused, and it wakes *exactly* at the end
-of a song rather than a couple of seconds into the next — and it only runs while someone
-is connected, so an idle app costs zero quota. Every listener shares that one upstream
-call. The first design had the phone polling every 10 s, which is how long the previous
-song's words could stay up after a skip.
-
-**Clock discipline, not a deadband.** The phone anchors on `progress_ms + ageMs` and
-advances on `ProcessInfo.systemUptime` (monotonic — a wall-clock correction mid-song
-would shift every remaining line). Each event computes the error: over 1.2 s it is a
-seek, a skip or a phone that was asleep, and it snaps; under that it folds in 35 % of the
-error per event, converging in a few seconds without yanking the highlighted line
-backwards mid-word. Track changes and pause/resume always snap, since both change what
-the clock means. The earlier "ignore anything under 1.5 s" rule *was* the desync people
-saw: being 1.4 s out simply never corrected. This also sidesteps the long-standing bug
-class where `progress_ms` goes stale between pause/seek events on some clients.
-
-**What is left over is a knob, because it is not derivable.** LRCLIB timings are
-contributed against whichever release the contributor owned, and Spotify's reported
-position carries a lag of its own. `LyricsView` has a ±0.25 s nudge that persists in
-`UserDefaults` (tap the readout to zero it).
-
-**Lyrics do not come from Spotify at all** — its lyrics are a Musixmatch licence with no
-public API. [LRCLIB](https://lrclib.net) is free and keyless: `/api/get` wants artist +
-track + album + duration and 404s if the duration is more than ~2 s off, so a
-`/api/search` fallback picks the nearest duration within 10 s (preferring a synced entry)
-— without that window, "Creep" resolves to an acoustic cut whose timings are wrong.
-A plain miss is usually a *naming* miss, not an absent song, so the same lookup is
-retried with Spotify's decorations stripped ("- 2011 Remaster", "(feat. …)") and the
-lead artist alone, then as free text. Lyrics are cached per track id on the Pi forever;
-misses expire after a week, since LRCLIB gains transcriptions over time. Cache filenames
-carry a matcher generation (`-m2`) — a cached miss only means "the matcher of the day
-found nothing", so improving the matcher has to invalidate them.
-
-### Shape
-
-Server (`Sources/BookPlayServer/SpotifyLyrics.swift`, `SpotifyRoutes.swift` in the
-`dobby` repo) owns the OAuth round trip and the token. That is not an aesthetic
-preference: Spotify only accepts **HTTPS** redirect URIs, and the Pi is the side with a
-certificate (`tailscale serve`). PKCE means there is no client secret to copy anywhere.
-The phone opens `/api/spotify/login?redirect=dobby://spotify-connected` in an
-`ASWebAuthenticationSession` and the browser closes itself when the token lands.
-
-The screen holds `GET /api/spotify/stream?have=<trackId>` open; `GET
-/api/spotify/state?have=<trackId>` is the same payload as a one-shot, used before the
-screen is open and as a probe. It returns the track,
-`progressMs` with the `ageMs` it already spent on the Pi, and the whole lyric timeline —
-omitted once the caller says it has it, so the steady-state response is a few hundred
-bytes. Scopes are read-only (`user-read-currently-playing`, `user-read-playback-state`):
-a leaked token cannot touch anyone's playback.
-
-Phone (`Dobby/Spotify/`) runs the clock. `SpotifyLyricsSession` ticks at 4 Hz, tracks the
-current line, and pushes it to two places: `LyricsView` (full-screen, big type,
-auto-scrolling — for a mounted phone) and the Lane 4 Live Activity with `kind == "lyrics"`
-(current line bold, next line dim — for the CarPlay Dashboard). `LyricsBody` renders
-tighter when `@Environment(\.activityFamily) == .small`, which is the size class CarPlay
-uses.
-
-### The part that is a hack, named as such
-
-A Live Activity can only be updated **in process**, and unlike the progress bar there is
-no widget primitive that walks arbitrary text on its own clock — `Text(timerInterval:)`
-counts, it does not read. So the lyrics freeze the moment iOS suspends Dobby, which is
-seconds after the user switches to Spotify. `AudioKeepAlive` holds the app open with a
-1-second near-silent WAV looped through an `AVAudioSession` set to `.playback` +
-`.mixWithOthers`: mixable so Spotify is neither interrupted nor ducked, near-silent
-rather than all zeroes because iOS reclaims apps that hold a session and emit nothing.
-Dobby never claims Now Playing, so Spotify keeps the car's metadata and buttons.
-
-The `audio` background mode was already declared for the audiobook lane, so nothing new
-is requested. Two things to know anyway:
-
-- App Store review guideline 2.5.4 exists and this stretches it. Irrelevant for a
-  sideloaded/`@live`-signed build; it would be a conversation for a public release.
-- The keepalive only runs while a lyrics session is on, and stops with it.
-
-**Push-based updating was considered and rejected**: ActivityKit's push budget is hourly
-and throttles even with `NSSupportsLiveActivitiesFrequentUpdates`, whereas a line changes
-every few seconds. Local updates from a running app are not on that budget — hence the
-keepalive rather than APNs.
-
-### Turning on the lyrics lane
-
-1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
-   (the owner needs Premium) with redirect URI
-   `https://dobby.solarflare-tarpon.ts.net/api/spotify/callback`, and add your own
-   account under *Users Management* — Development Mode 403s tokens that are not
-   allowlisted.
-2. Paste the client ID into Dobby settings (`spotifyClientId`; `spotifyRedirectURI`
-   overrides the default if you registered a different one — it must match exactly).
-3. Open Dobby with Spotify playing: a pill appears top-right. Tap it, connect once, and
-   the lyrics take over. Plugging into the car auto-starts it from then on.
-
-Failure modes are visible rather than silent: "No lyrics for this track" when LRCLIB has
-nothing, "Spotify is throttling — following on the local clock" on a 429 (the line keeps
-advancing; it just stops resyncing until the backoff clears).
-
-### Turning on the Subsonic facade
+## Turning on the Subsonic facade
 
 Disabled unless a password is set — an open library endpoint is not a safe default.
 In `bookplay.service`:

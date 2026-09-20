@@ -340,7 +340,7 @@ enum ApiSchemeHandlerCheck {
     static func settingsSeedCoversEveryNullKey() {
         // The drift guard. The count and every literal are named here as well as in
         // ApiSchemeHandler, so an edit to either list has to touch this check too —
-        // and a rename on the Pi (SettingsRoutes.swift:39-48) that never reaches
+        // and a rename on the Pi (SettingsRoutes.swift:37-44) that never reaches
         // this repo shows up as a failure rather than as a silently blanked field.
         let expected = [
             "imdbAuthToken",
@@ -349,12 +349,11 @@ enum ApiSchemeHandlerCheck {
             "openSubtitlesPassword",
             "subdlApiKey",
             "subsourceApiKey",
-            "spotifyClientId",
             "preferredSubtitleLanguage",
             "preferredAudioLanguage",
         ]
-        check(ApiSchemeHandler.settingsNullKeys.count == 9,
-              "SettingsRoutes.swift:39-48 declares nine null keys; this side has "
+        check(ApiSchemeHandler.settingsNullKeys.count == 8,
+              "SettingsRoutes.swift:37-44 declares eight null keys; this side has "
                   + "\(ApiSchemeHandler.settingsNullKeys.count)")
         check(ApiSchemeHandler.settingsNullKeys == expected,
               "the transcribed null-key list drifted from the one named in this check")
@@ -365,20 +364,20 @@ enum ApiSchemeHandlerCheck {
             check(isNull(seed, key), "the seed carries \(key) as something other than an explicit null")
         }
         check(seed.count == expected.count,
-              "the seed carries \(seed.count) keys, not the nine declared ones — it must be the null keys and nothing else")
+              "the seed carries \(seed.count) keys, not the eight declared ones — it must be the null keys and nothing else")
     }
 
     static func settingsPatchMergesShallowly() {
         let patch = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
 
-        // (a) into the first-run seed: the key lands AND its eight siblings survive
+        // (a) into the first-run seed: the key lands AND its seven siblings survive
         //     as explicit nulls. Both halves — a merge that stored the patch whole
         //     would pass the first and fail the second.
         let ontoSeed = object(ApiSchemeHandler.mergedSettings(base: ApiSchemeHandler.seedSettingsJson(),
                                                               patch: patch))
         check(ontoSeed["premiumizeApiKey"] as? String == "fixture-key",
               "a one-key POST did not apply its own key")
-        check(ontoSeed.count == 9, "the merge onto the seed lost or invented keys (\(ontoSeed.count) of 9)")
+        check(ontoSeed.count == 8, "the merge onto the seed lost or invented keys (\(ontoSeed.count) of 8)")
         for key in ApiSchemeHandler.settingsNullKeys where key != "premiumizeApiKey" {
             check(isNull(ontoSeed, key), "the merge blanked the sibling \(key) out of the document entirely")
         }
@@ -388,18 +387,18 @@ enum ApiSchemeHandlerCheck {
         let ontoNothing = object(ApiSchemeHandler.mergedSettings(base: nil, patch: patch))
         check(ontoNothing["premiumizeApiKey"] as? String == "fixture-key",
               "a POST with no mirror did not apply its key")
-        check(ontoNothing.count == 9,
+        check(ontoNothing.count == 8,
               "a POST with no mirror was stored as a partial document (\(ontoNothing.count) keys), "
                   + "which the page cannot tell from a complete one")
         let ontoEmpty = object(ApiSchemeHandler.mergedSettings(base: Data(), patch: patch))
-        check(ontoEmpty.count == 9, "an empty mirror is not treated as no mirror")
+        check(ontoEmpty.count == 8, "an empty mirror is not treated as no mirror")
 
         // (c) into a real document: the patched key changes and EVERY other key
         //     keeps its own value. This is the property the entry is about.
         let existing = Data("""
         {"imdbAuthToken":"fixture-token","premiumizeApiKey":"fixture-old",
          "openSubtitlesUsername":"fixture-user","openSubtitlesPassword":"fixture-pass",
-         "subdlApiKey":null,"subsourceApiKey":null,"spotifyClientId":"fixture-client",
+         "subdlApiKey":null,"subsourceApiKey":null,
          "preferredSubtitleLanguage":"bg,en","preferredAudioLanguage":null,
          "a4kDefault":true,"maxSourceSizeGiB":20,"serverAddresses":["one","two"]}
         """.utf8)
@@ -408,12 +407,11 @@ enum ApiSchemeHandlerCheck {
         check(merged["imdbAuthToken"] as? String == "fixture-token", "the merge blanked imdbAuthToken")
         check(merged["openSubtitlesUsername"] as? String == "fixture-user", "the merge blanked openSubtitlesUsername")
         check(merged["openSubtitlesPassword"] as? String == "fixture-pass", "the merge blanked openSubtitlesPassword")
-        check(merged["spotifyClientId"] as? String == "fixture-client", "the merge blanked spotifyClientId")
         check(merged["preferredSubtitleLanguage"] as? String == "bg,en",
               "the merge blanked preferredSubtitleLanguage")
         check(isNull(merged, "subdlApiKey"), "the merge turned an explicit null into an absent key")
         // Keys the seed does not know about are carried too: the seed is a floor,
-        // not an allowlist, and the Pi's document is wider than the nine.
+        // not an allowlist, and the Pi's document is wider than the eight.
         check(merged["a4kDefault"] as? Bool == true, "the merge dropped a non-secret key the seed does not declare")
         check(merged["maxSourceSizeGiB"] as? Int == 20, "the merge dropped maxSourceSizeGiB")
         check((merged["serverAddresses"] as? [String]) == ["one", "two"], "the merge dropped serverAddresses")
@@ -421,7 +419,7 @@ enum ApiSchemeHandlerCheck {
         // (d) the seed must go UNDER the existing document, never over it. Reversing
         //     those two lines would blank every real value with a null and still
         //     leave every key present, so (a)-(c) above alone would not catch it.
-        check(merged.count == 12, "the merge onto a real document changed the key count (\(merged.count))")
+        check(merged.count == 11, "the merge onto a real document changed the key count (\(merged.count))")
 
         // (e) a mirror captured before preferredAudioLanguage joined the null keys
         //     (1766dd2 in dobby) gets the key back from the seed rather than staying
@@ -468,9 +466,9 @@ enum ApiSchemeHandlerCheck {
         let one = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
 
         // (a) THE trap. A one-key write queues one key. Building the queue on
-        //     `settingsSeed` — i.e. reusing `mergedSettings` here — would queue nine,
+        //     `settingsSeed` — i.e. reusing `mergedSettings` here — would queue eight,
         //     and the Pi applies `preferredSubtitleLanguage` and
-        //     `preferredAudioLanguage` by body PRESENCE (SettingsRoutes.swift:86-90,
+        //     `preferredAudioLanguage` by body PRESENCE (SettingsRoutes.swift:80-84,
         //     `rawObject?.keys.contains(...)`, and `sanitizedLanguage(nil)` is nil),
         //     so the seed's explicit nulls would CLEAR both on a Pi for a device that
         //     never touched them. Absent, not null, is the assertion: `isNull` reads
@@ -479,19 +477,19 @@ enum ApiSchemeHandlerCheck {
         let queued = object(ApiSchemeHandler.mergedPatch(pending: nil, patch: one))
         check(queued.count == 1,
               "a one-key write queued \(queued.count) keys — the queue is built on the "
-                  + "nine-key seed, and its nulls would clear the Pi's language fields")
+                  + "eight-key seed, and its nulls would clear the Pi's language fields")
         check(queued["premiumizeApiKey"] as? String == "fixture-key", "the queued patch lost its own key")
         for language in ["preferredSubtitleLanguage", "preferredAudioLanguage"] {
             check(queued[language] == nil,
                   "the queued patch carries \(language) the device never wrote; the Pi keys that "
                       + "field off body presence and would clear it")
         }
-        // The other seven are the opposite convention (SettingsRoutes.swift:63-76,
+        // The other six are the opposite convention (SettingsRoutes.swift:59-70,
         // each inside an `if let sanitizedSecret(...)`, so a null no-ops) — but they
         // must not be sent either, because a device that never set one has nothing to
         // say about it. Not a class, key by key.
         for secret in ["imdbAuthToken", "openSubtitlesUsername", "openSubtitlesPassword",
-                       "subdlApiKey", "subsourceApiKey", "spotifyClientId"] {
+                       "subdlApiKey", "subsourceApiKey"] {
             check(queued[secret] == nil, "the queued patch carries \(secret) the device never wrote")
         }
 

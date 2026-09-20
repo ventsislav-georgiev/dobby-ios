@@ -25,17 +25,10 @@ struct DobbyPlaybackAttributes: ActivityAttributes {
         var progress: Double
 
         var isLive: Bool
-
-        /// Lyrics lane (`kind == "lyrics"`): the line Spotify is on right now and the
-        /// one after it. Two short strings, pushed once per line — the whole timeline
-        /// would not fit ActivityKit's 4 KB payload cap, and the widget has no clock
-        /// that could walk it anyway.
-        var line: String?
-        var nextLine: String?
     }
 
     /// Set once when the activity starts; the item's own artwork is not carried here
     /// (ActivityKit payloads are size-capped — the widget draws a glyph instead).
-    var kind: String     // "book" | "video" | "lyrics"
+    var kind: String     // "book" | "video"
 }
 #endif
