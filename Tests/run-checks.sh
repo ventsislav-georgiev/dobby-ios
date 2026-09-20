@@ -1492,3 +1492,106 @@ print("PASS: %d of %d window.Dobby member(s) reached at %d call site(s) across %
       % (len(covered), len(declared), occurrences, files_with_receivers,
          ", ".join(sorted(MEMBERS_WITH_NO_PWA_CALLER)) or "none"))
 BRIDGENAMESPY
+
+# ---------------------------------------------------------------------------
+# #169: every WKURLSchemeTask call is made on the main thread.
+#
+# Measured on the device, not reasoned about: answering a task from the handler's
+# own serial queue against a loadSimulatedRequest document made didReceive(_:)
+# never return, and because the call is made with the handler's NSLock held, the
+# next webView(_:start:) wedged the main thread. 3 of 27 subresources started, 0
+# finished, nothing logged, black screen. On the main thread: 27 of 27.
+#
+# No runtime assertion here can catch the regression. It needs a real WKWebView,
+# a real simulated document and a real device — the macOS WebView check in this
+# same suite was green through the whole outage. So this is textual, and it pins
+# the two halves that can drift apart:
+#   (a) every `task.did…` call sits inside an `onMain { … }` block, and
+#   (b) `onMain` still branches on Thread.isMainThread.
+# (b) is not decoration. webView(_:start:) and webView(_:stop:) are already on
+# main and reach the same helpers, so an "unconditional main.sync is simpler"
+# edit deadlocks the not-found path instead of hanging it — a different black
+# screen, same afternoon.
+# ---------------------------------------------------------------------------
+python3 - <<'SCHEMEMAINPY'
+import re
+import sys
+
+FILES = ["Dobby/Offline/OfflineSchemeHandler.swift", "Dobby/Web/ApiSchemeHandler.swift"]
+# Only the calls made ON a captured `task` value need an enclosing onMain. The
+# `$0.didReceive(…)` form is the closure handed TO send(_:_:_:), which runs it
+# inside onMain — pinning that shape here would forbid the fix.
+CALL = re.compile(r"\btask\.(didReceive|didFinish|didFailWithError)\b")
+
+def strip_comments(text):
+    # A whole-line comment starting at column zero has no space before its "#",
+    # and Swift's is "//" — split on " //" alone and `// task.didFinish()` at
+    # column zero survives, satisfying nothing but reading like a call site.
+    kept = []
+    for line in text.splitlines():
+        s = line.lstrip()
+        if s.startswith("//") or s.startswith("///"):
+            kept.append("")
+            continue
+        kept.append(line.split(" //", 1)[0])
+    return kept
+
+def onmain_ranges(lines):
+    """[start, end] line indices of every `onMain {` block body, by brace depth."""
+    out = []
+    for i, line in enumerate(lines):
+        if "onMain {" not in line:
+            continue
+        depth = 0
+        for j in range(i, len(lines)):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0:
+                out.append((i, j))
+                break
+        else:
+            out.append((i, len(lines) - 1))
+    return out
+
+problems = []
+pinned = 0
+for path in FILES:
+    lines = strip_comments(open(path).read())
+    body = "\n".join(lines)
+
+    if not re.search(r"private func onMain<T>\(_ body: \(\) -> T\) -> T \{", body):
+        problems.append("%s: no `private func onMain<T>(_ body: () -> T) -> T {` helper." % path)
+        continue
+    if "Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)" not in body:
+        problems.append(
+            "%s: onMain no longer reads exactly "
+            "`Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)`. "
+            "Dropping the isMainThread arm deadlocks webView(_:start:)'s not-found path, "
+            "which already runs on main." % path)
+
+    ranges = onmain_ranges(lines)
+    for i, line in enumerate(lines):
+        if not CALL.search(line):
+            continue
+        if any(a <= i <= b for a, b in ranges):
+            pinned += 1
+        else:
+            problems.append(
+                "%s:%d: `%s` is outside every onMain { … } block. A WKURLSchemeTask "
+                "answered off the main thread hangs against a loadSimulatedRequest "
+                "document and takes the main thread down with it (#169)."
+                % (path, i + 1, line.strip()))
+
+if not pinned:
+    problems.append(
+        "No `task.did…` call was found inside an onMain block in either handler. "
+        "This check matched nothing, which reads exactly like a clean run — the call "
+        "sites were renamed or moved, so re-point CALL/FILES in Tests/run-checks.sh.")
+
+if problems:
+    for p in problems:
+        sys.stderr.write("FAIL: %s\n" % p)
+    sys.exit(1)
+
+print("PASS: %d WKURLSchemeTask call(s) across %d handler(s) are made inside onMain, "
+      "which still branches on Thread.isMainThread (#169)" % (pinned, len(FILES)))
+SCHEMEMAINPY

@@ -934,24 +934,47 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// class.
     private func send(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                       _ body: (WKURLSchemeTask) -> Void) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard active.contains(id) else { return false }
-        body(task)
-        return true
+        onMain {
+            lock.lock(); defer { lock.unlock() }
+            guard active.contains(id) else { return false }
+            body(task)
+            return true
+        }
     }
 
     private func finish(_ task: WKURLSchemeTask, _ id: ObjectIdentifier) {
-        lock.lock(); defer { lock.unlock() }
-        guard active.contains(id) else { return }
-        task.didFinish()
-        active.remove(id)
+        onMain {
+            lock.lock(); defer { lock.unlock() }
+            guard active.contains(id) else { return }
+            task.didFinish()
+            active.remove(id)
+        }
     }
 
     private func failMidStream(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ error: Error) {
-        lock.lock(); defer { lock.unlock() }
-        guard active.contains(id) else { return }
-        task.didFailWithError(error)
-        active.remove(id)
+        onMain {
+            lock.lock(); defer { lock.unlock() }
+            guard active.contains(id) else { return }
+            task.didFailWithError(error)
+            active.remove(id)
+        }
+    }
+
+    /// Every WebKit call on a `WKURLSchemeTask` goes through here, on the MAIN THREAD —
+    /// the same rule and the same reason as `OfflineSchemeHandler.onMain`, which is
+    /// where it was measured: off the main thread, against a `loadSimulatedRequest`
+    /// document, `didReceive` never returned and the held `lock` wedged the main thread
+    /// at the next `webView(_:start:)`.
+    ///
+    /// This handler is on that same document — the bundled shell's `js/01-state-init.js`
+    /// addresses `dobby-api:` for `/api/settings`, which is the whole point of #151 — so
+    /// it carries the identical hang, reached a moment later. It has never been the
+    /// reported symptom only because the shell's scripts wedge the page first.
+    ///
+    /// `Thread.isMainThread` is load-bearing: `webView(_:start:)` and `webView(_:stop:)`
+    /// are already on main and reach these, so an unconditional `main.sync` deadlocks.
+    private func onMain<T>(_ body: () -> T) -> T {
+        Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)
     }
 }
 

@@ -107,21 +107,50 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
     /// non-reentrant WebKit calls, so holding `lock` across them is cheap and
     /// never risks a deadlock back into this class.
     private func send(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ body: (WKURLSchemeTask) -> Void) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard active.contains(id) else { return false }
-        body(task)
-        return true
+        onMain {
+            lock.lock(); defer { lock.unlock() }
+            guard active.contains(id) else { return false }
+            body(task)
+            return true
+        }
     }
 
+    /// Every WebKit call on a `WKURLSchemeTask` goes through here, on the MAIN THREAD.
+    ///
+    /// Measured on an iPhone (iOS 18.7, Debug build, `DOBBY_NO_SERVER=1
+    /// DOBBY_AUTO_OFFLINE=1`): serving the bundled shell from `queue`,
+    /// `task.didReceive(response)` for the FIRST subresource never returned. It was
+    /// holding `lock`, so the main thread wedged on the next `webView(_:start:)`, the
+    /// remaining 26 scripts were never requested, and the app was a black screen with
+    /// nothing logged — the reported TestFlight symptom for build 202609200452.
+    /// With the same binary and the same bytes, hopping to main turned 3-of-27
+    /// subresources started / 0 finished into 27 started / 27 finished plus
+    /// `didFinish`, and the shell rendered.
+    ///
+    /// Note the failure is document-shaped, not scheme-shaped: this same handler serves
+    /// downloaded media off `queue` on a NETWORKED document without hanging, which is
+    /// why it survived every round before #151 put a `loadSimulatedRequest` document in
+    /// front of it. Do not read "media still plays" as proof this is safe.
+    ///
+    /// `Thread.isMainThread` is load-bearing and not an optimisation: `webView(_:start:)`
+    /// and `webView(_:stop:)` are already on main and both call in here, so an
+    /// unconditional `DispatchQueue.main.sync` would deadlock on the not-found path.
+    private func onMain<T>(_ body: () -> T) -> T {
+        Thread.isMainThread ? body() : DispatchQueue.main.sync(execute: body)
+    }
+
+
     private func finish(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, notFound: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        guard active.contains(id) else { return }
-        if notFound, let url = task.request.url,
-           let resp = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil) {
-            task.didReceive(resp)
+        onMain {
+            lock.lock(); defer { lock.unlock() }
+            guard active.contains(id) else { return }
+            if notFound, let url = task.request.url,
+               let resp = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil) {
+                task.didReceive(resp)
+            }
+            task.didFinish()
+            active.remove(id)
         }
-        task.didFinish()
-        active.remove(id)
     }
 
     // MARK: - Helpers
