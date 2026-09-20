@@ -53,6 +53,53 @@ jobs:
           token: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}
           path: dobby
 
+      # #167: copy-app-shell.sh's manifest entry /playsvideo/assets/bundle.js
+      # resolves against dobby/Sources/BookPlayServer/Public/playsvideo/assets,
+      # which is gitignored in the PWA repo — it's build output that only
+      # exists in a working tree that has actually built it, so the checkout
+      # above never has it. The playsvideo repo now publishes that directory
+      # as a release asset instead; this step fetches it. Must run before
+      # Archive (the step that invokes copy-app-shell.sh as a preBuildScript):
+      # after Archive the download is useless, the missing directory would
+      # already have failed the build.
+      #
+      # This job's defaults.run.working-directory is dobby-ios (see the
+      # comment above the first checkout step), so a bare relative path here
+      # would land inside that checkout instead of the PWA one. working-
+      # directory: . overrides the job default for this one step, resolving
+      # relative paths against $GITHUB_WORKSPACE instead — the same root the
+      # "path: dobby" checkout above used — so "dobby/..." below means the
+      # PWA checkout, not dobby-ios/dobby.
+      #
+      # bundle-latest is a rolling tag on the playsvideo side; pinning it
+      # here (rather than an unqualified "latest release") matters because
+      # that repo also cuts plain version-tag releases that carry no bundle
+      # asset at all, so "newest release" is not the same as "newest bundle".
+      - name: Fetch playsvideo bundle asset
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dest="dobby/Sources/BookPlayServer/Public/playsvideo/assets"
+          mkdir -p "$dest"
+          gh release download bundle-latest \
+            --repo ventsislav-georgiev/playsvideo \
+            --pattern playsvideo-bundle.tar.gz \
+            --output playsvideo-bundle.tar.gz \
+            --clobber
+          tar xzf playsvideo-bundle.tar.gz -C "$dest"
+          rm -f playsvideo-bundle.tar.gz
+
+          # Fail loudly here rather than let a missing/extra bundle file
+          # surface as an opaque Python traceback three steps later in
+          # copy-app-shell.sh (which is exactly how #167 was first found).
+          mapfile -t bundles < <(find "$dest" -maxdepth 1 -name 'bundle-*.js' | sort)
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one $dest/bundle-*.js after extracting the playsvideo bundle-latest release, found ${#bundles[@]}: ${bundles[*]}" >&2
+            exit 1
+          fi
+
       - name: Install xcodegen
         run: brew install xcodegen
 
