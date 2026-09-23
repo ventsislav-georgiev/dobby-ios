@@ -45,11 +45,7 @@ struct WebContainer {
 
         let ucc = WKUserContentController()
         ucc.add(coordinator, name: AppConfig.bridgeName)
-        ucc.addUserScript(WKUserScript(
-            source: BridgeInjection.script,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        ))
+        ucc.addUserScript(BridgeInjection.userScript())
         config.userContentController = ucc
 
         // Serve natively-downloaded offline files (the https page can't load file://).
@@ -87,7 +83,17 @@ struct WebContainer {
         // (see AppConfig.startURL) so a series detail page can be reached headlessly.
         loadURL = AppConfig.startURL(origin: url)
         #endif
-        load(loadURL, in: webView)
+        // #181: Android's ApiInterceptor refuses every request to the server origin while
+        // the Pi is disabled; the iOS lever is a content rule list, and it has to be in
+        // place before the first byte of the page asks for anything.
+        guard !ServerAddresses.piEnabled() else {
+            load(loadURL, in: webView)
+            return webView
+        }
+        Task { @MainActor in
+            await PiRequestBlock.install(in: ucc, origin: url)
+            load(loadURL, in: webView)
+        }
         return webView
     }
 
@@ -113,6 +119,32 @@ struct WebContainer {
             return
         }
         webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)
+    }
+}
+
+/// #181: with the Pi turned off, nothing the page asks for may reach the origin it is
+/// on — the probe, `/sw.js`, `/api/…`, the icons. The Pi-less shell itself is a simulated
+/// document and its scripts come over `dobby-offline:`, so neither is a load this rule sees.
+enum PiRequestBlock {
+    /// url-filter is a regex over the whole URL: this host, any scheme, any port.
+    static func rules(for origin: URL) -> String? {
+        guard let host = origin.host, !host.isEmpty else { return nil }
+        let filter = "^https?://" + NSRegularExpression.escapedPattern(for: host) + "[:/]"
+        let rules: [[String: Any]] = [["trigger": ["url-filter": filter], "action": ["type": "block"]]]
+        guard let data = try? JSONSerialization.data(withJSONObject: rules) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @MainActor
+    static func install(in ucc: WKUserContentController, origin: URL) async {
+        guard let json = rules(for: origin),
+              let list = try? await WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: "dobby.pi-disabled", encodedContentRuleList: json) else {
+            NSLog("%@", "Dobby: Pi request block failed to compile")
+            return
+        }
+        ucc.add(list)
+        NSLog("%@", "Dobby: Pi disabled by the user setting; requests to the page origin blocked")
     }
 }
 

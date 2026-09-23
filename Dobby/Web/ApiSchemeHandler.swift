@@ -487,6 +487,11 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         #if DEBUG
         if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: push held (DOBBY_NO_SERVER seam)"); return .held }
         #endif
+        // #181: the user setting, in every configuration. Held, not refused: the patch
+        // stays queued and the first mirror-served GET after the Pi is turned back on
+        // pushes it (Android's MirrorWriteBack.run, same rule). The settings document is
+        // the credential store, so "no Pi" means it never leaves the device.
+        if !ServerAddresses.piEnabled() { log.info("pi leg skipped: push held (Pi disabled by the user setting)"); return .held }
         var request = URLRequest(url: server.appendingPathComponent("api/settings"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -503,6 +508,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         #if DEBUG
         if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: fetch (DOBBY_NO_SERVER seam)"); return nil }
         #endif
+        // #181: same setting, same reason as pushSettings above.
+        if !ServerAddresses.piEnabled() { log.info("pi leg skipped: fetch (Pi disabled by the user setting)"); return nil }
         var request = URLRequest(url: server.appendingPathComponent("api/settings"))
         request.httpMethod = "GET"
         request.timeoutInterval = 8

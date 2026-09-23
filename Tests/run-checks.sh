@@ -3,7 +3,7 @@ cd "$(dirname "$0")/.."
 
 OUT="$(mktemp -d)/api-scheme-check"
 xcrun swiftc -o "$OUT" \
-  Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
 
 OUT0="$(mktemp -d)/app-config-check"
@@ -272,7 +272,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 PLIST
   xcrun swiftc -o "$OUT4" -framework WebKit -framework AppKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST4" \
-    Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeWebViewCheck.swift
+    Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeWebViewCheck.swift
   "$OUT4"
 fi
 
@@ -670,7 +670,7 @@ if [ -d "$DOBBY_PUBLIC_DIR" ]; then
     OUT8="$(mktemp -d)/bundled-shell-webview-check"
     xcrun swiftc -o "$OUT8" -framework WebKit -framework AppKit \
       -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST4" \
-      Dobby/AppConfig.swift Dobby/Web/ApiSchemeHandler.swift \
+      Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
       Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift \
       Tests/BundledShellWebViewCheck.swift
     "$OUT8"
@@ -738,8 +738,13 @@ need(content, "                    offline: continueOffline", "the Continue offl
 need(content, "            continueOffline()", "the DOBBY_AUTO_OFFLINE seam must take the same action as the button")
 # ...and a successful resolve must clear it, or a retry after an offline start keeps
 # synthesizing the shell on a Pi that is now answering.
-need(content, "        resolving = true\n        offlineShell = false\n        serverURL = await ServerAddresses.resolve()",
+# #181 put the Pi-setting branch between the clear and the probe, so this is two
+# needles in order rather than one contiguous one.
+need(content, "        resolving = true\n        offlineShell = false\n",
      "resolve() must clear offlineShell before probing, so a Pi that came back is used")
+if not content.index("        resolving = true\n        offlineShell = false\n") < content.index("serverURL = await ServerAddresses.resolve()"):
+    sys.stderr.write("FAIL: resolve() must clear offlineShell before probing, so a Pi that came back is used\n")
+    sys.exit(1)
 
 # 5. project.yml: a folder REFERENCE. As a plain group Xcode's resource copy flattens
 #    the tree, every file lands at the bundle root, and `dobby-offline://shell/js/...`
@@ -1255,6 +1260,12 @@ MEMBERS_WITH_NO_PWA_CALLER = {
                 "read it from inside the literal, so no PWA call site names it.",
     "_setOffline": "called by the WRAPPER, not the PWA — WebBridge.swift callJS pushes the "
                    "index into it. Part C pins those two call sites.",
+    "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
+                  "inside the literal, like _offline; no PWA call site names it.",
+    "piEnabled": "#181: the PWA gate piEnabledBridge() (12-service-worker-offline.js) calls it, "
+                 "but through window.BookPlayAndroid only; drop this entry when that gate also "
+                 "accepts window.Dobby (the #181 guard prints PENDING until then).",
+    "setPiEnabled": "#181: same gate, same pending dobby change as piEnabled.",
 }
 
 PWA_CALLS_NOT_DECLARED = {
@@ -1708,3 +1719,159 @@ if problems:
 print("PASS: %d source file(s) carry no Spotify symbol, no openSpotifyLyrics bridge "
       "method and no \"lyrics\" Live Activity kind (#174)" % len(files))
 NOSPOTIFYPY
+
+# ---------------------------------------------------------------------------
+# #181 — "Use a Pi server" on iOS/iPadOS. The rule itself is ServerAddressesCheck's;
+# these pin what no rule test can see: that the injected bridge exposes BOTH functions
+# the PWA gate requires (a bridge with one keeps the settings row hidden while every rule
+# test passes), that start-up consults the setting BEFORE the probe, and that each native
+# Pi leg and the page-origin block are reached on the path production takes.
+# ---------------------------------------------------------------------------
+DOBBY_PUBLIC_DIR_181="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+python3 - <<'PIGATEPY'
+import os
+import re
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: " + msg + " (#181)\n")
+    sys.exit(1)
+
+def strip(src):
+    # Line comments only where `//` opens a comment: at a line start or after whitespace.
+    # "https?://" inside a string keeps its slashes (a ':' precedes them).
+    return "\n".join(re.sub(r"(^|\s)//.*", "", l) for l in src.splitlines())
+
+# The stripper is load-bearing for every count below; check it first.
+probe = 'let a = "^https?://x" // gone\n    // whole line\nkeep()'
+if [l.rstrip() for l in strip(probe).splitlines()] != ['let a = "^https?://x"', '', 'keep()']:
+    fail("the comment stripper mangles code or keeps comments: %r" % strip(probe))
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return strip(f.read())
+
+def body(src, signature, label):
+    at = src.find(signature)
+    if at < 0 or src.count(signature) != 1:
+        fail("%s: expected exactly one `%s`, found %d" % (label, signature, src.count(signature)))
+    start = src.index("{", at)
+    depth = 0
+    for i in range(start, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        if depth == 0:
+            return src[start:i + 1]
+    fail("%s: unbalanced braces after `%s`" % (label, signature))
+
+def ordered(text, needles, label):
+    pos = -1
+    for i, n in enumerate(needles):
+        if text.count(n) < 1:
+            fail("%s: `%s` is missing" % (label, n))
+        nxt = text.find(n, pos + 1)
+        if nxt < 0:
+            fail("%s: `%s` is not after `%s`" % (label, n, needles[i - 1]))
+        pos = nxt
+    return pos
+
+# --- 1. the bridge: both functions, under window.Dobby, answering synchronously ----------
+inject = read("Dobby/Web/BridgeInjection.swift")
+anchor = "window.Dobby = {"
+if inject.count(anchor) != 1:
+    fail("BridgeInjection.swift must build exactly one `%s` literal" % anchor)
+literal = inject[inject.index(anchor):inject.index("\n          };", inject.index(anchor))]
+members = {
+    "piEnabled": r"^\s{12}piEnabled:\s*function\s*\(\)\s*\{\s*return this\._piEnabled === true;\s*\},$",
+    "setPiEnabled": r"^\s{12}setPiEnabled:\s*function\s*\(on\)\s*\{\s*this\._piEnabled = on === true;\s*"
+                    r"post\('setPiEnabled', this\._piEnabled\);\s*\},$",
+    "_piEnabled": r'^\s{12}_piEnabled:\s*\\\(piEnabled \? "true" : "false"\),$',
+}
+for name, pattern in members.items():
+    n = len(re.findall(pattern, literal, re.M))
+    if n != 1:
+        fail("window.Dobby must carry exactly one `%s` in its #181 shape, found %d. The PWA gate "
+             "reads BOTH piEnabled and setPiEnabled as functions, piEnabled() synchronously, and "
+             "setPiEnabled must update the value before it posts (the page re-probes right after)"
+             % (name, n))
+if 'static func script(piEnabled: Bool) -> String' not in inject or \
+   'WKUserScript(source: script(piEnabled: ServerAddresses.piEnabled()),' not in inject:
+    fail("BridgeInjection.userScript() must inject the live ServerAddresses.piEnabled() answer")
+
+# --- 2. the PWA gate asks for exactly these names (sibling checkout only) ---------------
+pub = os.environ.get("DOBBY_PUBLIC_DIR_181", "")
+gate_file = os.path.join(pub, "js", "12-service-worker-offline.js")
+pending = None
+if os.path.isfile(gate_file):
+    with open(gate_file, encoding="utf-8") as f:
+        js = f.read()
+    m = re.search(r"function piEnabledBridge\(\)\s*\{(.*?)\n\}", js, re.S)
+    if not m:
+        fail("piEnabledBridge() not found in the PWA; the row's gate moved and this guard with it")
+    gate = m.group(1)
+    required = set(re.findall(r"typeof bridge\.([A-Za-z_]\w*) === 'function'", gate))
+    if required != {"piEnabled", "setPiEnabled"}:
+        fail("the PWA gate now requires %s; window.Dobby declares piEnabled and setPiEnabled"
+             % sorted(required))
+    if "window.Dobby" not in gate:
+        pending = ("PENDING: the PWA's piEnabledBridge() (js/12-service-worker-offline.js) reads "
+                   "window.BookPlayAndroid only, so the iOS row stays hidden until it also accepts "
+                   "window.Dobby — a one-line dobby change, not this repo's (#181)")
+else:
+    print("SKIP: no dobby checkout at %r — the PWA gate's name set is unchecked (#181)" % pub)
+
+# --- 3. WebBridge persists and re-injects on the page's call ------------------------------
+wb = read("Dobby/Web/WebBridge.swift")
+arm = wb[wb.index('case "setPiEnabled":'):wb.index("case \"downloadNativeOffline\":")] \
+    if wb.count('case "setPiEnabled":') == 1 else fail("WebBridge.dispatch needs one setPiEnabled case")
+ordered(arm, ["guard let on = payload as? Bool", "ServerAddresses.setPiEnabled(on)",
+              "ucc.removeAllUserScripts()", "ucc.addUserScript(BridgeInjection.userScript())",
+              "ucc.removeAllContentRuleLists()", "PiRequestBlock.install(in: ucc, origin: origin)"],
+        "WebBridge setPiEnabled arm")
+
+# --- 4. start-up: the setting is consulted BEFORE the probe, and skips it -----------------
+cv = read("Dobby/ContentView.swift")
+resolve = body(cv, "private func resolve() async", "ContentView.resolve")
+gate_at = resolve.find("if !ServerAddresses.piEnabled() {")
+probe_at = resolve.find("await ServerAddresses.resolve()")
+if gate_at < 0 or probe_at < 0 or gate_at > probe_at:
+    fail("ContentView.resolve() must consult ServerAddresses.piEnabled() before "
+         "`await ServerAddresses.resolve()` fires the probe")
+skip = body(resolve[gate_at:], "if !ServerAddresses.piEnabled() {", "the Pi-off branch")
+for needle in ["if BundledShell.root != nil { continueOffline() }", "return"]:
+    if needle not in skip:
+        fail("the Pi-off start-up branch must `%s`" % needle)
+calls = sum(read(os.path.join(d, f)).count("ServerAddresses.resolve()")
+            for d, _, fs in os.walk("Dobby") for f in fs if f.endswith(".swift"))
+if calls != 1:
+    fail("expected ServerAddresses.resolve() called from exactly one place (ContentView), found %d" % calls)
+
+# --- 5. every native Pi leg checks the setting before it sends, in Release too ------------
+api = read("Dobby/Web/ApiSchemeHandler.swift")
+for fn, sender in [("private static func pushSettings(", "Transport.sendSync(request)"),
+                   ("private static func fetchSettings(", "Transport.sendSync(request)")]:
+    b = body(api, fn, fn)
+    gate_at = b.find("if !ServerAddresses.piEnabled() {")
+    endif_at = b.find("#endif")
+    if gate_at < 0 or gate_at > b.find(sender) or (endif_at >= 0 and gate_at < endif_at):
+        fail("%s must check ServerAddresses.piEnabled() outside #if DEBUG and before it sends" % fn)
+intents = read("Dobby/Intents/DobbyIntents.swift")
+books = body(intents, "private func allBooks()", "allBooks")
+if not (0 <= books.find("guard ServerAddresses.piEnabled() else { return [] }") < books.find("URLSession.shared")):
+    fail("the Siri library fetch must check the setting before it reaches the Pi")
+
+# --- 6. the page-origin block is in place before the first load when off ------------------
+wc = read("Dobby/Web/WebContainer.swift")
+make = body(wc, "fileprivate func makeWebView(", "makeWebView")
+if make.count("ucc.addUserScript(BridgeInjection.userScript())") != 1:
+    fail("makeWebView must install BridgeInjection.userScript()")
+ordered(make, ["guard !ServerAddresses.piEnabled() else {", "load(loadURL, in: webView)",
+               "await PiRequestBlock.install(in: ucc, origin: url)", "load(loadURL, in: webView)"],
+        "makeWebView Pi-off load order")
+if make.count("load(loadURL, in: webView)") != 2:
+    fail("makeWebView must load in exactly two places (Pi on; Pi off after the block)")
+
+print("PASS: window.Dobby exposes piEnabled() and setPiEnabled(); start-up consults the setting "
+      "before the probe; push, fetch and Siri legs and the page-origin block honour it (#181)")
+if pending:
+    sys.stderr.write(pending + "\n")
+PIGATEPY

@@ -22,11 +22,15 @@ import WebKit
 ///   read it back.
 /// - `read`: read the value back, for after a force-stop.
 /// - `restore`: save the stashed original back, read it back, drop the stash on a match.
+/// - `pi` (#181): open Settings and report whether the "Use a Pi server" row is shown and
+///   what it reads. `pi-on` / `pi-off` first flip it exactly the way `saveSettings` does
+///   (`setPiEnabledOnWrapper`, then `probeNetworkStates`), without posting the form. The
+///   flag is the one value these steps print: it is the wrapper's switch, not settings data.
 ///
 /// Values never reach the log: the page hands them to Swift, which prints only a length
 /// and a sha256 prefix for each.
 enum SettingsSelfTest {
-    static let steps: Set<String> = ["read", "write", "restore"]
+    static let steps: Set<String> = ["read", "write", "restore", "pi", "pi-on", "pi-off"]
     private static var ran = false
 
     @MainActor
@@ -75,6 +79,23 @@ enum SettingsSelfTest {
     await pause(3000);
     meta.origin = location.protocol + '//' + location.host;
     meta.simulated = document.querySelector('script[src^="dobby-offline:"]') ? 'bundled-shell' : 'network-shell';
+    if (step.indexOf('pi') === 0) {
+      meta.supported = typeof piEnabledSupported === 'function' && piEnabledSupported();
+      if (step !== 'pi' && meta.supported) {
+        setPiEnabledOnWrapper(step === 'pi-on');
+        probeNetworkStates();
+        await pause(2000);
+      }
+      openSettings();
+      await pause(1000);
+      const row = document.getElementById('settings-row-pi-enabled');
+      meta.rowShown = !!row && !row.hidden;
+      if (meta.rowShown) row.scrollIntoView({ block: 'center' });
+      meta.piEnabled = meta.supported ? getPiEnabled() : null;
+      meta.checked = document.getElementById('settings-pi-enabled')?.checked === true;
+      meta.noServer = isNoServer();
+      return { meta, v };
+    }
 
     const read = async (label) => {
       const r = await fetch(apiUrlFor('/api/settings'), { cache: 'no-store' });

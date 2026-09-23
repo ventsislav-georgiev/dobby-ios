@@ -56,6 +56,17 @@ struct ContentView: View {
     private func resolve() async {
         resolving = true
         offlineShell = false
+        // #181: Android's `skipsProbe` call site (MainActivity.resolveAndLoad). The Pi
+        // turned off means there is nothing to probe for, so nothing is probed: straight
+        // to the bundled shell, the #151 Pi-less cold start. A build with no shell gets
+        // the unreachable screen instead, as Android's address dialog — its "Continue
+        // offline" would otherwise be a plain load of the Pi origin nobody asked for.
+        if !ServerAddresses.piEnabled() {
+            NSLog("%@", "Dobby: Pi disabled by the user setting; probe skipped")
+            resolving = false
+            if BundledShell.root != nil { continueOffline() }
+            return
+        }
         serverURL = await ServerAddresses.resolve()
         resolving = false
         #if DEBUG
