@@ -1765,12 +1765,12 @@ def body(src, signature, label):
 
 def ordered(text, needles, label):
     pos = -1
-    for n in needles:
+    for i, n in enumerate(needles):
         if text.count(n) < 1:
             fail("%s: `%s` is missing" % (label, n))
         nxt = text.find(n, pos + 1)
         if nxt < 0:
-            fail("%s: `%s` is not after `%s`" % (label, n, needles[needles.index(n) - 1]))
+            fail("%s: `%s` is not after `%s`" % (label, n, needles[i - 1]))
         pos = nxt
     return pos
 
