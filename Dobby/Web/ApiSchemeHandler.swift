@@ -481,6 +481,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// The queued patch bytes, with the method and content type the page would have
     /// sent, to the Pi's own settings route.
     private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {
+        // #149 device round: DOBBY_NO_SERVER removes the Pi from this leg too, not only
+        // from the probe, so a Pi-off round cannot push its test patch to a real Pi the
+        // phone can still reach. Held, exactly as a Pi that never answered.
+        #if DEBUG
+        if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: push held (DOBBY_NO_SERVER seam)"); return .held }
+        #endif
         var request = URLRequest(url: server.appendingPathComponent("api/settings"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -492,6 +498,11 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// Blocking on purpose: this runs on `queue`, never on the WebView's thread.
     private static func fetchSettings(from server: URL) -> Data? {
+        // #149 device round: same seam, same reason as pushSettings above. Nil is a Pi
+        // that never answered.
+        #if DEBUG
+        if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: fetch (DOBBY_NO_SERVER seam)"); return nil }
+        #endif
         var request = URLRequest(url: server.appendingPathComponent("api/settings"))
         request.httpMethod = "GET"
         request.timeoutInterval = 8

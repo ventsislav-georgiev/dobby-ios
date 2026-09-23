@@ -89,10 +89,19 @@ def assert_gated(call_regex, label, expected_calls=1):
 
         print(f"PASS: {label}() call site is #if DEBUG-gated ({path}:{call_idx + 1})")
 
-assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive")
+assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=3)
 assert_gated(r"autoOfflineSeamActive\(\)", "autoOfflineSeamActive")
 assert_gated(r"AppConfig\.startURL\(origin:", "startURL")
 assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
+# #149 device round: the settings self-test seam. Its call site is gated here, and the
+# file that defines it must be DEBUG from its first line to its last, so no part of it
+# (the page script included) can reach a Release build.
+assert_gated(r"SettingsSelfTest\.run\(", "run")
+selftest = [l.strip() for l in open("Dobby/Web/SettingsSelfTest.swift") if l.strip()]
+if selftest[0] != "#if DEBUG" or selftest[-1] != "#endif":
+    sys.stderr.write("FAIL: Dobby/Web/SettingsSelfTest.swift is not #if DEBUG end to end (#149)\n")
+    sys.exit(1)
+print("PASS: SettingsSelfTest.swift is #if DEBUG end to end (#149)")
 PY
 
 # #115: the progress-bar scrub state (Dobby/Playback/ScrubState.swift) as a pure value
