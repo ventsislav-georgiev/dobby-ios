@@ -48,6 +48,8 @@ struct BookEntityQuery: EntityStringQuery {
     /// The library list the web app uses. Fetched fresh: Siri asks rarely, and a
     /// stale cache would offer books that are no longer there.
     private func allBooks() async throws -> [BookEntity] {
+        // #181: the library lives on the Pi; with the Pi turned off there is none to offer.
+        guard ServerAddresses.piEnabled() else { return [] }
         let url = AppConfig.serverURL.appendingPathComponent("api/books")
         let (data, _) = try await URLSession.shared.data(from: url)
         let raw = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []

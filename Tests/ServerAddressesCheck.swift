@@ -17,6 +17,8 @@ enum ServerAddressesCheck {
         normalization()
         noServerSeam()
         autoOfflineSeam()
+        piEnabledRule()
+        piEnabledPersistence()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -84,6 +86,35 @@ enum ServerAddressesCheck {
               "any value other than exactly \"1\" leaves the seam off")
         check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "true"]) == false,
               "no truthy-string coercion — exact match only")
+    }
+
+    /// #181: Android's three-input rule, every row of the truth table. An explicit
+    /// answer wins both ways; only an unanswered setting follows hasLastGood.
+    static func piEnabledRule() {
+        for value in [false, true] {
+            for lastGood in [false, true] {
+                check(ServerAddresses.piEnabled(explicitlySet: true, explicitValue: value, hasLastGood: lastGood) == value,
+                      "an explicit \(value) wins whatever hasLastGood (\(lastGood)) says")
+                check(ServerAddresses.piEnabled(explicitlySet: false, explicitValue: value, hasLastGood: lastGood) == lastGood,
+                      "unset follows hasLastGood (\(lastGood)), never the unread value (\(value))")
+            }
+        }
+    }
+
+    /// #181: the same rule through the stored keys — "explicitly set" is the key's
+    /// presence, so an explicit off must not read as unset and fall back to the origin.
+    static func piEnabledPersistence() {
+        let suite = "dobby.check.piEnabled.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        check(ServerAddresses.piEnabled(defaults) == false, "a fresh install is Pi-less")
+        defaults.set("http://192.0.2.31:8080", forKey: "dobby.serverAddresses.lastGood")
+        check(ServerAddresses.piEnabled(defaults) == true, "a device that reached a Pi before reads on")
+        ServerAddresses.setPiEnabled(false, defaults)
+        check(ServerAddresses.piEnabled(defaults) == false, "an explicit off is not re-enabled by the stored origin")
+        defaults.removeObject(forKey: "dobby.serverAddresses.lastGood")
+        ServerAddresses.setPiEnabled(true, defaults)
+        check(ServerAddresses.piEnabled(defaults) == true, "an explicit on holds with no stored origin")
     }
 
     static func autoOfflineSeam() {

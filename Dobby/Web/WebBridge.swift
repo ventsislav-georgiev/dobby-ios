@@ -107,6 +107,20 @@ extension WebBridge: WKScriptMessageHandler {
         // on a different network without anyone touching a setting.
         case "setServerAddresses":
             if let json = payload as? String { ServerAddresses.store(json: json) }
+        // #181: "Use a Pi server" from the settings page. Persisted for the next launch's
+        // probe decision (ContentView.resolve); the settings legs read it on every call,
+        // and the origin block and the injected value follow it live.
+        case "setPiEnabled":
+            guard let on = payload as? Bool, let webView else { return }
+            ServerAddresses.setPiEnabled(on)
+            let ucc = webView.configuration.userContentController
+            ucc.removeAllUserScripts()
+            ucc.addUserScript(BridgeInjection.userScript())
+            if on {
+                ucc.removeAllContentRuleLists()
+            } else if let origin = webView.url {
+                Task { await PiRequestBlock.install(in: ucc, origin: origin) }
+            }
         case "downloadNativeOffline":
             if let json = payload as? String { offline.startDownload(json) }
         case "downloadNativeBook":

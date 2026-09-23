@@ -25,6 +25,9 @@ import os
 enum ServerAddresses {
     private static let listKey = "dobby.serverAddresses"
     private static let lastGoodKey = "dobby.serverAddresses.lastGood"
+    /// #181: the "Use a Pi server" setting. Absent until the user answers it, which is
+    /// the third input to `piEnabled(explicitlySet:explicitValue:hasLastGood:)`.
+    private static let piEnabledKey = "dobby.piEnabled"
     private static let logger = Logger(subsystem: "eu.illegible.dobbyios", category: "ServerAddresses")
 
     /// Connect budget — Android's `CONNECT_TIMEOUT_MS`. A Pi that is off never answers,
@@ -65,6 +68,31 @@ enum ServerAddresses {
 
     static func store(_ addresses: [URL]) {
         UserDefaults.standard.set(addresses.map(\.absoluteString), forKey: listKey)
+    }
+
+    /// #181: whether this device uses a Pi at all — Android's `ServerAddresses.piEnabled`
+    /// (dobby-android/.../ServerAddresses.java:170-187), same rule, same persistence shape.
+    /// An explicit answer always wins, both ways. Until there is one, the Pi counts as
+    /// enabled only when this device has reached one before (a last known-good origin
+    /// exists): a fresh install is Pi-less, a device already paired keeps its Pi, and an
+    /// explicit off is never re-enabled by the origin still sitting in `lastGoodKey`.
+    static func piEnabled(_ defaults: UserDefaults = .standard) -> Bool {
+        piEnabled(explicitlySet: defaults.object(forKey: piEnabledKey) != nil,
+                  explicitValue: defaults.bool(forKey: piEnabledKey),
+                  hasLastGood: defaults.string(forKey: lastGoodKey) != nil)
+    }
+
+    /// The rule with the defaults read taken out, so the truth table is checkable
+    /// (Tests/ServerAddressesCheck.swift).
+    static func piEnabled(explicitlySet: Bool, explicitValue: Bool, hasLastGood: Bool) -> Bool {
+        explicitlySet ? explicitValue : hasLastGood
+    }
+
+    /// Persisted on the spot. Nothing is erased either way: `lastGoodKey` and the address
+    /// list stay, so turning the Pi back on finds it where it was.
+    static func setPiEnabled(_ enabled: Bool, _ defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: piEnabledKey)
+        logger.log("Pi \(enabled ? "enabled" : "disabled", privacy: .public) by the user setting")
     }
 
     /// First candidate that answers `/api/health`, or nil when none do. Also the write

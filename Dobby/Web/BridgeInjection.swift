@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 /// JS injected at document start. Advertises the native bridge to the web app.
 ///
@@ -8,7 +9,19 @@ import Foundation
 enum BridgeInjection {
     static let canPlayNative = true
 
-    static var script: String {
+    /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
+    /// the Pi setting, so a reload reads the new value rather than the launch one.
+    static func userScript() -> WKUserScript {
+        WKUserScript(source: script(piEnabled: ServerAddresses.piEnabled()),
+                     injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    /// #181: `piEnabled` is the "Use a Pi server" answer at injection time. WKWebView has
+    /// no synchronous JS-to-native call and the PWA's gate (`piEnabledBridge()` in
+    /// js/12-service-worker-offline.js) calls `piEnabled()` synchronously, so the value
+    /// rides in the literal; `setPiEnabled` updates it in place before posting, so the
+    /// page's own re-probe right after the save already reads the new answer.
+    static func script(piEnabled: Bool) -> String {
         """
         (function () {
           if (window.Dobby) return;
@@ -25,6 +38,11 @@ enum BridgeInjection {
             // route change (and once after 'ready'); read it, don't set it.
             isCarAudio: false,
             setServerAddresses: function (json) { post('setServerAddresses', json); },
+            // #181 "Use a Pi server". The PWA shows its settings row only when BOTH of
+            // these are functions; piEnabled() must answer synchronously.
+            _piEnabled: \(piEnabled ? "true" : "false"),
+            piEnabled: function () { return this._piEnabled === true; },
+            setPiEnabled: function (on) { this._piEnabled = on === true; post('setPiEnabled', this._piEnabled); },
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
             setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },
