@@ -97,6 +97,11 @@ extension WebBridge: WKScriptMessageHandler {
                 """
                 if let req = PlayNativePayload.decode(json) { playback.play(req) }
             }
+            // #149 device round seam: one fixed, named settings self-test (see
+            // SettingsSelfTest.swift). The step name is all the environment supplies.
+            #if DEBUG
+            if let step = ProcessInfo.processInfo.environment["DOBBY_SETTINGS_SELFTEST"] { SettingsSelfTest.run(step, in: webView) }
+            #endif
         // Web app pushes the canonical address list (Settings → Dobby server
         // addresses) on every load. Cached so the next cold start finds the server
         // on a different network without anyone touching a setting.
