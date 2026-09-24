@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // The rules in ApiSchemeHandler that are worth being wrong about: the image
 // allowlist, the redirect re-check, the cookie rule, the mirror-first fallback and
@@ -32,6 +33,7 @@ enum ApiSchemeHandlerCheck {
         settingsPatchIsRefusedWhenItIsNotAnObject()
         settingsQueueAccumulatesPatchesOnly()
         settingsPushOutcomeRule()
+        settingsWriteAnswerRule()
         presenceFlags()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
@@ -564,6 +566,32 @@ enum ApiSchemeHandlerCheck {
         for held: Int? in [nil, 0, 408, 429, 500, 502, 503, 504, 100, 301, 302] {
             check(ApiSchemeHandler.pushOutcome(status: held) == .held,
                   "\(held.map(String.init) ?? "no answer") did not hold the queued patch")
+        }
+    }
+
+    // MARK: #185 — a save the Keychain refused is not answered 200
+
+    /// `fetchWithRetry`'s default retryStatuses in the page (dobby js/03-storage-net.js).
+    /// run-checks compares this transcription with the sibling dobby checkout.
+    static let pageRetryStatuses = [408, 429, 500, 502, 503, 504]
+
+    /// Only errSecSuccess is a 200 `{}`. Every refusal is a non-2xx the page treats as a
+    /// failed save on its first attempt, carrying the OSStatus number and nothing else.
+    static func settingsWriteAnswerRule() {
+        let ok = ApiSchemeHandler.settingsWriteAnswer(errSecSuccess)
+        check(ok.status == 200 && ok.body == Data("{}".utf8), "a stored write is no longer answered 200 {}")
+        // -34018 is the unsigned-build entitlement refusal the #149 simulator round met;
+        // -25308 a locked device; -25291 no keychain; errSecParam the empty-body refusal.
+        for refused: OSStatus in [errSecMissingEntitlement, errSecInteractionNotAllowed, errSecNotAvailable,
+                                  errSecDuplicateItem, errSecItemNotFound, errSecParam, -1, 1] {
+            let answer = ApiSchemeHandler.settingsWriteAnswer(refused)
+            check(!(200...299).contains(answer.status), "OSStatus \(refused) was answered \(answer.status), a save the page reads as done")
+            check(!pageRetryStatuses.contains(answer.status),
+                  "OSStatus \(refused) was answered \(answer.status), which fetchWithRetry retries into the same refusing Keychain")
+            check(answer.status == 507, "OSStatus \(refused) was answered \(answer.status), not 507")
+            let doc = object(answer.body)
+            check(Set(doc.keys) == ["error", "status"] && (doc["status"] as? Int) == Int(refused),
+                  "the refusal body for OSStatus \(refused) is not exactly an error and that number")
         }
     }
 
