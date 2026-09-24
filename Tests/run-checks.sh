@@ -707,6 +707,12 @@ else:
         fail("found no has* in the server's GET route; the pattern no longer matches the source")
     if len(server) != len(re.findall(r"\bhas[A-Z]\w*:", get)):
         fail("a has* line in the server's GET route is not one this guard understands")
+    # The rule re-derives each flag from the raw field, so it is only right while the GET
+    # sends that field unmasked: a server that masked a secret but kept computing its flag
+    # from the real value would flip every Configured badge on the mirror path.
+    for k in swift_keys:
+        if get.count("%s: settings.%s," % (k, k)) != 1:
+            fail("the server's GET no longer passes %s: settings.%s verbatim; re-deriving has* from a masked field would read Not configured" % (k, k))
     ours = {"has" + k[0].upper() + k[1:]: k for k in swift_keys}
     if len(ours) != len(swift_keys) or ours != server:
         fail("presenceFlaggedKeys %r is not the server's has* family %r" % (sorted(swift_keys), sorted(server.values())))
@@ -715,18 +721,36 @@ else:
 # The simulator seam's byte-exact Keychain backup copies secrets into sibling items, so it
 # must never exist in a Release build: both definitions sit inside one #if DEBUG block,
 # and nothing outside a #if DEBUG block calls them.
-blocks = [(m.start(), src.index("#endif", m.start())) for m in re.finditer(r"^\s*#if DEBUG\b", src, re.M)]
+def in_debug(text):
+    """Per line: inside the #if DEBUG branch itself (not its #else/#elseif), at any depth."""
+    stack, flags = [], []
+    for line in text.split("\n"):
+        t = line.strip()
+        if t.startswith("#if "):
+            stack.append(t == "#if DEBUG")
+        elif t.startswith("#elseif") or t == "#else":
+            if stack:
+                stack[-1] = False
+        elif t == "#endif":
+            if stack:
+                stack.pop()
+        flags.append(any(stack))
+    return flags
+
+def line_of(text, offset):
+    return text.count("\n", 0, offset)
+
+src_debug = in_debug(src)
 for name in ("static func selfTestBackup()", "static func selfTestRestore()"):
     if src.count(name) != 1:
         fail("expected exactly one %r in ApiSchemeHandler.swift" % name)
-    at = src.index(name)
-    if not any(a < at < b for a, b in blocks):
+    if not src_debug[line_of(src, src.index(name))]:
         fail("%s is outside #if DEBUG; the seam's Keychain backup would ship in Release" % name)
 for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swift"):
     text = strip_swift(open(path).read())
-    spans = [(m.start(), text.index("#endif", m.start())) for m in re.finditer(r"^\s*#if DEBUG\b", text, re.M)]
+    flags = in_debug(text)
     for m in re.finditer(r"\bselfTest(Backup|Restore)\(\)", text):
-        if not any(a < m.start() < b for a, b in spans):
+        if not flags[line_of(text, m.start())]:
             fail("%s reaches selfTest%s() outside #if DEBUG" % (path, m.group(1)))
 
 print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
