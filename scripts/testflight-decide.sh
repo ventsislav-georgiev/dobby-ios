@@ -25,12 +25,15 @@ sha_re='^[0-9a-f]{40}$'
 count_re='^[0-9]+$'
 for pair in "dobby-ios:$ios" "PWA main:$pwa"; do
   if ! [[ "${pair#*:}" =~ $sha_re ]]; then
-    echo "::error::testflight-decide: ${pair%%:*} head is not a commit sha: '${pair#*:}'" >&2
+    # Never echo the rejected value: on a broken lookup it is the private PWA commit's
+    # JSON (message, author), and this line lands in a public log. Its length only.
+    value="${pair#*:}"
+    echo "::error::testflight-decide: ${pair%%:*} head is not a 40-hex commit sha (got ${#value} characters)" >&2
     exit 1
   fi
 done
 if ! [[ "$built" =~ $count_re && "$failed" =~ $count_re ]]; then
-  echo "::error::testflight-decide: record counts are not numbers: built='$built' failed='$failed'" >&2
+  echo "::error::testflight-decide: record counts are not numbers (got ${#built} and ${#failed} characters)" >&2
   exit 1
 fi
 
