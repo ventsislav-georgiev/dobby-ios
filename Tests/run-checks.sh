@@ -1290,6 +1290,18 @@ print("PASS: the release job needs decide and is gated on its build output at jo
 checkout = section("name: Check out dobby (PWA app shell source)", "\n      - name: ", "the PWA checkout step is missing")
 if "ref:" in checkout:
     fail("the PWA checkout has a ref:; a sha ref detaches it and prints a private commit subject into this public log")
+if "fetch-depth" in checkout:
+    fail("the PWA checkout sets fetch-depth; history is never needed, and a deeper fetch only widens what a later step could print")
+# The subject can leak through any step, not only through the checkout: no git command
+# in this public workflow may read history, and every git read of the PWA checkout is a
+# bare rev-parse HEAD (a sha, never a subject).
+import re
+reader = re.search(r"\bgit\s+(?:-C\s+\S+\s+)?(log|show|shortlog|reflog|cat-file|describe|whatchanged|for-each-ref)\b", wf)
+if reader:
+    fail("the workflow runs git %s, which can print a private PWA commit subject into this public log" % reader.group(1))
+for m in re.finditer(r"\bgit\s+-C\s+(\S+)\s+(.*)", wf):
+    if "dobby-ios" not in m.group(1) and not m.group(2).startswith("rev-parse HEAD"):
+        fail("a git read of the PWA checkout is not a bare rev-parse HEAD: git -C %s %s" % (m.group(1), m.group(2)))
 names = [
     ("name: Verify the app shell was bundled", "verify"),
     ("name: Export .ipa", "export"),
@@ -1312,6 +1324,11 @@ record = release[idx[3]:idx[4]]
 at(record, 'echo "name=testflight-$(git rev-parse HEAD)-$(cat "$RUNNER_TEMP/pwa-record/pwa-commit.txt")" >> "$GITHUB_OUTPUT"',
    "the record must be named for the pair the archive carries, testflight-<dobby-ios>-<pwa>")
 at(release[idx[4]:idx[5]], "retention-days: 90", "the success record keeps 90 days")
+# Only-on-success is also a condition: an if: always() (or any if:) on the record or its
+# upload would record a pair whose TestFlight upload failed, and every tick would skip
+# it for 90 days.
+if "if:" in release[idx[3]:idx[5]]:
+    fail("the success record or its upload carries an if:; it must run only when every step before it succeeded")
 failed = release[idx[6]:]
 at(failed[:failed.index("run: |")], "if: failure()", "the failure marker runs only when the job failed")
 at(failed, 'echo "name=testflight-failed-$(git rev-parse HEAD)-$pwa" >> "$GITHUB_OUTPUT"', "the failure marker must be named for the pair")
