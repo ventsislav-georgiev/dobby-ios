@@ -775,29 +775,49 @@ def fail(msg):
     sys.exit(1)
 
 def strip_swift(text):
-    out = []
+    # // line comments and /* */ block comments, which nest in Swift and may span lines. The
+    # string state is per line (no multi-line literal in the guarded file); the block depth is not.
+    out, depth = [], 0
     for line in text.split("\n"):
-        i, quoted, cut = 0, False, len(line)
+        i, quoted, kept = 0, False, []
         while i < len(line):
+            if depth:
+                if line.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif line.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+                continue
             c = line[i]
             if quoted and c == "\\":
+                kept.append(line[i:i + 2])
                 i += 2
                 continue
             if c == '"':
                 quoted = not quoted
             elif not quoted and line.startswith("//", i):
-                cut = i
                 break
+            elif not quoted and line.startswith("/*", i):
+                depth, i = 1, i + 2
+                continue
+            kept.append(c)
             i += 1
-        kept = line[:cut].rstrip()
+        kept = "".join(kept).rstrip()
         if kept.strip():
             out.append(kept)
     return "\n".join(out) + "\n"
 
 probe = ('/// doc return added\n        let added = SecItemAdd(x) // return errSecSuccess\n'
-         '        // stored = SettingsMirrorStore.queuePatch(patch)\n        log.error("a // b \\(added)")\n')
-if strip_swift(probe) != '        let added = SecItemAdd(x)\n        log.error("a // b \\(added)")\n':
+         '        // stored = SettingsMirrorStore.queuePatch(patch)\n        log.error("a // b \\(added)")\n'
+         '        /* let added = SecItemAdd(y)\n           /* nested */ SecItemDelete(base as CFDictionary)\n'
+         '        */ let s = "/* kept */" /* gone */\n        /** doc SecItemDelete(z) */\n'
+         '        /* a // */ let t = 1\n')
+if strip_swift(probe) != ('        let added = SecItemAdd(x)\n        log.error("a // b \\(added)")\n'
+                          ' let s = "/* kept */"\n         let t = 1\n'):
     fail("the comment stripper is broken: %r" % strip_swift(probe))
+if "\"\"\"" in open("Dobby/Web/ApiSchemeHandler.swift").read():
+    fail("ApiSchemeHandler.swift gained a multi-line string literal, which this stripper reads line by line")
 
 src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read())
 
@@ -826,12 +846,33 @@ for need in ["let updated = SecItemUpdate(base as CFDictionary, attributes as CF
 returns = [l for l in wl if re.search(r"\breturn\b", l)]
 if returns != ["guard !body.isEmpty else { return errSecParam }",
                "if updated == errSecSuccess { return updated }",
+               "return updated",
                "return added"]:
     fail("SettingsMirrorStore.write must return errSecParam for an empty body, the update's status "
-         "on success and otherwise the add's, nothing else; got %r" % returns)
+         "on success or on any refusal but not-found, and otherwise the add's, nothing else; got %r" % returns)
 if wl.index("let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)") > wl.index("if updated == errSecSuccess { return updated }") \
         or wl.index("let added = SecItemAdd(insert as CFDictionary, nil)") > wl.index("return added"):
     fail("SettingsMirrorStore.write returns a status before the call that produces it")
+# Round 2: the add is reached only when the update found no item, and nothing is deleted first.
+# Any other refusal leaves the item as it was: delete-then-add on, say, a locked device lost the
+# whole mirror (or a queued patch answered 200 earlier) when the add was refused too.
+if "SecItemDelete(" in write:
+    fail("SettingsMirrorStore.write deletes the item: a refused add after it destroys the only good copy")
+gate = ["let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)",
+        "if updated == errSecSuccess { return updated }",
+        "guard updated == errSecItemNotFound else {",
+        'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
+        "return updated",
+        "}",
+        "var insert = base",
+        "insert.merge(attributes) { _, new in new }",
+        "let added = SecItemAdd(insert as CFDictionary, nil)",
+        'if added != errSecSuccess { log.error("keychain write failed: OSStatus \\(added, privacy: .public)") }',
+        "return added"]
+at = wl.index(gate[0])
+if wl[at:] != gate:
+    fail("SettingsMirrorStore.write must be, from the update on, exactly: update, success return, "
+         "the errSecItemNotFound guard returning (and logging) any other status, then the add; got %r" % wl[at:])
 
 # 2. Every write's status is used. Only the two keep-going mirror saves may discard it, only the
 #    DEBUG restore (verified by read-back) may discard write's, and the POST keeps both.
@@ -845,8 +886,18 @@ if "let queued = write(pendingQuery, accumulated)" not in ql or ql[-1] != "retur
         or [l for l in ql if re.search(r"\breturn\b", l)][-1] != "return queued":
     fail("queuePatch no longer returns the queue write's status")
 discards = [l for l in lines(src) if l.startswith("_ = ") and ("write(" in l or "save(" in l or "queuePatch(" in l)]
-if discards != ["_ = write(live, held)"]:
-    fail("only the DEBUG restore may discard write's status as a statement; got %r" % discards)
+if sorted(discards) != ["_ = write(baseQuery, previous)", "_ = write(live, held)"]:
+    fail("only the DEBUG restore and the mirror put-back may discard write's status as a statement; got %r" % discards)
+put_back = body(store, "static func restoreMirror(_ previous: Data?) {", "restoreMirror")
+if lines(put_back)[1:] != [
+        "guard let previous else {",
+        "let removed = SecItemDelete(baseQuery as CFDictionary)",
+        'if removed != errSecSuccess { log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)") }',
+        "return",
+        "}",
+        "_ = write(baseQuery, previous)"]:
+    fail("restoreMirror must remove the mirror item when there was none, else write the previous bytes "
+         "back to the mirror item, logging a refused delete; got %r" % lines(put_back)[1:])
 if "_ = write(live, held)" not in lines(body(store, "static func selfTestRestore() -> String {", "selfTestRestore")):
     fail("the DEBUG restore's discarded write moved")
 if "guard write(item, held) == errSecSuccess, read(item) == held else { return false }" not in lines(store):
@@ -866,6 +917,7 @@ seq = ["            var stored = SettingsMirrorStore.save(merged)",
        "            if stored == errSecSuccess {",
        "                SettingsMirrorStore.markAheadOfServer()",
        "                stored = SettingsMirrorStore.queuePatch(patch)",
+       "                if stored != errSecSuccess { SettingsMirrorStore.restoreMirror(previous) }",
        "            }",
        "            let answer = Self.settingsWriteAnswer(stored)",
        "            status = answer.status",
@@ -874,10 +926,22 @@ seq = ["            var stored = SettingsMirrorStore.save(merged)",
        "                    body: answer.body, origin: origin, secret: true,"]
 at = post.find("\n".join(seq))
 if at < 0:
-    fail("the settings POST no longer runs save, then (only on success) mark and queue, then builds "
-         "its answer from the status, then responds with that answer, as consecutive lines")
+    fail("the settings POST no longer runs save, then (only on success) mark, queue and (only on a "
+         "refused queue) put the mirror back, then builds its answer from the status, then responds "
+         "with that answer, as consecutive lines")
+# Round 2: the put-back's bytes are read before the save overwrites them, once, and are the
+# merge base too; the put-back runs once, only inside the refused-queue branch pinned above.
+pl = post.split("\n")
+loads = [i for i, l in enumerate(pl) if "SettingsMirrorStore.load()" in l]
+if [pl[i] for i in loads] != ["            let previous = SettingsMirrorStore.load()"] \
+        or loads[0] > pl.index(seq[0]):
+    fail("the settings POST must read the mirror exactly once, as let previous, before save(merged)")
+if "let merged = Self.mergedSettings(base: previous, patch: patch) else {" not in lines(post):
+    fail("the settings POST no longer merges onto the bytes it would put back")
+if src.count("restoreMirror(") != 2 or post.count("restoreMirror(") != 1 or post.count("previous") != 3:
+    fail("the mirror put-back is reached other than once, from the settings POST's refused-queue branch")
 if len(re.findall(r"\brespond\(", post)) != 1 or post.count("settingsWriteAnswer(") != 1 \
-        or post.count("stored") != 4:
+        or post.count("stored") != 5:
     fail("the settings POST answers other than once from settingsWriteAnswer(stored), or reads a "
          "status the answer never sees")
 if re.search(r"status:\s*200|status = 200", post):
@@ -892,9 +956,12 @@ if 'if stored == errSecSuccess { return (200, Data("{}".utf8)) }' not in rl or r
 # 5. Logs: the OSStatus number and nothing else, on every write path the store has.
 logs = re.findall(r"\blog\.\w+\(.*\)", store)
 want = ['log.error("keychain write failed: OSStatus \\(added, privacy: .public)")',
-        'log.error("keychain queue clear failed: OSStatus \\(deleted, privacy: .public)")']
+        'log.error("keychain queue clear failed: OSStatus \\(deleted, privacy: .public)")',
+        'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
+        'log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)")']
 for l in logs:
-    if [m for m in re.findall(r"\\\((.*?)\)", l) if m not in ("added, privacy: .public", "deleted, privacy: .public")]:
+    if [m for m in re.findall(r"\\\((.*?)\)", l)
+            if m not in ("%s, privacy: .public" % v for v in ("added", "deleted", "updated", "removed"))]:
         fail("a SettingsMirrorStore log line interpolates more than the OSStatus: %s" % l)
 if sorted(logs) != sorted(want):
     fail("the store's log lines are not exactly the two OSStatus lines: %r" % logs)
@@ -923,7 +990,8 @@ else:
     print("PASS: the transcribed retry list equals the page's fetchWithRetry list (#185)")
 
 print("PASS: every SettingsMirrorStore Keychain write reports its OSStatus, the settings POST answers "
-      "from it before responding (a refused save is a 507, never 200), and the logs carry the number only (#185)")
+      "from it before responding (a refused save is a 507, never 200), a refused queue write puts the mirror "
+      "back, a refused update is never followed by a delete, and the logs carry the number only (#185)")
 KEYCHAINSTATUSPY
 
 python3 - <<'TIMELABELWIDTHPY'

@@ -206,8 +206,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             // Keychain). `fetchWithRetry` never retries a 200, so the answer is final.
             // The same argument, turned round, is why a write the Keychain refused must
             // NOT be that 200 (#185): see `settingsWriteAnswer`.
+            //
+            // #185: the mirror as it was before this save, read once and used twice — as the
+            // merge base, and as what goes back if the queue write below is refused.
+            let previous = SettingsMirrorStore.load()
             guard let patch = body, !patch.isEmpty,
-                  let merged = Self.mergedSettings(base: SettingsMirrorStore.load(), patch: patch) else {
+                  let merged = Self.mergedSettings(base: previous, patch: patch) else {
                 // Refused rather than stored: a body we cannot parse is a body we
                 // cannot merge, and storing it whole would make a partial or corrupt
                 // document indistinguishable from a complete one on the next read.
@@ -229,6 +233,12 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                 // hold in this sliver is one that pushed an OLDER patch, and this call
                 // re-takes the hold under the queue's own lock.
                 stored = SettingsMirrorStore.queuePatch(patch)
+                // #185: the page is about to be told 507 and keep its form open, so the
+                // mirror must not keep claiming these values: with no patch queued for them
+                // a Pi-off GET would serve them as saved and the next drain would release the
+                // hold and let the Pi silently revert them. Keep-going: a refused put-back is
+                // logged by the store and the answer stays the queue's status.
+                if stored != errSecSuccess { SettingsMirrorStore.restoreMirror(previous) }
             }
             let answer = Self.settingsWriteAnswer(stored)
             status = answer.status
@@ -1318,6 +1328,12 @@ enum SettingsMirrorStore {
     /// the add's. Before this it returned nothing, so an unsigned build (-34018 on every call),
     /// a locked device or a full keychain dropped the save while the page was told 200.
     /// Logged here, once for every caller, as the OSStatus number only: the item is a secret.
+    ///
+    /// Added only when the update found no item. Any other refusal (a locked device, entitlement
+    /// drift, a full keychain) leaves the item exactly as it was: the add would be refused for
+    /// the same reason, and deleting first — what this did until #185 — destroyed the one good
+    /// copy, the whole mirror or a patch queued and answered 200 earlier. There is no class
+    /// migration for a delete to serve: the item has been AfterFirstUnlock since it was created.
     private static func write(_ base: [String: Any], _ body: Data) -> OSStatus {
         guard !body.isEmpty else { return errSecParam }
         let attributes: [String: Any] = [
@@ -1326,9 +1342,12 @@ enum SettingsMirrorStore {
         ]
         let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)
         if updated == errSecSuccess { return updated }
+        guard updated == errSecItemNotFound else {
+            log.error("keychain write failed: OSStatus \(updated, privacy: .public)")
+            return updated
+        }
         var insert = base
         insert.merge(attributes) { _, new in new }
-        SecItemDelete(base as CFDictionary)
         let added = SecItemAdd(insert as CFDictionary, nil)
         if added != errSecSuccess { log.error("keychain write failed: OSStatus \(added, privacy: .public)") }
         return added
@@ -1338,6 +1357,19 @@ enum SettingsMirrorStore {
 
     /// errSecSuccess or the OSStatus the Keychain refused the write with (#185).
     static func save(_ body: Data) -> OSStatus { write(baseQuery, body) }
+
+    /// #185: put the mirror back to what `load()` read before a settings POST whose queue write
+    /// was then refused — nil is "there was no mirror item", so the saved one is removed. Keep
+    /// going: a refused put-back is logged (write logs its own, the delete here) and nothing
+    /// else changes, the page is answered from the queue's status either way.
+    static func restoreMirror(_ previous: Data?) {
+        guard let previous else {
+            let removed = SecItemDelete(baseQuery as CFDictionary)
+            if removed != errSecSuccess { log.error("keychain mirror put-back failed: OSStatus \(removed, privacy: .public)") }
+            return
+        }
+        _ = write(baseQuery, previous)
+    }
 
     /// Whether this device holds a settings change the Pi has never seen (#149).
     ///
