@@ -26,22 +26,142 @@ xcrun swiftc -D DEBUG -o "$OUT3" \
   Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
 DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server
 
+# #190: every block that strips Swift comments imports Tests/swift_strip.py, one lexer for
+# // and nested /* */ comments over "...", """...""" and #"..."# literals, whose probe runs on
+# every import. Its standalone run below is the suite's PASS line for the stripper itself.
+# #194: the JS the Swift literals carry is stripped by Tests/js_strip.py, the #158 strip_js
+# moved out of BRIDGENAMESPY so PIGATEPY shares it; its standalone run is its PASS line.
+python3 Tests/swift_strip.py
+python3 Tests/js_strip.py
+# The wiring: each Swift-stripping block imports the helper and strips through it at its read,
+# reads nothing raw beside it, and no block grows its own stripper again (a // -only copy passes
+# every pin).
+python3 - <<'SWIFTSTRIPWIRINGPY'
+import re
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#190, #194)\n" % msg)
+    sys.exit(1)
+
+text = open("Tests/run-checks.sh").read()
+blocks = {}
+for name, body in re.findall(r"<<'(\w+)'\n(.*?)\n\1\n", text, re.S):
+    blocks.setdefault(name, []).append(body)
+SW, SWL, JS = "from swift_strip import strip_swift", "from swift_strip import strip_swift_lines", "from js_strip import strip_js"
+# name: (import lines, strip-call lines, raw reads allowed beside them). Every line of the
+# block that reads a file (open(, .read(, readlines(, or BRIDGENAMESPY's raw read( helper) must
+# be one of the two lists, so a raw re-read after the strip is a named FAIL (#194).
+reads = {
+    "ASSERTGATEDPY": (["from swift_strip import strip_swift, strip_swift_lines"],
+                      ["        lines = strip_swift_lines(open(path).read(), path)",
+                       'selftest = strip_swift(open("Dobby/Web/SettingsSelfTest.swift").read(), "SettingsSelfTest.swift").splitlines()'], []),
+    "SECURESCHEMEPY": ([SWL], ["lines = strip_swift_lines(open(path).read(), path)"], []),
+    "PRESENCEPY": ([SW], ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")',
+                          "    server_src = strip_swift(open(routes).read(), routes)",
+                          "    text = strip_swift(open(path).read(), path)"], []),
+    "KEYCHAINSTATUSPY": ([SW], ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")'],
+                         ['check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()',
+                          r'    pm = re.findall(r"var retryStatuses = options\.retryStatuses \|\| \[([\d, ]+)\];", open(page).read())']),
+    "TIMELABELWIDTHPY": ([SW], ["src = strip_swift(open(path).read(), path)"], []),
+    "BRIDGENAMESPY": ([SW, JS], ['inject = strip_swift(read("Dobby/Web/BridgeInjection.swift"), "BridgeInjection.swift")',
+                                 'webbridge = strip_swift(read("Dobby/Web/WebBridge.swift"), "WebBridge.swift")',
+                                 "literal = strip_js(inject[start:end])",
+                                 "    src = strip_swift(read(path), path)",
+                                 "    text = strip_js(read(path))"],
+                      ["def read(path):", '    with open(path, encoding="utf-8") as f:', "        return f.read()"]),
+    "SCHEMEMAINPY": ([SWL], ["    lines = strip_swift_lines(open(path).read(), path)"], []),
+    "PIGATEPY": ([SW, JS], ["        return strip_swift(f.read(), path)", "literal = strip_js(literal)"],
+                 ['    with open(path, encoding="utf-8") as f:', '    with open(gate_file, encoding="utf-8") as f:',
+                  "        js = f.read()"]),
+}
+raw = re.compile(r"\bopen\(|\.read\(|readlines\(")
+for name, (imports, needles, allowed) in reads.items():
+    if len(blocks.get(name, [])) != 1:
+        fail("expected exactly one %s block in run-checks.sh" % name)
+    body = blocks[name][0].split("\n")
+    for imp in ['sys.path.insert(0, "Tests")'] + imports:
+        if imp not in body:
+            fail("%s no longer imports its stripper at top level: missing %r" % (name, imp))
+    for n in needles:
+        if body.count(n) != 1:
+            fail("%s no longer strips its read through the shared helper exactly once: %r found %d time(s)"
+                 % (name, n, body.count(n)))
+    rx = re.compile(raw.pattern + r"|\bread\(") if "def read(path):" in allowed else raw
+    for l in body:
+        if not l.lstrip().startswith("#") and rx.search(l) and l not in needles and l not in allowed:
+            fail("%s reads a file outside its pinned stripped reads: %r" % (name, l))
+# ORDER: the JS strip sits between the literal's extraction and the member regex that reads it,
+# the reader line itself is pinned (its argument is the stripped literal, #194 review), and
+# nothing re-assigns the literal after it. Every line after the strip that carries the block's
+# member-regex signature must be that pinned reader, and no line after the strip may hand the
+# raw inject to a member regex. Ceiling: textual; a member regex spelled without the signature
+# (a new variable, re.compile(...).findall(...) on another name) is not seen.
+for name, extract, strip, reader, sigs in [
+        ("PIGATEPY", "literal = inject[locate(inject, anchor", "literal = strip_js(literal)",
+         ["    n = len(re.findall(pattern, literal, re.M))"], [r"\bpattern\b"]),
+        ("BRIDGENAMESPY", "end = inject.index(", "literal = strip_js(inject[start:end])",
+         ["for line in literal.splitlines():",
+          r'    m = re.match(r"\s{12}([A-Za-z_][A-Za-z0-9_]*)\s*:", line)'],
+         [r"\.splitlines\(\)", r're\.\w+\(r"\\s\{12\}']),
+]:
+    body = blocks[name][0].split("\n")
+    ex = next((i for i, l in enumerate(body) if l.startswith(extract)), -1)
+    st = next((i for i, l in enumerate(body) if l == strip), -1)
+    if not 0 <= ex < st:
+        fail("%s no longer strips the window.Dobby literal's JS comments right after extracting it" % name)
+    at = []
+    for r in reader:
+        hits = [i for i, l in enumerate(body) if l == r]
+        if len(hits) != 1 or hits[0] < st:
+            fail("%s: the member reader %r must appear exactly once, after the JS strip (found at %s)"
+                 % (name, r, hits))
+        at.append(hits[0])
+    if at != sorted(at) or at[-1] - at[0] != len(at) - 1:
+        fail("%s: the member reader lines %r must stay consecutive and in order" % (name, reader))
+    for i, l in enumerate(body[st + 1:], st + 1):
+        if l.lstrip().startswith("#") or i in at:
+            continue
+        if any(re.search(s, l) for s in sigs) and ("literal" in l or "inject" in l):
+            fail("%s: a member regex after the JS strip reads something other than the pinned reader: %r"
+                 % (name, l))
+        if "inject" in l and any(re.search(s, l) for s in sigs + [r"\bmembers\b"]):
+            fail("%s hands the raw inject to a member regex after the JS strip: %r" % (name, l))
+    if [i for i, l in enumerate(body) if re.match(r"literal\s*=", l) and i > st]:
+        fail("%s re-assigns the window.Dobby literal after its JS comments were stripped" % name)
+for name, bodies in blocks.items():
+    for body in bodies:
+        if ".swift" in body and re.search(r"^\s*(def strip\w*\(|strip_\w+ = )", body, re.M):
+            fail("%s reads Swift and defines its own stripper; import Tests/swift_strip.py or "
+                 "Tests/js_strip.py instead" % name)
+for mod in ("swift_strip", "js_strip"):
+    first_use = text.find("from %s import" % mod)
+    if not 0 <= text.find("\npython3 Tests/%s.py\n" % mod) < first_use:
+        fail("the standalone probe run of Tests/%s.py is gone or no longer precedes its first import" % mod)
+print("PASS: %s strip through the probed Tests/swift_strip.py and Tests/js_strip.py at their pinned "
+      "reads and read nothing raw beside them, PIGATEPY and BRIDGENAMESPY strip the window.Dobby "
+      "literal's JS before reading its members, and no Swift-reading block defines its own stripper "
+      "(#190, #194)" % ", ".join(sorted(reads)))
+SWIFTSTRIPWIRINGPY
+
 # Compile-time property with no runtime observable: resolve() reports the same "absent" verdict
 # whether the seam call is #if DEBUG-gated or unconditional, and the reason string only reaches
 # OSLog, so no assertion above this line can distinguish a shipped guard from a shipped hole.
 # A textual check over the source is the only tool that can catch the call site losing its
 # DEBUG gate (or a second, ungated call being added elsewhere).
-python3 - <<'PY'
+python3 - <<'ASSERTGATEDPY'
 import glob
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift, strip_swift_lines
 
 def assert_gated(call_regex, label, expected_calls=1):
     hits = []
     files = {}
     for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
-        with open(path) as f:
-            lines = f.readlines()
+        # One entry per source line, comments gone: the hits report line numbers (#194).
+        lines = strip_swift_lines(open(path).read(), path)
         files[path] = lines
         for i, l in enumerate(lines):
             stripped = l.strip()
@@ -99,12 +219,12 @@ assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
 # file that defines it must be DEBUG from its first line to its last, so no part of it
 # (the page script included) can reach a Release build.
 assert_gated(r"SettingsSelfTest\.run\(", "run")
-selftest = [l.strip() for l in open("Dobby/Web/SettingsSelfTest.swift") if l.strip()]
+selftest = strip_swift(open("Dobby/Web/SettingsSelfTest.swift").read(), "SettingsSelfTest.swift").splitlines()
 if selftest[0] != "#if DEBUG" or selftest[-1] != "#endif":
     sys.stderr.write("FAIL: Dobby/Web/SettingsSelfTest.swift is not #if DEBUG end to end (#149)\n")
     sys.exit(1)
 print("PASS: SettingsSelfTest.swift is #if DEBUG end to end (#149)")
-PY
+ASSERTGATEDPY
 
 # #115: the progress-bar scrub state (Dobby/Playback/ScrubState.swift) as a pure value
 # type - the Slider knob binds to it the instant a drag starts, and seeding it with the
@@ -291,15 +411,16 @@ fi
 # `<script src="dobby-offline://shell/...">` on the phone is refused as mixed content
 # and the Pi-less cold start is a blank page. Both calls are pinned, by scheme, and
 # both before the WKWebView.
-python3 - <<'PY'
+python3 - <<'SECURESCHEMEPY'
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift_lines
 
 path = "Dobby/Web/WebContainer.swift"
-with open(path) as f:
-    lines = f.readlines()
+# One entry per source line, comments gone: order is compared by line index (#194).
+lines = strip_swift_lines(open(path).read(), path)
 
-calls = [i for i, l in enumerate(lines)
-         if "registerAsSecureScheme(in:" in l and "//" not in l.split("registerAsSecureScheme")[0]]
+calls = [i for i, l in enumerate(lines) if "registerAsSecureScheme(in:" in l]
 webviews = [i for i, l in enumerate(lines) if "WKWebView(frame:" in l]
 
 if len(calls) != 2:
@@ -325,7 +446,7 @@ if stripped != [api, offline]:
     sys.exit(1)
 
 print("PASS: WebContainer marks both dobby-api: and dobby-offline: secure before constructing its WKWebView (#067, #151)")
-PY
+SECURESCHEMEPY
 
 # #129: scheduleHide() re-armed the auto-hide timer on every isPlaying state change,
 # including a rebuffer mid-drag, so a scrub longer than the 3s idle window lost the
@@ -628,51 +749,6 @@ SETTINGSWRITEPY
 # inside the one function that builds it, before the page is handed the body) and that
 # its key list is the server's. Comments are stripped first by the shared, probed stripper.
 #
-# #190: every block that strips Swift comments imports Tests/swift_strip.py, one lexer for
-# // and nested /* */ comments over "...", """...""" and #"..."# literals, whose probe runs on
-# every import. Its standalone run below is the suite's PASS line for the stripper itself.
-python3 Tests/swift_strip.py
-# The wiring: each Swift-stripping block imports the helper and strips through it at its read,
-# and no block that reads Swift grows its own stripper again (a // -only copy passes every pin).
-python3 - <<'SWIFTSTRIPWIRINGPY'
-import re
-import sys
-
-def fail(msg):
-    sys.stderr.write("FAIL: %s (#190)\n" % msg)
-    sys.exit(1)
-
-text = open("Tests/run-checks.sh").read()
-blocks = {}
-for name, body in re.findall(r"<<'(\w+)'\n(.*?)\n\1\n", text, re.S):
-    blocks.setdefault(name, []).append(body)
-reads = {
-    "PRESENCEPY": ("strip_swift", ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")',
-                                   "    server_src = strip_swift(open(routes).read(), routes)",
-                                   "    text = strip_swift(open(path).read(), path)"]),
-    "KEYCHAINSTATUSPY": ("strip_swift", ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")']),
-    "SCHEMEMAINPY": ("strip_swift_lines", ["    lines = strip_swift_lines(open(path).read(), path)"]),
-    "PIGATEPY": ("strip_swift", ["        return strip_swift(f.read(), path)"]),
-}
-for name, (fn, needles) in reads.items():
-    if len(blocks.get(name, [])) != 1:
-        fail("expected exactly one %s block in run-checks.sh" % name)
-    body = blocks[name][0].split("\n")
-    if 'sys.path.insert(0, "Tests")' not in body or "from swift_strip import %s" % fn not in body:
-        fail("%s no longer imports %s from Tests/swift_strip.py at top level" % (name, fn))
-    for n in needles:
-        if n not in body:
-            fail("%s no longer strips its Swift read through the shared helper: missing %r" % (name, n))
-for name, bodies in blocks.items():
-    for body in bodies:
-        if ".swift" in body and re.search(r"^\s*(def strip(?!_js\()\w*\(|strip_\w+ = )", body, re.M):
-            fail("%s reads Swift and defines its own stripper; import Tests/swift_strip.py instead" % name)
-first_use = text.index("from swift_strip import")
-if not 0 <= text.find("\npython3 Tests/swift_strip.py\n") < first_use:
-    fail("the standalone probe run of Tests/swift_strip.py is gone or no longer precedes its first import")
-print("PASS: PRESENCEPY, KEYCHAINSTATUSPY, SCHEMEMAINPY and PIGATEPY strip Swift through the one probed "
-      "helper at their reads, and no Swift-reading block defines its own stripper (#190)")
-SWIFTSTRIPWIRINGPY
 python3 - <<'PRESENCEPY'
 import os
 import re
@@ -1087,13 +1163,11 @@ KEYCHAINSTATUSPY
 
 python3 - <<'TIMELABELWIDTHPY'
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
 
 path = "Dobby/Playback/PlayerView.swift"
-with open(path) as f:
-    lines = f.readlines()
-
-code_lines = [l for l in lines if not l.strip().startswith("//")]
-src = "".join(code_lines)
+src = strip_swift(open(path).read(), path)
 
 if "Text(timeLabel(current, matching: total))" not in src:
     sys.stderr.write("FAIL: PlayerView's elapsed-time label no longer formats at the total's field width (#128)\n")
@@ -1887,6 +1961,9 @@ import glob
 import os
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
 
 MEMBERS_WITH_NO_PWA_CALLER = {
     "platform": "identity string the wrapper advertises; nothing in the PWA branches on it "
@@ -1925,8 +2002,9 @@ def fail(msg):
     sys.stderr.write("FAIL: " + msg + "\n")
     sys.exit(1)
 
-inject = read("Dobby/Web/BridgeInjection.swift")
-webbridge = read("Dobby/Web/WebBridge.swift")
+# Swift comments stripped by the shared, probed lexer (#194); literal content is kept.
+inject = strip_swift(read("Dobby/Web/BridgeInjection.swift"), "BridgeInjection.swift")
+webbridge = strip_swift(read("Dobby/Web/WebBridge.swift"), "WebBridge.swift")
 
 # --- the literal's members -------------------------------------------------
 # Anchored on the assignment rather than braces: if this line moves or is renamed
@@ -1938,7 +2016,9 @@ if anchor not in inject:
          "seed needs updating (#158)." % anchor)
 start = inject.index(anchor) + len(anchor)
 end = inject.index("\n          };", start)
-literal = inject[start:end]
+# JS comments inside the Swift literal are the page's comments: a member commented out
+# there is not declared (#194, the same strip PIGATEPY applies).
+literal = strip_js(inject[start:end])
 
 declared = []
 for line in literal.splitlines():
@@ -2022,8 +2102,9 @@ if len(swift_sources) < 15:
 reached = {}
 for path in swift_sources:
     # Comments stripped: a doc comment naming a member is drift worth noticing but not
-    # worth failing a build over, and it would otherwise inflate the count below.
-    src = "\n".join(re.sub(r"//.*", "", l) for l in read(path).splitlines())
+    # worth failing a build over, and it would otherwise inflate the count below (#194:
+    # through the shared lexer, so a /* */ block is stripped too).
+    src = strip_swift(read(path), path)
     for m in re.finditer(r"window\.Dobby\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)", src):
         reached.setdefault(m.group(1), set()).add(path)
 if not reached:
@@ -2047,10 +2128,6 @@ if not os.path.isdir(pub):
           "PWA's Public dir. Until #155 gives CI a dobby checkout this half is developer-machine "
           "only (#158)." % pub)
     sys.exit(0)
-
-def strip_js(js):
-    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
-    return "\n".join(re.sub(r"//.*", "", l) for l in js.splitlines())
 
 sources = sorted(glob.glob(os.path.join(pub, "js", "*.js"))) + [os.path.join(pub, "index.html")]
 if len(sources) < 10:
@@ -2364,6 +2441,7 @@ import re
 import sys
 sys.path.insert(0, "Tests")
 from swift_strip import strip_swift
+from js_strip import strip_js
 
 def fail(msg):
     sys.stderr.write("FAIL: " + msg + " (#181)\n")
@@ -2410,6 +2488,9 @@ anchor = "window.Dobby = {"
 if inject.count(anchor) != 1:
     fail("BridgeInjection.swift must build exactly one `%s` literal" % anchor)
 literal = inject[locate(inject, anchor, "BridgeInjection"):locate(inject, "\n          };", "the window.Dobby literal end", locate(inject, anchor, "BridgeInjection"))]
+# The Swift lexer keeps literal content, so a member the page's JS comments out still reads as
+# present; strip the page's own comments before counting members (#194).
+literal = strip_js(literal)
 members = {
     "piEnabled": r"^\s{12}piEnabled:\s*function\s*\(\)\s*\{\s*return this\._piEnabled === true;\s*\},$",
     "setPiEnabled": r"^\s{12}setPiEnabled:\s*function\s*\(on\)\s*\{\s*this\._piEnabled = on === true;\s*"
