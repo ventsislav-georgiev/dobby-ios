@@ -209,7 +209,11 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             //
             // #185: the mirror as it was before this save, read once and used twice — as the
             // merge base, and as what goes back if the queue write below is refused.
-            let previous = SettingsMirrorStore.load()
+            //
+            // #189: with its status. Only a read that succeeded or found no item (a first save,
+            // merged over nil) goes on to the save; any other refusal is the 507 answer, and
+            // nothing is written, marked or queued over a mirror this leg could not see.
+            let (previous, mirrorRead) = SettingsMirrorStore.loadWithStatus()
             guard let patch = body, !patch.isEmpty,
                   let merged = Self.mergedSettings(base: previous, patch: patch) else {
                 // Refused rather than stored: a body we cannot parse is a body we
@@ -222,7 +226,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             }
             // #185: every Keychain status on this leg reaches the answer. A refused mirror
             // write marks and queues nothing — nothing changed that a hold would protect.
-            var stored = SettingsMirrorStore.save(merged)
+            var stored = mirrorRead
+            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }
             if stored == errSecSuccess {
                 SettingsMirrorStore.markAheadOfServer()
                 // #152: the patch bytes, kept so the Pi can be told what changed once it
@@ -1313,14 +1318,18 @@ enum SettingsMirrorStore {
     private static var baseQuery: [String: Any] { query(account) }
     private static var pendingQuery: [String: Any] { query(pendingAccount) }
 
-    private static func read(_ base: [String: Any]) -> Data? {
+    /// #189: the bytes and the status of the read that produced them. nil data is "no item"
+    /// only when the status is errSecItemNotFound; any other non-success is a refusal.
+    private static func readWithStatus(_ base: [String: Any]) -> (data: Data?, status: OSStatus) {
         var q = base
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? Data
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        return (status == errSecSuccess ? item as? Data : nil, status)
     }
+
+    private static func read(_ base: [String: Any]) -> Data? { readWithStatus(base).data }
 
     private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "api-mirror")
 
@@ -1354,6 +1363,17 @@ enum SettingsMirrorStore {
     }
 
     static func load() -> Data? { read(baseQuery) }
+
+    /// #189: the settings POST's read. `load()` answers nil for a refused read as well as for
+    /// no item, and a POST merging over that nil stores a patch-only document over the whole
+    /// mirror, every secret the page did not re-send gone. Logged here as the number only.
+    static func loadWithStatus() -> (data: Data?, status: OSStatus) {
+        let (data, status) = readWithStatus(baseQuery)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            log.error("keychain mirror read refused: OSStatus \(status, privacy: .public)")
+        }
+        return (data, status)
+    }
 
     /// errSecSuccess or the OSStatus the Keychain refused the write with (#185).
     static func save(_ body: Data) -> OSStatus { write(baseQuery, body) }

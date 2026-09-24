@@ -586,14 +586,14 @@ need('            fail(task, id, 405, "Settings mirror takes GET and POST", orig
 need('                fail(task, id, 400, "Settings write needs a JSON object body", origin, secret: true); return',
      "a settings POST with no body, or a body that is not a JSON object, is no longer refused with a 400")
 
-need("            var stored = SettingsMirrorStore.save(merged)",
+need("            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }",
      "the settings POST no longer stores the merged document")
 need("                SettingsMirrorStore.markAheadOfServer()",
      "the settings POST no longer marks the mirror as ahead of the Pi, so the next background refresh can pull the pre-write body back over it")
 
 # Order is the meaning: the write must be stored and marked before the page is
 # told it succeeded, or a 200 can outlive a failed save.
-save_idx = src.index("            var stored = SettingsMirrorStore.save(merged)")
+save_idx = src.index("            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }")
 mark_idx = src.index("                SettingsMirrorStore.markAheadOfServer()")
 # #185: the acknowledgement is now the one built from the Keychain status.
 need("            respond(task, id, status: answer.status, contentType: \"application/json\",",
@@ -905,7 +905,7 @@ if "guard write(item, held) == errSecSuccess, read(item) == held else { return f
 kept_going = ["if outcome.store { _ = SettingsMirrorStore.save(outcome.body) }",
               "if let fresh = Self.fetchSettings(from: self.server) { _ = SettingsMirrorStore.save(fresh) }"]
 saves = [l for l in lines(src) if "SettingsMirrorStore.save(" in l]
-if sorted(saves) != sorted(kept_going + ["var stored = SettingsMirrorStore.save(merged)"]):
+if sorted(saves) != sorted(kept_going + ["if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }"]):
     fail("the mirror saves are not exactly the POST's checked one and the two keep-going ones: %r" % saves)
 if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored = SettingsMirrorStore.queuePatch(patch)"]:
     fail("the queued patch's status no longer reaches the POST answer")
@@ -913,7 +913,8 @@ if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored
 # 3. The POST leg: every status reaches settingsWriteAnswer, which decides before the respond.
 serve = body(src, "private func serveSettings(", "serveSettings")
 post = serve[serve.index('        if method == "POST" {'):serve.index("        let mirror = SettingsMirrorStore.load()")]
-seq = ["            var stored = SettingsMirrorStore.save(merged)",
+seq = ["            var stored = mirrorRead",
+       "            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }",
        "            if stored == errSecSuccess {",
        "                SettingsMirrorStore.markAheadOfServer()",
        "                stored = SettingsMirrorStore.queuePatch(patch)",
@@ -926,26 +927,52 @@ seq = ["            var stored = SettingsMirrorStore.save(merged)",
        "                    body: answer.body, origin: origin, secret: true,"]
 at = post.find("\n".join(seq))
 if at < 0:
-    fail("the settings POST no longer runs save, then (only on success) mark, queue and (only on a "
-         "refused queue) put the mirror back, then builds its answer from the status, then responds "
+    fail("the settings POST no longer starts from the mirror read's status, saves only when that read "
+         "succeeded or found no item (#189), then (only on success) marks, queues and (only on a "
+         "refused queue) puts the mirror back, then builds its answer from the status, then responds "
          "with that answer, as consecutive lines")
 # Round 2: the put-back's bytes are read before the save overwrites them, once, and are the
 # merge base too; the put-back runs once, only inside the refused-queue branch pinned above.
+# #189: that one read carries its status, and the status is read before the merge and the save.
 pl = post.split("\n")
-loads = [i for i, l in enumerate(pl) if "SettingsMirrorStore.load()" in l]
-if [pl[i] for i in loads] != ["            let previous = SettingsMirrorStore.load()"] \
-        or loads[0] > pl.index(seq[0]):
-    fail("the settings POST must read the mirror exactly once, as let previous, before save(merged)")
-if "let merged = Self.mergedSettings(base: previous, patch: patch) else {" not in lines(post):
-    fail("the settings POST no longer merges onto the bytes it would put back")
+loads = [i for i, l in enumerate(pl) if re.search(r"SettingsMirrorStore\.load(WithStatus)?\(\)", l)]
+merge_at = [i for i, l in enumerate(pl) if l.strip() == "let merged = Self.mergedSettings(base: previous, patch: patch) else {"]
+if [pl[i] for i in loads] != ["            let (previous, mirrorRead) = SettingsMirrorStore.loadWithStatus()"] \
+        or len(merge_at) != 1 or not loads[0] < merge_at[0] < pl.index(seq[0]):
+    fail("the settings POST must read the mirror exactly once, with its status, as let (previous, mirrorRead), "
+         "before the merge onto those bytes and before save(merged)")
+if post.count("mirrorRead") != 2:
+    fail("the mirror read's status is used on the settings POST other than as the start of stored (#189)")
 if src.count("restoreMirror(") != 2 or post.count("restoreMirror(") != 1 or post.count("previous") != 3:
     fail("the mirror put-back is reached other than once, from the settings POST's refused-queue branch")
 if len(re.findall(r"\brespond\(", post)) != 1 or post.count("settingsWriteAnswer(") != 1 \
-        or post.count("stored") != 5:
+        or post.count("stored") != 8:
     fail("the settings POST answers other than once from settingsWriteAnswer(stored), or reads a "
          "status the answer never sees")
 if re.search(r"status:\s*200|status = 200", post):
     fail("the settings POST answers a literal 200 again, so a refused save still reads as done")
+
+# #189: the one Keychain read reports its status, read() is derived from it, and only the POST
+# takes the status-returning mirror read (the GET and imdbAuthToken keep load()).
+if src.count("SecItemCopyMatching(") != 1:
+    fail("expected exactly one SecItemCopyMatching, inside SettingsMirrorStore.readWithStatus (#189)")
+rws = body(store, "private static func readWithStatus(_ base: [String: Any]) -> (data: Data?, status: OSStatus) {", "readWithStatus")
+if lines(rws)[-2:] != ["let status = SecItemCopyMatching(q as CFDictionary, &item)",
+                       "return (status == errSecSuccess ? item as? Data : nil, status)"]:
+    fail("readWithStatus no longer returns the bytes only on errSecSuccess, with the read's own status (#189): %r" % lines(rws)[-2:])
+for need in ["private static func read(_ base: [String: Any]) -> Data? { readWithStatus(base).data }",
+             "static func load() -> Data? { read(baseQuery) }"]:
+    if need not in lines(store):
+        fail("missing %r (#189)" % need)
+lws = body(store, "static func loadWithStatus() -> (data: Data?, status: OSStatus) {", "loadWithStatus")
+if lines(lws)[1:] != ["let (data, status) = readWithStatus(baseQuery)",
+                      "if status != errSecSuccess && status != errSecItemNotFound {",
+                      'log.error("keychain mirror read refused: OSStatus \\(status, privacy: .public)")',
+                      "}",
+                      "return (data, status)"]:
+    fail("loadWithStatus must return the mirror read's bytes and status, logging a refusal as the number only (#189): %r" % lines(lws)[1:])
+if src.count("loadWithStatus()") != 2:
+    fail("loadWithStatus is reached other than from the settings POST (#189)")
 
 # 4. The rule itself: only errSecSuccess is a 200, and its body is {}.
 rule = body(src, "static func settingsWriteAnswer(_ stored: OSStatus) -> (status: Int, body: Data) {", "settingsWriteAnswer")
@@ -958,13 +985,14 @@ logs = re.findall(r"\blog\.\w+\(.*\)", store)
 want = ['log.error("keychain write failed: OSStatus \\(added, privacy: .public)")',
         'log.error("keychain queue clear failed: OSStatus \\(deleted, privacy: .public)")',
         'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
-        'log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)")']
+        'log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)")',
+        'log.error("keychain mirror read refused: OSStatus \\(status, privacy: .public)")']
 for l in logs:
     if [m for m in re.findall(r"\\\((.*?)\)", l)
-            if m not in ("%s, privacy: .public" % v for v in ("added", "deleted", "updated", "removed"))]:
+            if m not in ("%s, privacy: .public" % v for v in ("added", "deleted", "updated", "removed", "status"))]:
         fail("a SettingsMirrorStore log line interpolates more than the OSStatus: %s" % l)
 if sorted(logs) != sorted(want):
-    fail("the store's log lines are not exactly the two OSStatus lines: %r" % logs)
+    fail("the store's log lines are not exactly the five OSStatus lines: %r" % logs)
 if "if added != errSecSuccess { " + want[0] + " }" not in lines(write):
     fail("write no longer logs a refused add")
 clear = body(store, "static func clearPending(ifStill pushed: Data) {", "clearPending")
@@ -991,7 +1019,8 @@ else:
 
 print("PASS: every SettingsMirrorStore Keychain write reports its OSStatus, the settings POST answers "
       "from it before responding (a refused save is a 507, never 200), a refused queue write puts the mirror "
-      "back, a refused update is never followed by a delete, and the logs carry the number only (#185)")
+      "back, a refused update is never followed by a delete, a refused mirror read answers 507 before any save "
+      "(no-item still merges over nil) (#189), and the logs carry the number only (#185)")
 KEYCHAINSTATUSPY
 
 python3 - <<'TIMELABELWIDTHPY'
