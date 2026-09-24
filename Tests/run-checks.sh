@@ -712,7 +712,24 @@ else:
         fail("presenceFlaggedKeys %r is not the server's has* family %r" % (sorted(swift_keys), sorted(server.values())))
     print("PASS: presenceFlaggedKeys equals the %d has* flags the server's GET computes (#184)" % len(server))
 
-print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task (#184)")
+# The simulator seam's byte-exact Keychain backup copies secrets into sibling items, so it
+# must never exist in a Release build: both definitions sit inside one #if DEBUG block,
+# and nothing outside a #if DEBUG block calls them.
+blocks = [(m.start(), src.index("#endif", m.start())) for m in re.finditer(r"^\s*#if DEBUG\b", src, re.M)]
+for name in ("static func selfTestBackup()", "static func selfTestRestore()"):
+    if src.count(name) != 1:
+        fail("expected exactly one %r in ApiSchemeHandler.swift" % name)
+    at = src.index(name)
+    if not any(a < at < b for a, b in blocks):
+        fail("%s is outside #if DEBUG; the seam's Keychain backup would ship in Release" % name)
+for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swift"):
+    text = strip_swift(open(path).read())
+    spans = [(m.start(), text.index("#endif", m.start())) for m in re.finditer(r"^\s*#if DEBUG\b", text, re.M)]
+    for m in re.finditer(r"\bselfTest(Backup|Restore)\(\)", text):
+        if not any(a < m.start() < b for a, b in spans):
+            fail("%s reaches selfTest%s() outside #if DEBUG" % (path, m.group(1)))
+
+print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
 PRESENCEPY
 
 python3 - <<'TIMELABELWIDTHPY'
