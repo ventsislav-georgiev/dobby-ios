@@ -26,11 +26,21 @@ import WebKit
 ///   what it reads. `pi-on` / `pi-off` first flip it exactly the way `saveSettings` does
 ///   (`setPiEnabledOnWrapper`, then `probeNetworkStates`), without posting the form. The
 ///   flag is the one value these steps print: it is the wrapper's switch, not settings data.
+/// - `cred-write` / `cred-read` / `cred-restore` (#184): the same Pi-off write lane for a
+///   credential-shaped field, `premiumizeApiKey`, whose Settings badge is drawn from
+///   `hasPremiumizeApiKey` alone. `cred-write` first takes a byte-exact Keychain backup of
+///   the mirror, the queued patch and the ahead bit (refusing if one is already held), then
+///   saves a throwaway key it generates together with `hasPremiumizeApiKey: false` — the flag
+///   a Pi pull leaves when the key was unset there — and reports the flag and the badge.
+///   `cred-read` reports them after a force-stop. `cred-restore` puts the backup back
+///   natively, so the value it held never passes through the page, then reports them. Only
+///   shapes, a length, the flag and the badge's leading words are returned, never a value.
 ///
 /// Values never reach the log: the page hands them to Swift, which prints only a length
 /// and a sha256 prefix for each.
 enum SettingsSelfTest {
-    static let steps: Set<String> = ["read", "write", "restore", "pi", "pi-on", "pi-off"]
+    static let steps: Set<String> = ["read", "write", "restore", "pi", "pi-on", "pi-off",
+                                     "cred-write", "cred-read", "cred-restore"]
     private static var ran = false
 
     @MainActor
@@ -41,6 +51,13 @@ enum SettingsSelfTest {
         }
         guard !ran, let webView else { return }
         ran = true
+        if step == "cred-write" && !SettingsMirrorStore.selfTestBackup() {
+            NSLog("%@", "Dobby selftest184 refused: a backup is already held; run cred-restore first")
+            return
+        }
+        if step == "cred-restore" {
+            NSLog("%@", "Dobby selftest184 restore \(SettingsMirrorStore.selfTestRestore())")
+        }
         webView.callAsyncJavaScript(script, arguments: ["step": step], in: nil, in: .page) { result in
             switch result {
             case .success(let value): NSLog("%@", "Dobby selftest149 \(summary(value))")
@@ -129,6 +146,46 @@ enum SettingsSelfTest {
       for (let i = 0; i < 240 && !meta.wrapperCalls.some((c) => c.indexOf('POST settings') === 0); i++) await pause(250);
       await pause(1000);
     };
+
+    if (step.indexOf('cred-') === 0) {
+      const PREFIX = 'selftest184-';
+      const readCred = async (label) => {
+        const r = await fetch(apiUrlFor('/api/settings'), { cache: 'no-store' });
+        meta[label + 'Status'] = r.status;
+        const doc = r.ok ? await r.json() : {};
+        const key = doc.premiumizeApiKey;
+        meta[label + 'KeyShape'] = key === undefined ? 'absent' : key === null ? 'null'
+          : typeof key !== 'string' ? 'non-string' : key === '' ? 'empty' : 'string';
+        meta[label + 'KeyLen'] = typeof key === 'string' ? key.length : null;
+        meta[label + 'KeyIsPlaceholder'] = typeof key === 'string' && key.indexOf(PREFIX) === 0;
+        meta[label + 'HasFlag'] = 'hasPremiumizeApiKey' in doc ? doc.hasPremiumizeApiKey : 'absent';
+      };
+      const badge = async () => {
+        settingsLoadedPromise = null;
+        openSettings();
+        await pause(2000);
+        const text = (document.getElementById('settings-pm-state') || {}).textContent || '';
+        meta.badge = text.indexOf('Configured') === 0 ? 'Configured'
+          : text.indexOf('Not configured') === 0 ? 'Not configured' : 'other';
+      };
+      await readCred(step === 'cred-write' ? 'before' : 'now');
+      if (step === 'cred-write') {
+        const bytes = crypto.getRandomValues(new Uint8Array(12));
+        removePi();
+        mirroredWrite('/api/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            premiumizeApiKey: PREFIX + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''),
+            hasPremiumizeApiKey: false
+          })
+        }, fetchWithRetry).catch(() => {});
+        await awaitWrite();
+        window.fetch = realFetch;
+        await readCred('after');
+      }
+      await badge();
+      return { meta, v };
+    }
 
     const stashed = localStorage.getItem(STASH);
     v.test = TEST;
