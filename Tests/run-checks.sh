@@ -1202,6 +1202,155 @@ print("PASS: TestFlight fetches the playsvideo bundle-latest release asset into 
 BUNDLEFETCHPY
 
 # ---------------------------------------------------------------------------
+# #183 — TestFlight follows PWA main. An hourly schedule, a decide job that looks up
+# the (dobby-ios, PWA) pair's record by exact artifact name, a release job gated on it,
+# and the record written from what the archive carries after a successful upload. Every
+# pin reads comment-stripped text, and every one is about containment or order, because
+# each of these fails silently in CI: a schedule outside on:, an if: on a step instead of
+# the job, a record uploaded before the upload it vouches for.
+python3 - <<'FOLLOWPWAPY'
+import subprocess, sys
+
+def strip_comments(text):
+    kept = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        kept.append(line.split(" #", 1)[0])
+    return "\n".join(kept) + "\n"
+
+# The stripper is load-bearing for every pin below (the comment block under on: itself
+# says "schedule"), so it is checked first.
+probe = "on:\n  # schedule:\n  push: # schedule\n#   - cron: x\n"
+if strip_comments(probe) != "on:\n  push:\n":
+    sys.stderr.write("FAIL: the #183 comment stripper keeps comments: %r\n" % strip_comments(probe))
+    sys.exit(1)
+
+wf = strip_comments(open(".github/workflows/testflight.yml").read())
+sh = strip_comments(open("scripts/copy-app-shell.sh").read())
+
+def fail(msg):
+    sys.stderr.write("FAIL: " + msg + " (#183)\n")
+    sys.exit(1)
+
+def at(haystack, needle, what, start=0):
+    i = haystack.find(needle, start)
+    if i < 0:
+        fail(what + "\nexpected to find, verbatim:\n  " + needle)
+    return i
+
+def section(start_needle, end_needle, what):
+    a = at(wf, start_needle, what)
+    b = at(wf, end_needle, what, a + len(start_needle))
+    return wf[a:b]
+
+# 1. The trigger, inside on: (on: runs up to the first top-level key after it).
+on_block = section("\non:\n", "\nconcurrency:\n", "the on: block must be followed by the workflow-level concurrency:")
+at(on_block, "\n  schedule:\n    - cron: '", "the hourly schedule: trigger must sit inside on:, or a PWA-only change never builds")
+at(on_block, "\n  workflow_dispatch:\n", "workflow_dispatch must stay a trigger (the manual override of every skip)")
+at(on_block, "\n  push:\n", "push to main must stay a trigger")
+# Workflow-level, before jobs:: decide has to run after the build ahead of it recorded.
+at(wf, "\nconcurrency:\n  group: testflight\n  cancel-in-progress: false\n", "concurrency must stay at workflow level, one group, no cancelling")
+if "concurrency:" in wf[wf.index("\njobs:\n"):]:
+    fail("concurrency moved under jobs:; a tick during a build would then find no record for the pair being built and queue a duplicate")
+print("PASS: testflight.yml runs on an hourly schedule inside on:, alongside push and workflow_dispatch, under one workflow-level concurrency group (#183)")
+
+# 2. The decision's wiring: job output <- step id decide <- the script <- GITHUB_OUTPUT.
+decide = section("\n  decide:\n", "\n  release:\n", "a decide job must come before the release job")
+at(decide, "\n      build: ${{ steps.decide.outputs.build }}\n", "decide's build output must read the decide step's output")
+step_at = at(decide, "\n        id: decide\n", "the decide job needs a step with id: decide")
+step_end = decide.find("\n      - ", step_at)
+step = decide[step_at:step_end if step_end >= 0 else len(decide)]
+at(step, 'scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$pwa_sha" "$built" "$failed" >> "$GITHUB_OUTPUT"',
+   "the id: decide step must feed the schedule case to testflight-decide.sh and append its answer to GITHUB_OUTPUT")
+at(step, 'scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"',
+   "the id: decide step must answer push and dispatch through the script too")
+guard_at = at(step, 'if [ "$GITHUB_EVENT_NAME" != schedule ]; then', "decide must branch on the event before any API call")
+api_at = at(step, "gh api", "decide must look the pair up with gh api")
+if not guard_at < api_at:
+    fail("decide calls an API before its non-schedule exit; a transient API error would then skip a push build")
+# The two ends of each record name: the lookup here, the producers in release.
+at(step, 'pair="$GITHUB_SHA-$pwa_sha"', "the lookup key must be the dobby-ios and PWA pair")
+at(step, 'actions/artifacts?name=$1', "records must be looked up by exact name, not by listing")
+at(step, 'live "testflight-$pair"', "decide must look up the success record by the pair")
+at(step, 'live "testflight-failed-$pair"', "decide must look up the failure marker by the pair")
+print("PASS: the decide job's build output comes from the id: decide step, which calls testflight-decide.sh into GITHUB_OUTPUT and reads the APIs only on schedule, by exact pair name (#183)")
+
+# 3. The gate, at job level: needs and if between release: and that job's steps:.
+rel_at = at(wf, "\n  release:\n", "the release job is missing")
+rel_steps_at = at(wf, "\n    steps:\n", "the release job has no steps:", rel_at)
+head = wf[rel_at:rel_steps_at]
+at(head, "\n    needs: decide\n", "release must need decide at job level")
+at(head, "\n    if: needs.decide.outputs.build == 'true'\n", "release must be gated on decide's build output at job level, not on a step")
+release = wf[rel_at:]
+print("PASS: the release job needs decide and is gated on its build output at job level, before steps: (#183)")
+
+# 4. What the build ships, and in what order. The record after the upload is the
+#    only-on-success property, so it is pinned by index, not by presence.
+checkout = section("name: Check out dobby (PWA app shell source)", "\n      - name: ", "the PWA checkout step is missing")
+if "ref:" in checkout:
+    fail("the PWA checkout has a ref:; a sha ref detaches it and prints a private commit subject into this public log")
+names = [
+    ("name: Verify the app shell was bundled", "verify"),
+    ("name: Export .ipa", "export"),
+    ("name: Upload to TestFlight", "upload"),
+    ("name: Record the pair this build shipped", "record"),
+    ("name: ${{ steps.record.outputs.name }}", "record upload-artifact"),
+    ("name: Revoke this run's certificate", "revoke"),
+    ("name: Mark this pair failed", "failure marker"),
+    ("name: ${{ steps.failed.outputs.name }}", "failure marker upload-artifact"),
+]
+idx = [at(release, n, "the release job lost its " + label + " step") for n, label in names]
+for (_, la), (_, lb), ia, ib in zip(names, names[1:], idx, idx[1:]):
+    if not ia < ib:
+        fail("the %s step must come before the %s step in the release job" % (la, lb))
+verify = release[idx[0]:idx[1]]
+at(verify, "Shell/pwa-commit.txt", "the shell guard must read the archive's pwa-commit.txt")
+at(verify, "checked_out=$(git -C ../dobby rev-parse HEAD)", "the shell guard must compare against the commit the PWA checkout landed on")
+at(verify, 'if [ "$bundled_sha" != "$checked_out" ]; then', "the shell guard must refuse an archive whose record is not the checked-out commit")
+record = release[idx[3]:idx[4]]
+at(record, 'echo "name=testflight-$(git rev-parse HEAD)-$(cat "$RUNNER_TEMP/pwa-record/pwa-commit.txt")" >> "$GITHUB_OUTPUT"',
+   "the record must be named for the pair the archive carries, testflight-<dobby-ios>-<pwa>")
+at(release[idx[4]:idx[5]], "retention-days: 90", "the success record keeps 90 days")
+failed = release[idx[6]:]
+at(failed[:failed.index("run: |")], "if: failure()", "the failure marker runs only when the job failed")
+at(failed, 'echo "name=testflight-failed-$(git rev-parse HEAD)-$pwa" >> "$GITHUB_OUTPUT"', "the failure marker must be named for the pair")
+at(release[idx[6]:], "\n        if: failure() && steps.failed.outputs.name != ''\n        with:\n          name: ${{ steps.failed.outputs.name }}\n",
+   "the failure marker upload runs only on failure, and only when it has a name")
+at(release[idx[7]:], "retention-days: 1", "the failure marker lives one day, so a broken pair retries daily")
+# Producer: the record is written into the shell AFTER the wipe, or the wipe deletes it.
+wipe_at = at(sh, "shutil.rmtree(shell_dir", "copy-app-shell.sh no longer wipes the shell dir first")
+write_at = at(sh, 'open(os.path.join(shell_dir, "pwa-commit.txt"), "w")', "copy-app-shell.sh must write Shell/pwa-commit.txt")
+at(sh, '["git", "-C", public_dir, "rev-parse", "HEAD"]', "pwa-commit.txt must be the PWA checkout's HEAD")
+if not wipe_at < write_at:
+    fail("copy-app-shell.sh writes pwa-commit.txt before it wipes the shell dir, so no archive carries it")
+print("PASS: the archive carries the PWA commit it was built from, the guard checks it against the checkout (no ref: on it), and the pair is recorded only after the TestFlight upload, or marked failed for a day (#183)")
+
+# 5. Behaviour: the script itself, every case the workflow can feed it.
+A, B = "a" * 40, "b" * 40
+cases = [
+    (["push"], 0, "build=true"),
+    (["workflow_dispatch"], 0, "build=true"),
+    (["push", A, B, "1", "1"], 0, "build=true"),
+    (["schedule", A, B, "1", "0"], 0, "build=false"),
+    (["schedule", A, B, "0", "0"], 0, "build=true"),
+    (["schedule", A, B, "0", "1"], 0, "build=false"),
+    (["schedule", A, B, "2", "1"], 0, "build=false"),
+    (["schedule", A, "not-a-sha", "0", "0"], 1, None),
+    (["schedule", "", B, "0", "0"], 1, None),
+    (["schedule", A, B, "", "0"], 1, None),
+]
+for args, code, want in cases:
+    r = subprocess.run(["bash", "scripts/testflight-decide.sh"] + args, capture_output=True, text=True)
+    lines = r.stdout.splitlines()
+    if r.returncode != code or (want and want not in lines):
+        fail("testflight-decide.sh %s: exit %d, stdout %r; expected exit %d with %r" % (" ".join(args), r.returncode, r.stdout, code, want))
+    if want and args[0] == "schedule" and ("pwa_sha=" + B) not in lines:
+        fail("testflight-decide.sh %s must output pwa_sha for the failure marker's fallback" % " ".join(args))
+print("PASS: testflight-decide.sh builds on push and dispatch, and on schedule only for a pair with no record and no failure marker, refusing a non-sha head or non-numeric count (%d cases) (#183)" % len(cases))
+FOLLOWPWAPY
+
+# ---------------------------------------------------------------------------
 # #158 — the Apple bridge's TWO name seams, neither of which anything checked.
 #
 # `window.Dobby` is a JavaScript object literal living inside a Swift string

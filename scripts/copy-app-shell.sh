@@ -45,7 +45,7 @@ if [ ! -d "$PUBLIC_DIR" ]; then
 fi
 
 /usr/bin/python3 - "$PUBLIC_DIR" "$SHELL_DIR" <<'PY'
-import os, re, shutil, sys
+import os, re, shutil, subprocess, sys
 
 public_dir, shell_dir = sys.argv[1], sys.argv[2]
 sw_js = os.path.join(public_dir, "sw.js")
@@ -103,5 +103,13 @@ for _, relative, source in resolved:
     target = os.path.join(shell_dir, relative)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     shutil.copyfile(source, target)
+# #183: the PWA commit these bytes came from. testflight.yml refuses an archive whose
+# record disagrees with the commit it checked out, and uploads it as the record the next
+# scheduled run compares PWA main against. Not a checkout (a bare DOBBY_PUBLIC_DIR): no
+# record, which only a local build can be.
+head = subprocess.run(["git", "-C", public_dir, "rev-parse", "HEAD"], capture_output=True, text=True)
+if head.returncode == 0:
+    with open(os.path.join(shell_dir, "pwa-commit.txt"), "w") as f:
+        f.write(head.stdout.strip() + "\n")
 print(f"copy-app-shell: {len(resolved)} APP_SHELL files from {public_dir} -> {shell_dir}")
 PY
