@@ -92,16 +92,42 @@ for name, (imports, needles, allowed) in reads.items():
         if not l.lstrip().startswith("#") and rx.search(l) and l not in needles and l not in allowed:
             fail("%s reads a file outside its pinned stripped reads: %r" % (name, l))
 # ORDER: the JS strip sits between the literal's extraction and the member regex that reads it,
-# and nothing re-assigns the literal after it.
-for name, extract, strip, reader in [
-        ("PIGATEPY", "literal = inject[locate(inject, anchor", "literal = strip_js(literal)", "for name, pattern in members.items():"),
-        ("BRIDGENAMESPY", "end = inject.index(", "literal = strip_js(inject[start:end])", "for line in literal.splitlines():")]:
+# the reader line itself is pinned (its argument is the stripped literal, #194 review), and
+# nothing re-assigns the literal after it. Every line after the strip that carries the block's
+# member-regex signature must be that pinned reader, and no line after the strip may hand the
+# raw inject to a member regex. Ceiling: textual; a member regex spelled without the signature
+# (a new variable, re.compile(...).findall(...) on another name) is not seen.
+for name, extract, strip, reader, sigs in [
+        ("PIGATEPY", "literal = inject[locate(inject, anchor", "literal = strip_js(literal)",
+         ["    n = len(re.findall(pattern, literal, re.M))"], [r"\bpattern\b"]),
+        ("BRIDGENAMESPY", "end = inject.index(", "literal = strip_js(inject[start:end])",
+         ["for line in literal.splitlines():",
+          r'    m = re.match(r"\s{12}([A-Za-z_][A-Za-z0-9_]*)\s*:", line)'],
+         [r"\.splitlines\(\)", r're\.\w+\(r"\\s\{12\}']),
+]:
     body = blocks[name][0].split("\n")
-    at = [next((i for i, l in enumerate(body) if l.startswith(s)), -1) for s in (extract, strip, reader)]
-    if not 0 <= at[0] < at[1] < at[2]:
-        fail("%s no longer strips the window.Dobby literal's JS comments after extracting it and before "
-             "its member regex reads it" % name)
-    if [i for i, l in enumerate(body) if re.match(r"literal\s*=", l) and i > at[1]]:
+    ex = next((i for i, l in enumerate(body) if l.startswith(extract)), -1)
+    st = next((i for i, l in enumerate(body) if l == strip), -1)
+    if not 0 <= ex < st:
+        fail("%s no longer strips the window.Dobby literal's JS comments right after extracting it" % name)
+    at = []
+    for r in reader:
+        hits = [i for i, l in enumerate(body) if l == r]
+        if len(hits) != 1 or hits[0] < st:
+            fail("%s: the member reader %r must appear exactly once, after the JS strip (found at %s)"
+                 % (name, r, hits))
+        at.append(hits[0])
+    if at != sorted(at) or at[-1] - at[0] != len(at) - 1:
+        fail("%s: the member reader lines %r must stay consecutive and in order" % (name, reader))
+    for i, l in enumerate(body[st + 1:], st + 1):
+        if l.lstrip().startswith("#") or i in at:
+            continue
+        if any(re.search(s, l) for s in sigs) and ("literal" in l or "inject" in l):
+            fail("%s: a member regex after the JS strip reads something other than the pinned reader: %r"
+                 % (name, l))
+        if "inject" in l and any(re.search(s, l) for s in sigs + [r"\bmembers\b"]):
+            fail("%s hands the raw inject to a member regex after the JS strip: %r" % (name, l))
+    if [i for i, l in enumerate(body) if re.match(r"literal\s*=", l) and i > st]:
         fail("%s re-assigns the window.Dobby literal after its JS comments were stripped" % name)
 for name, bodies in blocks.items():
     for body in bodies:
