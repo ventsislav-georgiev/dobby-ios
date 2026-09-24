@@ -1367,6 +1367,8 @@ api_at = at(step, "gh api", "decide must look the pair up with gh api")
 if not guard_at < api_at:
     fail("decide calls an API before its non-schedule exit; a transient API error would then skip a push build")
 # The two ends of each record name: the lookup here, the producers in release.
+at(step, 'gh api repos/ventsislav-georgiev/bookplay/commits/main --jq .sha)',
+   "decide must reduce the PWA commit lookup to its sha; the whole commit JSON carries the private message and author")
 at(step, 'pair="$GITHUB_SHA-$pwa_sha"', "the lookup key must be the dobby-ios and PWA pair")
 at(step, 'actions/artifacts?name=$1', "records must be looked up by exact name, not by listing")
 at(step, 'live "testflight-$pair"', "decide must look up the success record by the pair")
@@ -1389,16 +1391,17 @@ if "ref:" in checkout:
     fail("the PWA checkout has a ref:; a sha ref detaches it and prints a private commit subject into this public log")
 if "fetch-depth" in checkout:
     fail("the PWA checkout sets fetch-depth; history is never needed, and a deeper fetch only widens what a later step could print")
-# The subject can leak through any step, not only through the checkout: no git command
-# in this public workflow may read history, and every git read of the PWA checkout is a
-# bare rev-parse HEAD (a sha, never a subject).
+# The subject can leak through any step, not only through the checkout, and a deny-list
+# of history readers never ends (rev-list --format, branch -v, checkout <sha>, reset
+# --hard all print a subject). So an allow-list: every git in this public workflow is a
+# bare rev-parse HEAD of this checkout or of the PWA checkout, a sha and nothing else.
+# A new git command is a deliberate edit to this list, never a silent pass.
 import re
-reader = re.search(r"\bgit\s+(?:-C\s+\S+\s+)?(log|show|shortlog|reflog|cat-file|describe|whatchanged|for-each-ref)\b", wf)
-if reader:
-    fail("the workflow runs git %s, which can print a private PWA commit subject into this public log" % reader.group(1))
-for m in re.finditer(r"\bgit\s+-C\s+(\S+)\s+(.*)", wf):
-    if "dobby-ios" not in m.group(1) and not m.group(2).startswith("rev-parse HEAD"):
-        fail("a git read of the PWA checkout is not a bare rev-parse HEAD: git -C %s %s" % (m.group(1), m.group(2)))
+allowed = re.compile(r"git (?:-C \.\./dobby )?rev-parse HEAD(?:\)| 2>/dev/null \|\| true\))")
+for m in re.finditer(r"\bgit\b", wf):
+    if not allowed.match(wf, m.start()):
+        line = wf[m.start():wf.find("\n", m.start())]
+        fail("the workflow runs a git command outside the allow-list (bare rev-parse HEAD only), which can print a private PWA commit subject into this public log; widen the list on purpose if it is needed: " + line[:80])
 names = [
     ("name: Verify the app shell was bundled", "verify"),
     ("name: Export .ipa", "export"),
@@ -1451,6 +1454,7 @@ cases = [
     (["schedule", A, B, "0", "1"], 0, "build=false"),
     (["schedule", A, B, "2", "1"], 0, "build=false"),
     (["schedule", A, "not-a-sha", "0", "0"], 1, None),
+    (["schedule", A, '{"sha":"%s","commit":{"message":"private subject"}}' % B, "0", "0"], 1, None),
     (["schedule", "", B, "0", "0"], 1, None),
     (["schedule", A, B, "", "0"], 1, None),
 ]
@@ -1459,6 +1463,8 @@ for args, code, want in cases:
     lines = r.stdout.splitlines()
     if r.returncode != code or (want and want not in lines):
         fail("testflight-decide.sh %s: exit %d, stdout %r; expected exit %d with %r" % (" ".join(args), r.returncode, r.stdout, code, want))
+    if code and args[2:3] and args[2] not in ("", B) and args[2] in r.stdout + r.stderr:
+        fail("testflight-decide.sh %s echoes the rejected value; on a broken lookup that is the private commit JSON" % " ".join(args))
     if want and args[0] == "schedule" and ("pwa_sha=" + B) not in lines:
         fail("testflight-decide.sh %s must output pwa_sha for the failure marker's fallback" % " ".join(args))
 print("PASS: testflight-decide.sh builds on push and dispatch, and on schedule only for a pair with no record and no failure marker, refusing a non-sha head or non-numeric count (%d cases) (#183)" % len(cases))
