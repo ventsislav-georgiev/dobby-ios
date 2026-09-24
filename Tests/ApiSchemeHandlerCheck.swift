@@ -32,6 +32,7 @@ enum ApiSchemeHandlerCheck {
         settingsPatchIsRefusedWhenItIsNotAnObject()
         settingsQueueAccumulatesPatchesOnly()
         settingsPushOutcomeRule()
+        presenceFlags()
         print("ApiSchemeHandlerCheck: all checks passed")
     }
 
@@ -129,12 +130,20 @@ enum ApiSchemeHandlerCheck {
 
         var fetches = 0
         let hit = ApiSchemeHandler.settingsOutcome(mirror: mirrored) { fetches += 1; return fresh }
-        check(hit.status == 200 && hit.body == mirrored, "a mirrored body is answered as-is")
+        // #184: as stored plus the has* flags derived from it, never the bytes alone —
+        // the fixture has no flag, so a hit answered verbatim reads Not configured.
+        check(hit.status == 200 && hit.body == ApiSchemeHandler.withPresenceFlags(mirrored),
+              "a mirrored body is answered as stored plus its derived has* flags")
+        check(object(hit.body)["hasPremiumizeApiKey"] as? Bool == true,
+              "a mirror hit answered a saved premiumizeApiKey without hasPremiumizeApiKey true")
         check(!hit.store, "a mirror hit does not rewrite the mirror")
         check(fetches == 0, "a mirror hit never waits on the Pi")
 
         let cold = ApiSchemeHandler.settingsOutcome(mirror: nil) { fetches += 1; return fresh }
-        check(cold.status == 200 && cold.body == fresh, "an empty mirror waits on the Pi")
+        check(cold.status == 200 && cold.body == ApiSchemeHandler.withPresenceFlags(fresh),
+              "an empty mirror waits on the Pi")
+        check(object(cold.body)["hasPremiumizeApiKey"] as? Bool == true,
+              "the Pi-fetched answer is not run through the has* derivation")
         check(cold.store, "the fetched body becomes the mirror")
         check(fetches == 1, "the empty mirror is the only case that fetches")
 
@@ -143,7 +152,10 @@ enum ApiSchemeHandlerCheck {
         check(!dead.store, "a 503 body is never mirrored")
 
         let empty = ApiSchemeHandler.settingsOutcome(mirror: Data()) { fresh }
-        check(empty.status == 200 && empty.body == fresh, "an empty mirror entry counts as no mirror")
+        check(empty.status == 200 && empty.body == ApiSchemeHandler.withPresenceFlags(fresh),
+              "an empty mirror entry counts as no mirror")
+        check(dead.body == Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8),
+              "the 503 body is not a settings document and gains no has* flag")
     }
 
     // MARK: the JSON-null trap
@@ -553,5 +565,77 @@ enum ApiSchemeHandlerCheck {
             check(ApiSchemeHandler.pushOutcome(status: held) == .held,
                   "\(held.map(String.init) ?? "no answer") did not hold the queued patch")
         }
+    }
+
+    // MARK: #184 — the has* flags the Configured badge reads
+
+    /// The page draws every Configured badge from a has* flag and never from the
+    /// field, and only the Pi's GET computes those flags. A document written on this
+    /// device carries none (or a stale one from the last pull), so the rule is
+    /// re-derived on every answer. Fixture values are placeholders.
+    static func presenceFlags() {
+        let keys = ApiSchemeHandler.presenceFlaggedKeys
+        check(keys == ["imdbAuthToken", "premiumizeApiKey", "openSubtitlesUsername",
+                       "openSubtitlesPassword", "subdlApiKey", "subsourceApiKey"],
+              "presenceFlaggedKeys is not the six secrets the Pi's GET flags")
+        check(Set(keys).isSubset(of: Set(ApiSchemeHandler.settingsNullKeys)),
+              "a flagged key is not a seed key, so a seeded document could never derive its flag")
+        check(ApiSchemeHandler.presenceFlag("premiumizeApiKey") == "hasPremiumizeApiKey",
+              "presenceFlag does not follow the server's pairing rule")
+
+        func flags(_ json: String) -> [String: Any] {
+            object(ApiSchemeHandler.withPresenceFlags(Data(json.utf8)))
+        }
+
+        // Every flagged key, set alone, flips exactly its own flag.
+        for set in keys {
+            let doc = "{" + keys.map { "\"\($0)\":" + ($0 == set ? "\"fixture\"" : "null") }
+                .joined(separator: ",") + "}"
+            let shaped = flags(doc)
+            for key in keys {
+                let flag = ApiSchemeHandler.presenceFlag(key)
+                check(shaped[flag] as? Bool == (key == set), "\(set) set alone: \(flag) is wrong")
+            }
+            check(shaped[set] as? String == "fixture", "\(set) lost its value on the way through")
+        }
+
+        // An empty string is not configured, and a stale true is corrected, not kept.
+        let emptied = flags(#"{"premiumizeApiKey":"","hasPremiumizeApiKey":true}"#)
+        check(emptied["hasPremiumizeApiKey"] as? Bool == false,
+              "an empty premiumizeApiKey answered hasPremiumizeApiKey true")
+        let cleared = flags(#"{"imdbAuthToken":null,"hasImdbAuthToken":true}"#)
+        check(cleared["hasImdbAuthToken"] as? Bool == false, "a cleared imdbAuthToken kept a stale true flag")
+        let stale = flags(#"{"subdlApiKey":"fixture","hasSubdlApiKey":false}"#)
+        check(stale["hasSubdlApiKey"] as? Bool == true, "a saved subdlApiKey kept a stale false flag")
+        let number = flags(#"{"subsourceApiKey":7}"#)
+        check(number["hasSubsourceApiKey"] as? Bool == false, "a non-string value counted as configured")
+
+        // Absent is not unset: a document without the raw key keeps its flag as sent.
+        let absent = Data(#"{"hasPremiumizeApiKey":true,"a4kDefault":false}"#.utf8)
+        check(ApiSchemeHandler.withPresenceFlags(absent) == absent, "an absent field changed its flag")
+
+        // Nothing to change, or nothing readable: the exact bytes come back.
+        let shaped = Data(#"{"premiumizeApiKey":"fixture","hasPremiumizeApiKey":true}"#.utf8)
+        check(ApiSchemeHandler.withPresenceFlags(shaped) == shaped, "a document already in GET shape was rewritten")
+        for junk in [#"{"premiumizeApiKey":"#, "[]", "null", "", "not json"] {
+            check(ApiSchemeHandler.withPresenceFlags(Data(junk.utf8)) == Data(junk.utf8),
+                  "an unreadable body was not answered as-is: \(junk)")
+        }
+
+        // Every other value survives.
+        let rich = flags(#"{"sourceValueOrder":{"a":["x,y","}"]},"serverAddresses":["h"],"maxSourceSizeGiB":12.5,"a4kDefault":true,"premiumizeApiKey":"k\"q"}"#)
+        check(rich["premiumizeApiKey"] as? String == "k\"q", "an escaped value did not survive")
+        check((rich["sourceValueOrder"] as? [String: Any])?["a"] as? [String] == ["x,y", "}"], "a nested value did not survive")
+        check(rich["serverAddresses"] as? [String] == ["h"], "an array did not survive")
+        check(rich["maxSourceSizeGiB"] as? Double == 12.5, "a number did not survive")
+        check(rich["a4kDefault"] as? Bool == true, "a bool did not survive")
+        check(rich["hasPremiumizeApiKey"] as? Bool == true, "the rich document got no flag")
+
+        // The Pi-less symptom end to end, through the answer rule: seed, one device
+        // write, answered from the mirror.
+        let written = ApiSchemeHandler.mergedSettings(base: nil, patch: Data(#"{"premiumizeApiKey":"fixture"}"#.utf8))!
+        let answered = object(ApiSchemeHandler.settingsOutcome(mirror: written) { nil }.body)
+        check(answered["hasPremiumizeApiKey"] as? Bool == true, "a device-written key answers Not configured")
+        check(answered["hasImdbAuthToken"] as? Bool == false, "a seeded null imdbAuthToken answered without a false flag")
     }
 }

@@ -618,6 +618,144 @@ for later, what in [("refreshing.lock()", "the refresh lock"),
 print("PASS: dobby-api://settings takes a POST, stores the merge before acknowledging it, and a locally-written document is never pulled over (#149)")
 SETTINGSWRITEPY
 
+# #184: the has* flags the Configured badge reads. The rule itself is pinned as values in
+# ApiSchemeHandlerCheck.presenceFlags; these pin where it runs (every 200 settings answer,
+# inside the one function that builds it, before the page is handed the body) and that
+# its key list is the server's. Comments are stripped first, and the stripper is tested.
+python3 - <<'PRESENCEPY'
+import os
+import re
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#184)\n" % msg)
+    sys.exit(1)
+
+def strip_swift(text):
+    out = []
+    for line in text.split("\n"):
+        i, quoted, cut = 0, False, len(line)
+        while i < len(line):
+            c = line[i]
+            if quoted and c == "\\":
+                i += 2
+                continue
+            if c == '"':
+                quoted = not quoted
+            elif not quoted and line.startswith("//", i):
+                cut = i
+                break
+            i += 1
+        kept = line[:cut].rstrip()
+        if kept.strip():
+            out.append(kept)
+    return "\n".join(out) + "\n"
+
+probe = '/// doc withPresenceFlags(mirror)\n    let a = "dobby-api://settings" // withPresenceFlags(x)\n    // withPresenceFlags(y)\n'
+if strip_swift(probe) != '    let a = "dobby-api://settings"\n':
+    fail("the comment stripper is broken: %r" % strip_swift(probe))
+
+src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read())
+
+def body(start, what):
+    if src.count(start) != 1:
+        fail("%s: expected exactly one %r" % (what, start))
+    a = src.index(start)
+    return src[a:src.index("\n    }\n", a)]
+
+outcome = body("static func settingsOutcome(mirror: Data?, fetch: () -> Data?)", "settingsOutcome")
+answers = [l.strip() for l in outcome.split("\n") if "return (200" in l]
+want = ["if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror), false) }",
+        "if let fresh = fetch(), !fresh.isEmpty { return (200, withPresenceFlags(fresh), true) }"]
+if answers != want:
+    fail("settingsOutcome must answer both 200 bodies, mirror hit then Pi fetch, through "
+         "withPresenceFlags; got %r" % answers)
+
+serve = body("private func serveSettings(", "serveSettings")
+responds = [m.start() for m in re.finditer(r"\brespond\(", serve)]
+if len(responds) != 2:
+    fail("serveSettings must answer through exactly two respond( calls (POST ack, GET), found %d" % len(responds))
+ack = serve[responds[0]:serve.index("\n", serve.index("\n", responds[0]) + 1)]
+if 'body: Data("{}".utf8)' not in ack:
+    fail("the POST leg now answers something other than {}; a settings document there needs withPresenceFlags too")
+get_answer = 'respond(task, id, status: outcome.status, contentType: "application/json",\n                body: outcome.body, origin: origin, secret: true,'
+if serve.count(get_answer) != 1 or serve.index(get_answer) != responds[1]:
+    fail("the GET leg must answer outcome.body, as settingsOutcome built it, in its only respond(")
+built = "let outcome = Self.settingsOutcome(mirror: mirror) {"
+if serve.count(built) != 1 or serve.count("outcome =") != 1:
+    fail("serveSettings must build its GET answer with exactly one settingsOutcome call")
+if not serve.index(built) < responds[1]:
+    fail("the GET answer is handed to the task before settingsOutcome derives its flags")
+if "withPresenceFlags(" in serve:
+    fail("serveSettings derives flags itself; the one derivation belongs inside settingsOutcome")
+if src.count("static func withPresenceFlags(") != 1 or src.count("withPresenceFlags(") != 3:
+    fail("withPresenceFlags must be defined once and called only from settingsOutcome's two answers")
+
+m = re.search(r"static let presenceFlaggedKeys = \[(.*?)\]", src, re.S)
+if not m:
+    fail("presenceFlaggedKeys is gone")
+swift_keys = re.findall(r'"(\w+)"', m.group(1))
+
+routes = "../dobby/Sources/BookPlayServer/SettingsRoutes.swift"
+if not os.path.isfile(routes):
+    print("SKIP: no sibling dobby checkout, the has* key list is not compared with the server (#184)")
+else:
+    server_src = strip_swift(open(routes).read())
+    get = server_src[server_src.index('router.get("api/settings")'):server_src.index('router.post("api/settings")')]
+    server = dict(re.findall(r"(has\w+):\s*settings\.(\w+)\?\.isEmpty == false", get))
+    if not server:
+        fail("found no has* in the server's GET route; the pattern no longer matches the source")
+    if len(server) != len(re.findall(r"\bhas[A-Z]\w*:", get)):
+        fail("a has* line in the server's GET route is not one this guard understands")
+    # The rule re-derives each flag from the raw field, so it is only right while the GET
+    # sends that field unmasked: a server that masked a secret but kept computing its flag
+    # from the real value would flip every Configured badge on the mirror path.
+    for k in swift_keys:
+        if get.count("%s: settings.%s," % (k, k)) != 1:
+            fail("the server's GET no longer passes %s: settings.%s verbatim; re-deriving has* from a masked field would read Not configured" % (k, k))
+    ours = {"has" + k[0].upper() + k[1:]: k for k in swift_keys}
+    if len(ours) != len(swift_keys) or ours != server:
+        fail("presenceFlaggedKeys %r is not the server's has* family %r" % (sorted(swift_keys), sorted(server.values())))
+    print("PASS: presenceFlaggedKeys equals the %d has* flags the server's GET computes (#184)" % len(server))
+
+# The simulator seam's byte-exact Keychain backup copies secrets into sibling items, so it
+# must never exist in a Release build: both definitions sit inside one #if DEBUG block,
+# and nothing outside a #if DEBUG block calls them.
+def in_debug(text):
+    """Per line: inside the #if DEBUG branch itself (not its #else/#elseif), at any depth."""
+    stack, flags = [], []
+    for line in text.split("\n"):
+        t = line.strip()
+        if t.startswith("#if "):
+            stack.append(t == "#if DEBUG")
+        elif t.startswith("#elseif") or t == "#else":
+            if stack:
+                stack[-1] = False
+        elif t == "#endif":
+            if stack:
+                stack.pop()
+        flags.append(any(stack))
+    return flags
+
+def line_of(text, offset):
+    return text.count("\n", 0, offset)
+
+src_debug = in_debug(src)
+for name in ("static func selfTestBackup()", "static func selfTestRestore()"):
+    if src.count(name) != 1:
+        fail("expected exactly one %r in ApiSchemeHandler.swift" % name)
+    if not src_debug[line_of(src, src.index(name))]:
+        fail("%s is outside #if DEBUG; the seam's Keychain backup would ship in Release" % name)
+for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swift"):
+    text = strip_swift(open(path).read())
+    flags = in_debug(text)
+    for m in re.finditer(r"\bselfTest(Backup|Restore)\(\)", text):
+        if not flags[line_of(text, m.start())]:
+            fail("%s reaches selfTest%s() outside #if DEBUG" % (path, m.group(1)))
+
+print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
+PRESENCEPY
+
 python3 - <<'TIMELABELWIDTHPY'
 import sys
 

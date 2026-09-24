@@ -252,10 +252,63 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// A mirrored body answers on the spot and `fetch` is never called — the read
     /// the page makes at boot must not hold on a slow-but-reachable Pi (#044). Only
     /// an empty mirror waits, and a cold start with the Pi down has nothing to say.
+    ///
+    /// #184: both 200 bodies go through `withPresenceFlags` here, so there is no settings
+    /// document `serveSettings` can hand the page without its has* flags re-derived. The
+    /// mirror hit is the one that needs it; the Pi's own body already carries the flags it
+    /// computed, and passes through unchanged.
     static func settingsOutcome(mirror: Data?, fetch: () -> Data?) -> (status: Int, body: Data, store: Bool) {
-        if let mirror, !mirror.isEmpty { return (200, mirror, false) }
-        if let fresh = fetch(), !fresh.isEmpty { return (200, fresh, true) }
+        if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror), false) }
+        if let fresh = fetch(), !fresh.isEmpty { return (200, withPresenceFlags(fresh), true) }
         return (503, Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8), false)
+    }
+
+    /// The secrets `GET /api/settings` pairs with a computed has* flag (#184) —
+    /// `SettingsRoutes.swift` in the server repo (dobby), six since #174. Android holds the
+    /// same six in `SettingsMirror.PRESENCE_FLAGGED_KEYS` (dobby-android, #164). run-checks
+    /// reads the server's list out of a sibling dobby checkout and fails on any drift: a
+    /// secret missing here answers with no flag and reads Not configured with the Pi off.
+    static let presenceFlaggedKeys = [
+        "imdbAuthToken",
+        "premiumizeApiKey",
+        "openSubtitlesUsername",
+        "openSubtitlesPassword",
+        "subdlApiKey",
+        "subsourceApiKey",
+    ]
+
+    /// `premiumizeApiKey` -> `hasPremiumizeApiKey`, the server's pairing rule.
+    static func presenceFlag(_ key: String) -> String {
+        "has" + key.prefix(1).uppercased() + key.dropFirst()
+    }
+
+    /// The document with every has* flag re-derived from its own fields (#184).
+    ///
+    /// The page draws each Configured badge from a has* flag and never from the field
+    /// (`js/14-settings.js`), and only the Pi's GET computes those flags as it serves. The
+    /// mirror is also written by this device (`mergedSettings` over the seed, which has no
+    /// flags) and a write lays raw keys over whatever flag the last pull left. So a key saved
+    /// with the Pi off answered with no flag, or a stale one, and read Not configured.
+    ///
+    /// The rule is the server's: has<X> is true exactly when <x> is a non-empty string. A raw
+    /// key the document does not carry leaves its flag alone — absent is not unset. Applied
+    /// where the answer is built rather than where the mirror is written, so a document
+    /// already in the Keychain from an earlier build heals on its next read. Answers `body`
+    /// itself when nothing changes or it is not a JSON object.
+    static func withPresenceFlags(_ body: Data) -> Data {
+        guard var document = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return body }
+        var changed = false
+        for key in presenceFlaggedKeys {
+            guard let value = document[key] else { continue }
+            let configured = (value as? String)?.isEmpty == false
+            let flag = presenceFlag(key)
+            if let existing = document[flag] as? NSNumber,
+               CFGetTypeID(existing) == CFBooleanGetTypeID(), existing.boolValue == configured { continue }
+            document[flag] = configured
+            changed = true
+        }
+        guard changed, let data = try? JSONSerialization.data(withJSONObject: document, options: [.sortedKeys]) else { return body }
+        return data
     }
 
     /// The eight field names `GET /api/settings` always sends as an explicit JSON
@@ -1329,6 +1382,54 @@ enum SettingsMirrorStore {
     static func imdbAuthToken() -> String? {
         imdbAuthToken(from: load())
     }
+
+    #if DEBUG
+    // #184 simulator seam only (`SettingsSelfTest` cred-write / cred-restore): a byte-exact
+    // copy of both items and the ahead bit, held in Keychain items beside them, so a round
+    // that overwrites a configured field puts the device back exactly as found and no value
+    // it held ever leaves the Keychain. Presence bits are not secrets and go to UserDefaults.
+    private static let backupMark = "eu.illegible.dobbyios.api-mirror.selftest184"
+
+    static func selfTestBackup() -> Bool {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        guard UserDefaults.standard.object(forKey: backupMark) == nil else { return false }
+        let mirror = read(baseQuery), pending = read(pendingQuery)
+        // Verified read-back: a backup that did not land must refuse the round, never let it
+        // overwrite a field it cannot put back.
+        for (held, item) in [(mirror, query(account + ".selftest184")), (pending, query(pendingAccount + ".selftest184"))] {
+            guard let held else { continue }
+            write(item, held)
+            guard read(item) == held else { return false }
+        }
+        UserDefaults.standard.set(["mirror": mirror != nil, "pending": pending != nil, "ahead": isAheadOfServer],
+                                  forKey: backupMark)
+        return true
+    }
+
+    /// A summary of booleans only: whether a backup was held and each item now equals it.
+    static func selfTestRestore() -> String {
+        pendingLock.lock(); defer { pendingLock.unlock() }
+        guard let mark = UserDefaults.standard.dictionary(forKey: backupMark) as? [String: Bool] else { return "none held" }
+        var exact: [String] = []
+        for (item, live, key) in [(query(account + ".selftest184"), baseQuery, "mirror"),
+                                  (query(pendingAccount + ".selftest184"), pendingQuery, "pending")] {
+            let held = read(item)
+            if mark[key] != true {
+                SecItemDelete(live as CFDictionary)
+            } else if let held {
+                write(live, held)
+            } else {
+                exact.append("\(key)BackupMissing=true")   // the live item is left as it is
+                continue
+            }
+            exact.append("\(key)Exact=\(read(live) == (mark[key] == true ? held : nil))")
+            SecItemDelete(item as CFDictionary)
+        }
+        UserDefaults.standard.set(mark["ahead"] == true, forKey: aheadKey)
+        UserDefaults.standard.removeObject(forKey: backupMark)
+        return (exact + ["ahead=\(isAheadOfServer)"]).joined(separator: " ")
+    }
+    #endif
 
     /// The JSON-null trap Android hit: since #045 the Pi sends the key with a
     /// literal `null` when it is cleared, which decodes to `NSNull` — `as? String`

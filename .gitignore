@@ -17,6 +17,9 @@ Carthage/Build/
 # Local build output dirs (xcodebuild -derivedDataPath / SYMROOT)
 build/
 build-ios/
+build-ios-debug/
+build-ios-release/
+build-sim/
 build-mac/
 .omc/
 
