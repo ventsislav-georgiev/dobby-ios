@@ -586,16 +586,19 @@ need('            fail(task, id, 405, "Settings mirror takes GET and POST", orig
 need('                fail(task, id, 400, "Settings write needs a JSON object body", origin, secret: true); return',
      "a settings POST with no body, or a body that is not a JSON object, is no longer refused with a 400")
 
-need("            SettingsMirrorStore.save(merged)",
+need("            var stored = SettingsMirrorStore.save(merged)",
      "the settings POST no longer stores the merged document")
-need("            SettingsMirrorStore.markAheadOfServer()",
+need("                SettingsMirrorStore.markAheadOfServer()",
      "the settings POST no longer marks the mirror as ahead of the Pi, so the next background refresh can pull the pre-write body back over it")
 
 # Order is the meaning: the write must be stored and marked before the page is
 # told it succeeded, or a 200 can outlive a failed save.
-save_idx = src.index("            SettingsMirrorStore.save(merged)")
-mark_idx = src.index("            SettingsMirrorStore.markAheadOfServer()")
-ack_idx = src.index("            respond(task, id, status: 200, contentType: \"application/json\",")
+save_idx = src.index("            var stored = SettingsMirrorStore.save(merged)")
+mark_idx = src.index("                SettingsMirrorStore.markAheadOfServer()")
+# #185: the acknowledgement is now the one built from the Keychain status.
+need("            respond(task, id, status: answer.status, contentType: \"application/json\",",
+     "the settings POST no longer answers with the status settingsWriteAnswer built from the Keychain, so a refused save can read as done")
+ack_idx = src.index("            respond(task, id, status: answer.status, contentType: \"application/json\",")
 refuse_idx = src.index('fail(task, id, 400, "Settings write needs a JSON object body"')
 if not (refuse_idx < save_idx < mark_idx < ack_idx):
     sys.stderr.write("FAIL: the settings POST acknowledges the write before storing and marking it, or refuses after storing (#149)\n")
@@ -676,8 +679,10 @@ responds = [m.start() for m in re.finditer(r"\brespond\(", serve)]
 if len(responds) != 2:
     fail("serveSettings must answer through exactly two respond( calls (POST ack, GET), found %d" % len(responds))
 ack = serve[responds[0]:serve.index("\n", serve.index("\n", responds[0]) + 1)]
-if 'body: Data("{}".utf8)' not in ack:
-    fail("the POST leg now answers something other than {}; a settings document there needs withPresenceFlags too")
+# #185: the POST answer is settingsWriteAnswer's, whose only 200 body is {} (pinned as values
+# in ApiSchemeHandlerCheck.settingsWriteAnswerRule and as a line in the #185 block below).
+if "body: answer.body, origin: origin, secret: true," not in ack:
+    fail("the POST leg now answers something other than settingsWriteAnswer's body; a settings document there needs withPresenceFlags too")
 get_answer = 'respond(task, id, status: outcome.status, contentType: "application/json",\n                body: outcome.body, origin: origin, secret: true,'
 if serve.count(get_answer) != 1 or serve.index(get_answer) != responds[1]:
     fail("the GET leg must answer outcome.body, as settingsOutcome built it, in its only respond(")
@@ -755,6 +760,239 @@ for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swi
 
 print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
 PRESENCEPY
+
+# #185: a settings save the Keychain refuses is not answered 200. The decision is pinned as
+# values in ApiSchemeHandlerCheck.settingsWriteAnswerRule; these pin that every Keychain status
+# reaches it (containment) and that it is decided before the page is answered (order), with
+# comments stripped first and the stripper itself tested.
+python3 - <<'KEYCHAINSTATUSPY'
+import os
+import re
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#185)\n" % msg)
+    sys.exit(1)
+
+def strip_swift(text):
+    # // line comments and /* */ block comments, which nest in Swift and may span lines. The
+    # string state is per line (no multi-line literal in the guarded file); the block depth is not.
+    out, depth = [], 0
+    for line in text.split("\n"):
+        i, quoted, kept = 0, False, []
+        while i < len(line):
+            if depth:
+                if line.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif line.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+                continue
+            c = line[i]
+            if quoted and c == "\\":
+                kept.append(line[i:i + 2])
+                i += 2
+                continue
+            if c == '"':
+                quoted = not quoted
+            elif not quoted and line.startswith("//", i):
+                break
+            elif not quoted and line.startswith("/*", i):
+                depth, i = 1, i + 2
+                continue
+            kept.append(c)
+            i += 1
+        kept = "".join(kept).rstrip()
+        if kept.strip():
+            out.append(kept)
+    return "\n".join(out) + "\n"
+
+probe = ('/// doc return added\n        let added = SecItemAdd(x) // return errSecSuccess\n'
+         '        // stored = SettingsMirrorStore.queuePatch(patch)\n        log.error("a // b \\(added)")\n'
+         '        /* let added = SecItemAdd(y)\n           /* nested */ SecItemDelete(base as CFDictionary)\n'
+         '        */ let s = "/* kept */" /* gone */\n        /** doc SecItemDelete(z) */\n'
+         '        /* a // */ let t = 1\n')
+if strip_swift(probe) != ('        let added = SecItemAdd(x)\n        log.error("a // b \\(added)")\n'
+                          ' let s = "/* kept */"\n         let t = 1\n'):
+    fail("the comment stripper is broken: %r" % strip_swift(probe))
+if "\"\"\"" in open("Dobby/Web/ApiSchemeHandler.swift").read():
+    fail("ApiSchemeHandler.swift gained a multi-line string literal, which this stripper reads line by line")
+
+src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read())
+
+def body(scope, start, what):
+    if scope.count(start) != 1:
+        fail("%s: expected exactly one %r" % (what, start))
+    a = scope.index(start)
+    return scope[a:scope.index("\n    }\n", a)]
+
+def lines(text):
+    return [l.strip() for l in text.split("\n")]
+
+store = src[src.index("enum SettingsMirrorStore {"):]
+
+# 1. The one Keychain write: both calls captured, and the function answers with them.
+for call in ("SecItemUpdate(", "SecItemAdd("):
+    if src.count(call) != 1 or store.count(call) != 1:
+        fail("expected exactly one %s, inside SettingsMirrorStore.write" % call)
+write = body(store, "private static func write(_ base: [String: Any], _ body: Data) -> OSStatus {", "write")
+wl = lines(write)
+for need in ["let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)",
+             "if updated == errSecSuccess { return updated }",
+             "let added = SecItemAdd(insert as CFDictionary, nil)"]:
+    if need not in wl:
+        fail("SettingsMirrorStore.write no longer captures its Keychain status: missing %r" % need)
+returns = [l for l in wl if re.search(r"\breturn\b", l)]
+if returns != ["guard !body.isEmpty else { return errSecParam }",
+               "if updated == errSecSuccess { return updated }",
+               "return updated",
+               "return added"]:
+    fail("SettingsMirrorStore.write must return errSecParam for an empty body, the update's status "
+         "on success or on any refusal but not-found, and otherwise the add's, nothing else; got %r" % returns)
+if wl.index("let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)") > wl.index("if updated == errSecSuccess { return updated }") \
+        or wl.index("let added = SecItemAdd(insert as CFDictionary, nil)") > wl.index("return added"):
+    fail("SettingsMirrorStore.write returns a status before the call that produces it")
+# Round 2: the add is reached only when the update found no item, and nothing is deleted first.
+# Any other refusal leaves the item as it was: delete-then-add on, say, a locked device lost the
+# whole mirror (or a queued patch answered 200 earlier) when the add was refused too.
+if "SecItemDelete(" in write:
+    fail("SettingsMirrorStore.write deletes the item: a refused add after it destroys the only good copy")
+gate = ["let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)",
+        "if updated == errSecSuccess { return updated }",
+        "guard updated == errSecItemNotFound else {",
+        'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
+        "return updated",
+        "}",
+        "var insert = base",
+        "insert.merge(attributes) { _, new in new }",
+        "let added = SecItemAdd(insert as CFDictionary, nil)",
+        'if added != errSecSuccess { log.error("keychain write failed: OSStatus \\(added, privacy: .public)") }',
+        "return added"]
+at = wl.index(gate[0])
+if wl[at:] != gate:
+    fail("SettingsMirrorStore.write must be, from the update on, exactly: update, success return, "
+         "the errSecItemNotFound guard returning (and logging) any other status, then the add; got %r" % wl[at:])
+
+# 2. Every write's status is used. Only the two keep-going mirror saves may discard it, only the
+#    DEBUG restore (verified by read-back) may discard write's, and the POST keeps both.
+if re.search(r"^\s*write\(", store, re.M) or re.search(r"^\s*SettingsMirrorStore\.(save|queuePatch)\(", src, re.M):
+    fail("a Keychain write is called as a bare statement, its status dropped")
+if "static func save(_ body: Data) -> OSStatus { write(baseQuery, body) }" not in lines(store):
+    fail("SettingsMirrorStore.save no longer returns write's status")
+queue = body(store, "static func queuePatch(_ patch: Data) -> OSStatus {", "queuePatch")
+ql = lines(queue)
+if "let queued = write(pendingQuery, accumulated)" not in ql or ql[-1] != "return queued" \
+        or [l for l in ql if re.search(r"\breturn\b", l)][-1] != "return queued":
+    fail("queuePatch no longer returns the queue write's status")
+discards = [l for l in lines(src) if l.startswith("_ = ") and ("write(" in l or "save(" in l or "queuePatch(" in l)]
+if sorted(discards) != ["_ = write(baseQuery, previous)", "_ = write(live, held)"]:
+    fail("only the DEBUG restore and the mirror put-back may discard write's status as a statement; got %r" % discards)
+put_back = body(store, "static func restoreMirror(_ previous: Data?) {", "restoreMirror")
+if lines(put_back)[1:] != [
+        "guard let previous else {",
+        "let removed = SecItemDelete(baseQuery as CFDictionary)",
+        'if removed != errSecSuccess { log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)") }',
+        "return",
+        "}",
+        "_ = write(baseQuery, previous)"]:
+    fail("restoreMirror must remove the mirror item when there was none, else write the previous bytes "
+         "back to the mirror item, logging a refused delete; got %r" % lines(put_back)[1:])
+if "_ = write(live, held)" not in lines(body(store, "static func selfTestRestore() -> String {", "selfTestRestore")):
+    fail("the DEBUG restore's discarded write moved")
+if "guard write(item, held) == errSecSuccess, read(item) == held else { return false }" not in lines(store):
+    fail("the DEBUG backup no longer refuses the round on a refused write")
+kept_going = ["if outcome.store { _ = SettingsMirrorStore.save(outcome.body) }",
+              "if let fresh = Self.fetchSettings(from: self.server) { _ = SettingsMirrorStore.save(fresh) }"]
+saves = [l for l in lines(src) if "SettingsMirrorStore.save(" in l]
+if sorted(saves) != sorted(kept_going + ["var stored = SettingsMirrorStore.save(merged)"]):
+    fail("the mirror saves are not exactly the POST's checked one and the two keep-going ones: %r" % saves)
+if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored = SettingsMirrorStore.queuePatch(patch)"]:
+    fail("the queued patch's status no longer reaches the POST answer")
+
+# 3. The POST leg: every status reaches settingsWriteAnswer, which decides before the respond.
+serve = body(src, "private func serveSettings(", "serveSettings")
+post = serve[serve.index('        if method == "POST" {'):serve.index("        let mirror = SettingsMirrorStore.load()")]
+seq = ["            var stored = SettingsMirrorStore.save(merged)",
+       "            if stored == errSecSuccess {",
+       "                SettingsMirrorStore.markAheadOfServer()",
+       "                stored = SettingsMirrorStore.queuePatch(patch)",
+       "                if stored != errSecSuccess { SettingsMirrorStore.restoreMirror(previous) }",
+       "            }",
+       "            let answer = Self.settingsWriteAnswer(stored)",
+       "            status = answer.status",
+       "            length = answer.body.count",
+       '            respond(task, id, status: answer.status, contentType: "application/json",',
+       "                    body: answer.body, origin: origin, secret: true,"]
+at = post.find("\n".join(seq))
+if at < 0:
+    fail("the settings POST no longer runs save, then (only on success) mark, queue and (only on a "
+         "refused queue) put the mirror back, then builds its answer from the status, then responds "
+         "with that answer, as consecutive lines")
+# Round 2: the put-back's bytes are read before the save overwrites them, once, and are the
+# merge base too; the put-back runs once, only inside the refused-queue branch pinned above.
+pl = post.split("\n")
+loads = [i for i, l in enumerate(pl) if "SettingsMirrorStore.load()" in l]
+if [pl[i] for i in loads] != ["            let previous = SettingsMirrorStore.load()"] \
+        or loads[0] > pl.index(seq[0]):
+    fail("the settings POST must read the mirror exactly once, as let previous, before save(merged)")
+if "let merged = Self.mergedSettings(base: previous, patch: patch) else {" not in lines(post):
+    fail("the settings POST no longer merges onto the bytes it would put back")
+if src.count("restoreMirror(") != 2 or post.count("restoreMirror(") != 1 or post.count("previous") != 3:
+    fail("the mirror put-back is reached other than once, from the settings POST's refused-queue branch")
+if len(re.findall(r"\brespond\(", post)) != 1 or post.count("settingsWriteAnswer(") != 1 \
+        or post.count("stored") != 5:
+    fail("the settings POST answers other than once from settingsWriteAnswer(stored), or reads a "
+         "status the answer never sees")
+if re.search(r"status:\s*200|status = 200", post):
+    fail("the settings POST answers a literal 200 again, so a refused save still reads as done")
+
+# 4. The rule itself: only errSecSuccess is a 200, and its body is {}.
+rule = body(src, "static func settingsWriteAnswer(_ stored: OSStatus) -> (status: Int, body: Data) {", "settingsWriteAnswer")
+rl = lines(rule)
+if 'if stored == errSecSuccess { return (200, Data("{}".utf8)) }' not in rl or rule.count("200") != 1:
+    fail("settingsWriteAnswer no longer answers 200 {} for errSecSuccess and only for it")
+
+# 5. Logs: the OSStatus number and nothing else, on every write path the store has.
+logs = re.findall(r"\blog\.\w+\(.*\)", store)
+want = ['log.error("keychain write failed: OSStatus \\(added, privacy: .public)")',
+        'log.error("keychain queue clear failed: OSStatus \\(deleted, privacy: .public)")',
+        'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
+        'log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)")']
+for l in logs:
+    if [m for m in re.findall(r"\\\((.*?)\)", l)
+            if m not in ("%s, privacy: .public" % v for v in ("added", "deleted", "updated", "removed"))]:
+        fail("a SettingsMirrorStore log line interpolates more than the OSStatus: %s" % l)
+if sorted(logs) != sorted(want):
+    fail("the store's log lines are not exactly the two OSStatus lines: %r" % logs)
+if "if added != errSecSuccess { " + want[0] + " }" not in lines(write):
+    fail("write no longer logs a refused add")
+clear = body(store, "static func clearPending(ifStill pushed: Data) {", "clearPending")
+if "let deleted = SecItemDelete(pendingQuery as CFDictionary)" not in lines(clear) \
+        or "if deleted != errSecSuccess { " + want[1] + " }" not in lines(clear):
+    fail("clearPending no longer captures and logs its delete status")
+
+# 6. The consumer end: the page's retry list, transcribed in ApiSchemeHandlerCheck, is the page's.
+check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()
+m = re.search(r"static let pageRetryStatuses = \[([\d, ]+)\]", check_src)
+if not m:
+    fail("ApiSchemeHandlerCheck.pageRetryStatuses is gone")
+ours = [int(x) for x in m.group(1).split(",")]
+page = "../dobby/Sources/BookPlayServer/Public/js/03-storage-net.js"
+if not os.path.isfile(page):
+    print("SKIP: no sibling dobby checkout, the page's retry list is not compared (#185)")
+else:
+    pm = re.findall(r"var retryStatuses = options\.retryStatuses \|\| \[([\d, ]+)\];", open(page).read())
+    if len(pm) != 1:
+        fail("found %d fetchWithRetry retry lists in the page, expected one" % len(pm))
+    if [int(x) for x in pm[0].split(",")] != ours:
+        fail("pageRetryStatuses %r is not the page's fetchWithRetry list %r" % (ours, pm[0]))
+    print("PASS: the transcribed retry list equals the page's fetchWithRetry list (#185)")
+
+print("PASS: every SettingsMirrorStore Keychain write reports its OSStatus, the settings POST answers "
+      "from it before responding (a refused save is a 507, never 200), a refused queue write puts the mirror "
+      "back, a refused update is never followed by a delete, and the logs carry the number only (#185)")
+KEYCHAINSTATUSPY
 
 python3 - <<'TIMELABELWIDTHPY'
 import sys
@@ -940,7 +1178,7 @@ def body_of(signature):
 #    is nothing to push, so the hold never releases and the phone is exactly as
 #    permanently stuck as before. The argument is the raw `patch`, not `merged`:
 #    pushing the merged document would carry the seed's explicit nulls.
-need(src, "            SettingsMirrorStore.queuePatch(patch)",
+need(src, "                stored = SettingsMirrorStore.queuePatch(patch)",
      "the settings POST no longer queues the patch bytes, so a write made with the Pi off "
      "is never pushed and the ahead-of-server hold never releases")
 
@@ -949,9 +1187,9 @@ need(src, "            SettingsMirrorStore.queuePatch(patch)",
 # the hold, and then markAheadOfServer() re-takes a hold with nothing queued behind
 # it — held forever, the exact bug. queuePatch re-takes the hold itself, under the
 # queue's own lock, which is what makes this order the safe one.
-mark_idx = src.index("            SettingsMirrorStore.markAheadOfServer()")
-queue_idx = src.index("            SettingsMirrorStore.queuePatch(patch)")
-ack_idx = src.index('            respond(task, id, status: 200, contentType: "application/json",')
+mark_idx = src.index("                SettingsMirrorStore.markAheadOfServer()")
+queue_idx = src.index("                stored = SettingsMirrorStore.queuePatch(patch)")
+ack_idx = src.index('            respond(task, id, status: answer.status, contentType: "application/json",')
 if not mark_idx < queue_idx < ack_idx:
     fail("the settings POST queues the patch before it marks the mirror ahead, or after it has "
          "already acknowledged the write")
@@ -1038,7 +1276,7 @@ for needle, message in [
      "clearPending no longer takes the queue lock, so it can interleave with a page write"),
     ("        guard read(pendingQuery) == pushed else { return }",
      "clearPending no longer checks that what is queued is still what was pushed"),
-    ("        SecItemDelete(pendingQuery as CFDictionary)", "clearPending no longer removes the queued patch"),
+    ("        let deleted = SecItemDelete(pendingQuery as CFDictionary)", "clearPending no longer removes the queued patch"),
     ("        UserDefaults.standard.set(false, forKey: aheadKey)", "clearPending no longer releases the hold"),
 ]:
     need(clear, needle, message)
@@ -1052,15 +1290,15 @@ if not (clear.index("pendingLock.lock()")
 #    pinned as values in ApiSchemeHandlerCheck; this is its call site, and swapping
 #    it for the seeded merge is green everywhere else while it queues nine keys whose
 #    nulls clear the Pi's two language fields.
-queue_fn = body_of("static func queuePatch(_ patch: Data) {")
+queue_fn = body_of("static func queuePatch(_ patch: Data) -> OSStatus {")
 for needle, message in [
     ("        pendingLock.lock(); defer { pendingLock.unlock() }",
      "queuePatch no longer takes the queue lock, so a drain can clear a patch mid-write"),
-    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return }",
+    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return errSecParam }",
      "queuePatch no longer accumulates through mergedPatch — the seeded merge would queue nine "
      "keys and clear the Pi's language fields, and replacing instead of accumulating would drop "
      "an earlier Pi-less save"),
-    ("        write(pendingQuery, accumulated)", "queuePatch no longer stores the accumulated patch"),
+    ("        let queued = write(pendingQuery, accumulated)", "queuePatch no longer stores the accumulated patch"),
     ("        UserDefaults.standard.set(true, forKey: aheadKey)",
      "queuePatch no longer re-takes the hold under the lock, so a drain landing in the sliver "
      "after markAheadOfServer() leaves a queued patch with the mirror unprotected"),

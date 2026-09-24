@@ -172,13 +172,18 @@ enum SettingsSelfTest {
       if (step === 'cred-write') {
         const bytes = crypto.getRandomValues(new Uint8Array(12));
         removePi();
+        // #185: what saveSettings keys "Settings saved" on — mirroredWrite resolving
+        // ok — or its silent catch when the save was not taken.
+        meta.saveOutcome = 'pending';
         mirroredWrite('/api/settings', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             premiumizeApiKey: PREFIX + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''),
             hasPremiumizeApiKey: false
           })
-        }, fetchWithRetry).catch(() => {});
+        }, fetchWithRetry).then(
+          (r) => { meta.saveOutcome = (r && r.ok ? 'saved ' : 'not-ok ') + (r && r.status); },
+          () => { meta.saveOutcome = 'rejected'; });
         await awaitWrite();
         window.fetch = realFetch;
         await readCred('after');
