@@ -1,5 +1,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The Python blocks import Tests/swift_strip.py; keep them from writing Tests/__pycache__.
+export PYTHONDONTWRITEBYTECODE=1
 
 OUT="$(mktemp -d)/api-scheme-check"
 xcrun swiftc -o "$OUT" \
@@ -624,47 +626,78 @@ SETTINGSWRITEPY
 # #184: the has* flags the Configured badge reads. The rule itself is pinned as values in
 # ApiSchemeHandlerCheck.presenceFlags; these pin where it runs (every 200 settings answer,
 # inside the one function that builds it, before the page is handed the body) and that
-# its key list is the server's. Comments are stripped first, and the stripper is tested.
+# its key list is the server's. Comments are stripped first by the shared, probed stripper.
+#
+# #190: every block that strips Swift comments imports Tests/swift_strip.py, one lexer for
+# // and nested /* */ comments over "...", """...""" and #"..."# literals, whose probe runs on
+# every import. Its standalone run below is the suite's PASS line for the stripper itself.
+python3 Tests/swift_strip.py
+# The wiring: each Swift-stripping block imports the helper and strips through it at its read,
+# and no block that reads Swift grows its own stripper again (a // -only copy passes every pin).
+python3 - <<'SWIFTSTRIPWIRINGPY'
+import re
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#190)\n" % msg)
+    sys.exit(1)
+
+text = open("Tests/run-checks.sh").read()
+blocks = {}
+for name, body in re.findall(r"<<'(\w+)'\n(.*?)\n\1\n", text, re.S):
+    blocks.setdefault(name, []).append(body)
+reads = {
+    "PRESENCEPY": ("strip_swift", ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")',
+                                   "    server_src = strip_swift(open(routes).read(), routes)",
+                                   "    text = strip_swift(open(path).read(), path)"]),
+    "KEYCHAINSTATUSPY": ("strip_swift", ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")']),
+    "SCHEMEMAINPY": ("strip_swift_lines", ["    lines = strip_swift_lines(open(path).read(), path)"]),
+    "PIGATEPY": ("strip_swift", ["        return strip_swift(f.read(), path)"]),
+}
+for name, (fn, needles) in reads.items():
+    if len(blocks.get(name, [])) != 1:
+        fail("expected exactly one %s block in run-checks.sh" % name)
+    body = blocks[name][0].split("\n")
+    if 'sys.path.insert(0, "Tests")' not in body or "from swift_strip import %s" % fn not in body:
+        fail("%s no longer imports %s from Tests/swift_strip.py at top level" % (name, fn))
+    for n in needles:
+        if n not in body:
+            fail("%s no longer strips its Swift read through the shared helper: missing %r" % (name, n))
+for name, bodies in blocks.items():
+    for body in bodies:
+        if ".swift" in body and re.search(r"^\s*(def strip(?!_js\()\w*\(|strip_\w+ = )", body, re.M):
+            fail("%s reads Swift and defines its own stripper; import Tests/swift_strip.py instead" % name)
+first_use = text.index("from swift_strip import")
+if not 0 <= text.find("\npython3 Tests/swift_strip.py\n") < first_use:
+    fail("the standalone probe run of Tests/swift_strip.py is gone or no longer precedes its first import")
+print("PASS: PRESENCEPY, KEYCHAINSTATUSPY, SCHEMEMAINPY and PIGATEPY strip Swift through the one probed "
+      "helper at their reads, and no Swift-reading block defines its own stripper (#190)")
+SWIFTSTRIPWIRINGPY
 python3 - <<'PRESENCEPY'
 import os
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
 
 def fail(msg):
     sys.stderr.write("FAIL: %s (#184)\n" % msg)
     sys.exit(1)
 
-def strip_swift(text):
-    out = []
-    for line in text.split("\n"):
-        i, quoted, cut = 0, False, len(line)
-        while i < len(line):
-            c = line[i]
-            if quoted and c == "\\":
-                i += 2
-                continue
-            if c == '"':
-                quoted = not quoted
-            elif not quoted and line.startswith("//", i):
-                cut = i
-                break
-            i += 1
-        kept = line[:cut].rstrip()
-        if kept.strip():
-            out.append(kept)
-    return "\n".join(out) + "\n"
+def locate(scope, needle, what, start=0):
+    # A missing anchor is a named FAIL, never a ValueError traceback (#190).
+    try:
+        return scope.index(needle, start)
+    except ValueError:
+        fail("%s: anchor %r is missing" % (what, needle))
 
-probe = '/// doc withPresenceFlags(mirror)\n    let a = "dobby-api://settings" // withPresenceFlags(x)\n    // withPresenceFlags(y)\n'
-if strip_swift(probe) != '    let a = "dobby-api://settings"\n':
-    fail("the comment stripper is broken: %r" % strip_swift(probe))
-
-src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read())
+src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")
 
 def body(start, what):
     if src.count(start) != 1:
         fail("%s: expected exactly one %r" % (what, start))
-    a = src.index(start)
-    return src[a:src.index("\n    }\n", a)]
+    a = locate(src, start, what)
+    return src[a:locate(src, "\n    }\n", what + " end", a)]
 
 outcome = body("static func settingsOutcome(mirror: Data?, fetch: () -> Data?)", "settingsOutcome")
 answers = [l.strip() for l in outcome.split("\n") if "return (200" in l]
@@ -678,7 +711,7 @@ serve = body("private func serveSettings(", "serveSettings")
 responds = [m.start() for m in re.finditer(r"\brespond\(", serve)]
 if len(responds) != 2:
     fail("serveSettings must answer through exactly two respond( calls (POST ack, GET), found %d" % len(responds))
-ack = serve[responds[0]:serve.index("\n", serve.index("\n", responds[0]) + 1)]
+ack = serve[responds[0]:locate(serve, "\n", "the POST ack", locate(serve, "\n", "the POST ack", responds[0]) + 1)]
 # #185: the POST answer is settingsWriteAnswer's, whose only 200 body is {} (pinned as values
 # in ApiSchemeHandlerCheck.settingsWriteAnswerRule and as a line in the #185 block below).
 if "body: answer.body, origin: origin, secret: true," not in ack:
@@ -705,8 +738,8 @@ routes = "../dobby/Sources/BookPlayServer/SettingsRoutes.swift"
 if not os.path.isfile(routes):
     print("SKIP: no sibling dobby checkout, the has* key list is not compared with the server (#184)")
 else:
-    server_src = strip_swift(open(routes).read())
-    get = server_src[server_src.index('router.get("api/settings")'):server_src.index('router.post("api/settings")')]
+    server_src = strip_swift(open(routes).read(), routes)
+    get = server_src[locate(server_src, 'router.get("api/settings")', "SettingsRoutes"):locate(server_src, 'router.post("api/settings")', "SettingsRoutes")]
     server = dict(re.findall(r"(has\w+):\s*settings\.(\w+)\?\.isEmpty == false", get))
     if not server:
         fail("found no has* in the server's GET route; the pattern no longer matches the source")
@@ -752,7 +785,7 @@ for name in ("static func selfTestBackup()", "static func selfTestRestore()"):
     if not src_debug[line_of(src, src.index(name))]:
         fail("%s is outside #if DEBUG; the seam's Keychain backup would ship in Release" % name)
 for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swift"):
-    text = strip_swift(open(path).read())
+    text = strip_swift(open(path).read(), path)
     flags = in_debug(text)
     for m in re.finditer(r"\bselfTest(Backup|Restore)\(\)", text):
         if not flags[line_of(text, m.start())]:
@@ -769,68 +802,32 @@ python3 - <<'KEYCHAINSTATUSPY'
 import os
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
 
 def fail(msg):
     sys.stderr.write("FAIL: %s (#185)\n" % msg)
     sys.exit(1)
 
-def strip_swift(text):
-    # // line comments and /* */ block comments, which nest in Swift and may span lines. The
-    # string state is per line (no multi-line literal in the guarded file); the block depth is not.
-    out, depth = [], 0
-    for line in text.split("\n"):
-        i, quoted, kept = 0, False, []
-        while i < len(line):
-            if depth:
-                if line.startswith("/*", i):
-                    depth, i = depth + 1, i + 2
-                elif line.startswith("*/", i):
-                    depth, i = depth - 1, i + 2
-                else:
-                    i += 1
-                continue
-            c = line[i]
-            if quoted and c == "\\":
-                kept.append(line[i:i + 2])
-                i += 2
-                continue
-            if c == '"':
-                quoted = not quoted
-            elif not quoted and line.startswith("//", i):
-                break
-            elif not quoted and line.startswith("/*", i):
-                depth, i = 1, i + 2
-                continue
-            kept.append(c)
-            i += 1
-        kept = "".join(kept).rstrip()
-        if kept.strip():
-            out.append(kept)
-    return "\n".join(out) + "\n"
+def locate(scope, needle, what, start=0):
+    # A missing anchor is a named FAIL, never a ValueError traceback (#190).
+    try:
+        return scope.index(needle, start)
+    except ValueError:
+        fail("%s: anchor %r is missing" % (what, needle))
 
-probe = ('/// doc return added\n        let added = SecItemAdd(x) // return errSecSuccess\n'
-         '        // stored = SettingsMirrorStore.queuePatch(patch)\n        log.error("a // b \\(added)")\n'
-         '        /* let added = SecItemAdd(y)\n           /* nested */ SecItemDelete(base as CFDictionary)\n'
-         '        */ let s = "/* kept */" /* gone */\n        /** doc SecItemDelete(z) */\n'
-         '        /* a // */ let t = 1\n')
-if strip_swift(probe) != ('        let added = SecItemAdd(x)\n        log.error("a // b \\(added)")\n'
-                          ' let s = "/* kept */"\n         let t = 1\n'):
-    fail("the comment stripper is broken: %r" % strip_swift(probe))
-if "\"\"\"" in open("Dobby/Web/ApiSchemeHandler.swift").read():
-    fail("ApiSchemeHandler.swift gained a multi-line string literal, which this stripper reads line by line")
-
-src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read())
+src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")
 
 def body(scope, start, what):
     if scope.count(start) != 1:
         fail("%s: expected exactly one %r" % (what, start))
-    a = scope.index(start)
-    return scope[a:scope.index("\n    }\n", a)]
+    a = locate(scope, start, what)
+    return scope[a:locate(scope, "\n    }\n", what + " end", a)]
 
 def lines(text):
     return [l.strip() for l in text.split("\n")]
 
-store = src[src.index("enum SettingsMirrorStore {"):]
+store = src[locate(src, "enum SettingsMirrorStore {", "SettingsMirrorStore"):]
 
 # 1. The one Keychain write: both calls captured, and the function answers with them.
 for call in ("SecItemUpdate(", "SecItemAdd("):
@@ -850,8 +847,8 @@ if returns != ["guard !body.isEmpty else { return errSecParam }",
                "return added"]:
     fail("SettingsMirrorStore.write must return errSecParam for an empty body, the update's status "
          "on success or on any refusal but not-found, and otherwise the add's, nothing else; got %r" % returns)
-if wl.index("let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)") > wl.index("if updated == errSecSuccess { return updated }") \
-        or wl.index("let added = SecItemAdd(insert as CFDictionary, nil)") > wl.index("return added"):
+if locate(wl, "let updated = SecItemUpdate(base as CFDictionary, attributes as CFDictionary)", "write") > locate(wl, "if updated == errSecSuccess { return updated }", "write") \
+        or locate(wl, "let added = SecItemAdd(insert as CFDictionary, nil)", "write") > locate(wl, "return added", "write"):
     fail("SettingsMirrorStore.write returns a status before the call that produces it")
 # Round 2: the add is reached only when the update found no item, and nothing is deleted first.
 # Any other refusal leaves the item as it was: delete-then-add on, say, a locked device lost the
@@ -869,7 +866,7 @@ gate = ["let updated = SecItemUpdate(base as CFDictionary, attributes as CFDicti
         "let added = SecItemAdd(insert as CFDictionary, nil)",
         'if added != errSecSuccess { log.error("keychain write failed: OSStatus \\(added, privacy: .public)") }',
         "return added"]
-at = wl.index(gate[0])
+at = locate(wl, gate[0], "write")
 if wl[at:] != gate:
     fail("SettingsMirrorStore.write must be, from the update on, exactly: update, success return, "
          "the errSecItemNotFound guard returning (and logging) any other status, then the add; got %r" % wl[at:])
@@ -912,7 +909,7 @@ if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored
 
 # 3. The POST leg: every status reaches settingsWriteAnswer, which decides before the respond.
 serve = body(src, "private func serveSettings(", "serveSettings")
-post = serve[serve.index('        if method == "POST" {'):serve.index("        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()")]
+post = serve[locate(serve, '        if method == "POST" {', "the settings POST"):locate(serve, "        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()", "the settings GET")]
 seq = ["            var stored = mirrorRead",
        "            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }",
        "            if stored == errSecSuccess {",
@@ -938,7 +935,7 @@ pl = post.split("\n")
 loads = [i for i, l in enumerate(pl) if re.search(r"SettingsMirrorStore\.load(WithStatus)?\(\)", l)]
 merge_at = [i for i, l in enumerate(pl) if l.strip() == "let merged = Self.mergedSettings(base: previous, patch: patch) else {"]
 if [pl[i] for i in loads] != ["            let (previous, mirrorRead) = SettingsMirrorStore.loadWithStatus()"] \
-        or len(merge_at) != 1 or not loads[0] < merge_at[0] < pl.index(seq[0]):
+        or len(merge_at) != 1 or not loads[0] < merge_at[0] < locate(pl, seq[0], "the settings POST"):
     fail("the settings POST must read the mirror exactly once, with its status, as let (previous, mirrorRead), "
          "before the merge onto those bytes and before save(merged)")
 if post.count("mirrorRead") != 2:
@@ -1049,7 +1046,7 @@ if dl[1:1 + len(dseq)] != dseq or drain.count("pendingPatch(") != 1 or drain.cou
         or drain.count("pendingRead") != 2 or src.count("releaseHold()") != 2:
     fail("the drain must start from the hold, read the queue with its status, and with no bytes release "
          "the hold only on errSecItemNotFound and return, pushing nothing (#193): %r" % dl[1:1 + len(dseq)])
-get = serve[serve.index("        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()"):]
+get = serve[locate(serve, "        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()", "the settings GET"):]
 gseq = ["        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()",
         '        source = (mirror?.isEmpty == false) ? "mirror" : "network"',
         "        let outcome = Self.settingsOutcome(mirror: mirror) {",
@@ -2180,25 +2177,14 @@ BRIDGENAMESPY
 python3 - <<'SCHEMEMAINPY'
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift_lines
 
 FILES = ["Dobby/Offline/OfflineSchemeHandler.swift", "Dobby/Web/ApiSchemeHandler.swift"]
 # Only the calls made ON a captured `task` value need an enclosing onMain. The
 # `$0.didReceive(…)` form is the closure handed TO send(_:_:_:), which runs it
 # inside onMain — pinning that shape here would forbid the fix.
 CALL = re.compile(r"\btask\.(didReceive|didFinish|didFailWithError)\b")
-
-def strip_comments(text):
-    # A whole-line comment starting at column zero has no space before its "#",
-    # and Swift's is "//" — split on " //" alone and `// task.didFinish()` at
-    # column zero survives, satisfying nothing but reading like a call site.
-    kept = []
-    for line in text.splitlines():
-        s = line.lstrip()
-        if s.startswith("//") or s.startswith("///"):
-            kept.append("")
-            continue
-        kept.append(line.split(" //", 1)[0])
-    return kept
 
 def onmain_ranges(lines):
     """[start, end] line indices of every `onMain {` block body, by brace depth."""
@@ -2219,7 +2205,9 @@ def onmain_ranges(lines):
 problems = []
 pinned = 0
 for path in FILES:
-    lines = strip_comments(open(path).read())
+    # One entry per source line, comments (// and /* */) blanked: the line numbers
+    # below are the file's own (#190 shared stripper).
+    lines = strip_swift_lines(open(path).read(), path)
     body = "\n".join(lines)
 
     if not re.search(r"private func onMain<T>\(_ body: \(\) -> T\) -> T \{", body):
@@ -2374,30 +2362,30 @@ python3 - <<'PIGATEPY'
 import os
 import re
 import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
 
 def fail(msg):
     sys.stderr.write("FAIL: " + msg + " (#181)\n")
     sys.exit(1)
 
-def strip(src):
-    # Line comments only where `//` opens a comment: at a line start or after whitespace.
-    # "https?://" inside a string keeps its slashes (a ':' precedes them).
-    return "\n".join(re.sub(r"(^|\s)//.*", "", l) for l in src.splitlines())
+def locate(scope, needle, what, start=0):
+    # A missing anchor is a named FAIL, never a ValueError traceback (#190).
+    try:
+        return scope.index(needle, start)
+    except ValueError:
+        fail("%s: anchor %r is missing" % (what, needle))
 
-# The stripper is load-bearing for every count below; check it first.
-probe = 'let a = "^https?://x" // gone\n    // whole line\nkeep()'
-if [l.rstrip() for l in strip(probe).splitlines()] != ['let a = "^https?://x"', '', 'keep()']:
-    fail("the comment stripper mangles code or keeps comments: %r" % strip(probe))
-
+# The stripper is load-bearing for every count below; its probe runs on import (#190).
 def read(path):
     with open(path, encoding="utf-8") as f:
-        return strip(f.read())
+        return strip_swift(f.read(), path)
 
 def body(src, signature, label):
     at = src.find(signature)
     if at < 0 or src.count(signature) != 1:
         fail("%s: expected exactly one `%s`, found %d" % (label, signature, src.count(signature)))
-    start = src.index("{", at)
+    start = locate(src, "{", label, at)
     depth = 0
     for i in range(start, len(src)):
         depth += {"{": 1, "}": -1}.get(src[i], 0)
@@ -2421,7 +2409,7 @@ inject = read("Dobby/Web/BridgeInjection.swift")
 anchor = "window.Dobby = {"
 if inject.count(anchor) != 1:
     fail("BridgeInjection.swift must build exactly one `%s` literal" % anchor)
-literal = inject[inject.index(anchor):inject.index("\n          };", inject.index(anchor))]
+literal = inject[locate(inject, anchor, "BridgeInjection"):locate(inject, "\n          };", "the window.Dobby literal end", locate(inject, anchor, "BridgeInjection"))]
 members = {
     "piEnabled": r"^\s{12}piEnabled:\s*function\s*\(\)\s*\{\s*return this\._piEnabled === true;\s*\},$",
     "setPiEnabled": r"^\s{12}setPiEnabled:\s*function\s*\(on\)\s*\{\s*this\._piEnabled = on === true;\s*"
@@ -2463,7 +2451,7 @@ else:
 
 # --- 3. WebBridge persists and re-injects on the page's call ------------------------------
 wb = read("Dobby/Web/WebBridge.swift")
-arm = wb[wb.index('case "setPiEnabled":'):wb.index("case \"downloadNativeOffline\":")] \
+arm = wb[locate(wb, 'case "setPiEnabled":', "WebBridge.dispatch"):locate(wb, "case \"downloadNativeOffline\":", "WebBridge.dispatch")] \
     if wb.count('case "setPiEnabled":') == 1 else fail("WebBridge.dispatch needs one setPiEnabled case")
 ordered(arm, ["guard let on = payload as? Bool", "ServerAddresses.setPiEnabled(on)",
               "ucc.removeAllUserScripts()", "ucc.addUserScript(BridgeInjection.userScript())",
