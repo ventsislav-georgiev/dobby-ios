@@ -1294,18 +1294,17 @@ if "ref:" in checkout:
     fail("the PWA checkout has a ref:; a sha ref detaches it and prints a private commit subject into this public log")
 if "fetch-depth" in checkout:
     fail("the PWA checkout sets fetch-depth; history is never needed, and a deeper fetch only widens what a later step could print")
-# The subject can leak through any step, not only through the checkout: no git command
-# in this public workflow may read history, and every git read of the PWA checkout is a
-# bare rev-parse HEAD (a sha, never a subject).
+# The subject can leak through any step, not only through the checkout, and a deny-list
+# of history readers never ends (rev-list --format, branch -v, checkout <sha>, reset
+# --hard all print a subject). So an allow-list: every git in this public workflow is a
+# bare rev-parse HEAD of this checkout or of the PWA checkout, a sha and nothing else.
+# A new git command is a deliberate edit to this list, never a silent pass.
 import re
-# Anywhere after git on the line, so a global option (--no-pager, -P, -c k=v, --git-dir)
-# or a cd into the checkout cannot slip a history read past it.
-reader = re.search(r"\bgit\b[^\n]*?\s(log|show|shortlog|reflog|cat-file|describe|whatchanged|for-each-ref)\b", wf)
-if reader:
-    fail("the workflow runs git %s, which can print a private PWA commit subject into this public log" % reader.group(1))
-for m in re.finditer(r"\bgit\s+-C\s+(\S+)\s+(.*)", wf):
-    if "dobby-ios" not in m.group(1) and not m.group(2).startswith("rev-parse HEAD"):
-        fail("a git read of the PWA checkout is not a bare rev-parse HEAD: git -C %s %s" % (m.group(1), m.group(2)))
+allowed = re.compile(r"git (?:-C \.\./dobby )?rev-parse HEAD(?:\)| 2>/dev/null \|\| true\))")
+for m in re.finditer(r"\bgit\b", wf):
+    if not allowed.match(wf, m.start()):
+        line = wf[m.start():wf.find("\n", m.start())]
+        fail("the workflow runs a git command outside the allow-list (bare rev-parse HEAD only), which can print a private PWA commit subject into this public log; widen the list on purpose if it is needed: " + line[:80])
 names = [
     ("name: Verify the app shell was bundled", "verify"),
     ("name: Export .ipa", "export"),
