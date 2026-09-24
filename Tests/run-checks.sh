@@ -902,7 +902,7 @@ if "_ = write(live, held)" not in lines(body(store, "static func selfTestRestore
     fail("the DEBUG restore's discarded write moved")
 if "guard write(item, held) == errSecSuccess, read(item) == held else { return false }" not in lines(store):
     fail("the DEBUG backup no longer refuses the round on a refused write")
-kept_going = ["if outcome.store { _ = SettingsMirrorStore.save(outcome.body) }",
+kept_going = ["if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }",
               "if let fresh = Self.fetchSettings(from: self.server) { _ = SettingsMirrorStore.save(fresh) }"]
 saves = [l for l in lines(src) if "SettingsMirrorStore.save(" in l]
 if sorted(saves) != sorted(kept_going + ["if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }"]):
@@ -912,7 +912,7 @@ if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored
 
 # 3. The POST leg: every status reaches settingsWriteAnswer, which decides before the respond.
 serve = body(src, "private func serveSettings(", "serveSettings")
-post = serve[serve.index('        if method == "POST" {'):serve.index("        let mirror = SettingsMirrorStore.load()")]
+post = serve[serve.index('        if method == "POST" {'):serve.index("        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()")]
 seq = ["            var stored = mirrorRead",
        "            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }",
        "            if stored == errSecSuccess {",
@@ -953,7 +953,7 @@ if re.search(r"status:\s*200|status = 200", post):
     fail("the settings POST answers a literal 200 again, so a refused save still reads as done")
 
 # #189: the one Keychain read reports its status, read() is derived from it, and only the POST
-# takes the status-returning mirror read (the GET and imdbAuthToken keep load()).
+# and (#193) the GET take the status-returning mirror read (imdbAuthToken keeps load()).
 if src.count("SecItemCopyMatching(") != 1:
     fail("expected exactly one SecItemCopyMatching, inside SettingsMirrorStore.readWithStatus (#189)")
 rws = body(store, "private static func readWithStatus(_ base: [String: Any]) -> (data: Data?, status: OSStatus) {", "readWithStatus")
@@ -971,8 +971,8 @@ if lines(lws)[1:] != ["let (data, status) = readWithStatus(baseQuery)",
                       "}",
                       "return (data, status)"]:
     fail("loadWithStatus must return the mirror read's bytes and status, logging a refusal as the number only (#189): %r" % lines(lws)[1:])
-if src.count("loadWithStatus()") != 2:
-    fail("loadWithStatus is reached other than from the settings POST (#189)")
+if src.count("loadWithStatus()") != 3:
+    fail("loadWithStatus is reached other than from the settings POST and GET (#189, #193)")
 
 # 4. The rule itself: only errSecSuccess is a 200, and its body is {}.
 rule = body(src, "static func settingsWriteAnswer(_ stored: OSStatus) -> (status: Int, body: Data) {", "settingsWriteAnswer")
@@ -986,19 +986,83 @@ want = ['log.error("keychain write failed: OSStatus \\(added, privacy: .public)"
         'log.error("keychain queue clear failed: OSStatus \\(deleted, privacy: .public)")',
         'log.error("keychain write failed: OSStatus \\(updated, privacy: .public)")',
         'log.error("keychain mirror put-back failed: OSStatus \\(removed, privacy: .public)")',
-        'log.error("keychain mirror read refused: OSStatus \\(status, privacy: .public)")']
+        'log.error("keychain mirror read refused: OSStatus \\(status, privacy: .public)")',
+        'log.error("keychain queue read refused: OSStatus \\(status, privacy: .public)")']
 for l in logs:
     if [m for m in re.findall(r"\\\((.*?)\)", l)
             if m not in ("%s, privacy: .public" % v for v in ("added", "deleted", "updated", "removed", "status"))]:
         fail("a SettingsMirrorStore log line interpolates more than the OSStatus: %s" % l)
 if sorted(logs) != sorted(want):
-    fail("the store's log lines are not exactly the five OSStatus lines: %r" % logs)
+    fail("the store's log lines are not exactly the six OSStatus lines: %r" % logs)
 if "if added != errSecSuccess { " + want[0] + " }" not in lines(write):
     fail("write no longer logs a refused add")
 clear = body(store, "static func clearPending(ifStill pushed: Data) {", "clearPending")
 if "let deleted = SecItemDelete(pendingQuery as CFDictionary)" not in lines(clear) \
         or "if deleted != errSecSuccess { " + want[1] + " }" not in lines(clear):
     fail("clearPending no longer captures and logs its delete status")
+
+# #193: a refused read of the queue or the mirror is never "no item". The queue: queuePatch reads
+# with status and returns a refusal before any merge or write (merging over that nil replaced
+# every older queued field); the drain and releaseHold release the hold only on errSecItemNotFound.
+# The GET: a refused mirror read is answered with the Pi body as before but does not seed.
+if lines(queue)[1:] != ["pendingLock.lock(); defer { pendingLock.unlock() }",
+                        "let (pending, pendingRead) = readPending()",
+                        "guard pendingRead == errSecSuccess || pendingRead == errSecItemNotFound else { return pendingRead }",
+                        "guard let accumulated = ApiSchemeHandler.mergedPatch(pending: pending, patch: patch) else { return errSecParam }",
+                        "let queued = write(pendingQuery, accumulated)",
+                        "UserDefaults.standard.set(true, forKey: aheadKey)",
+                        "return queued"]:
+    fail("queuePatch must read the queue with its status and return a refusal (anything but success "
+         "or no item) before the merge and the write, merging only the bytes that read returned (#193): %r" % lines(queue)[1:])
+rp = body(store, "private static func readPending() -> (data: Data?, status: OSStatus) {", "readPending")
+if lines(rp)[1:] != ["let (data, status) = readWithStatus(pendingQuery)",
+                     "if status != errSecSuccess && status != errSecItemNotFound {",
+                     'log.error("keychain queue read refused: OSStatus \\(status, privacy: .public)")',
+                     "}",
+                     "return (data, status)"]:
+    fail("readPending must return the queue read's bytes and status, logging a refusal as the number only (#193): %r" % lines(rp)[1:])
+if src.count("readWithStatus(pendingQuery)") != 1 or src.count("readPending()") != 4:
+    fail("the queue's status read is not exactly readPending, reached from its declaration, queuePatch, "
+         "pendingPatch and releaseHold (#193)")
+plain = sorted(l for l in lines(src) if re.search(r"(?<![\w.])read\(pendingQuery\)", l))
+if plain != ["guard read(pendingQuery) == pushed else { return }",
+             "let mirror = read(baseQuery), pending = read(pendingQuery)"]:
+    fail("the queue is read through the nil-on-refusal read() outside clearPending's compare and the "
+         "DEBUG backup (#193): %r" % plain)
+if lines(body(store, "static func pendingPatch() -> (data: Data?, status: OSStatus) {", "pendingPatch"))[1:] != [
+        "pendingLock.lock(); defer { pendingLock.unlock() }", "return readPending()"]:
+    fail("pendingPatch must answer readPending's bytes and status under the queue lock (#193)")
+rh = lines(body(store, "static func releaseHold() {", "releaseHold"))
+if rh[1:] != ["pendingLock.lock(); defer { pendingLock.unlock() }",
+              "guard readPending().status == errSecItemNotFound else { return }",
+              "UserDefaults.standard.set(false, forKey: aheadKey)"]:
+    fail("releaseHold must release the hold only when the queue read, under the lock, found no item (#193): %r" % rh[1:])
+drain = body(src, "private func drainPendingSettings() {", "drainPendingSettings")
+dl = lines(drain)
+dseq = ["guard SettingsMirrorStore.isAheadOfServer else { return }",
+        "let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()",
+        "guard let pending = queued else {",
+        "if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }",
+        "return",
+        "}"]
+if dl[1:1 + len(dseq)] != dseq or drain.count("pendingPatch(") != 1 or drain.count("releaseHold(") != 1 \
+        or drain.count("pendingRead") != 2 or src.count("releaseHold()") != 2:
+    fail("the drain must start from the hold, read the queue with its status, and with no bytes release "
+         "the hold only on errSecItemNotFound and return, pushing nothing (#193): %r" % dl[1:1 + len(dseq)])
+get = serve[serve.index("        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()"):]
+gseq = ["        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()",
+        '        source = (mirror?.isEmpty == false) ? "mirror" : "network"',
+        "        let outcome = Self.settingsOutcome(mirror: mirror) {",
+        "            Self.fetchSettings(from: server)",
+        "        }",
+        "        if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }",
+        "        status = outcome.status",
+        "        length = outcome.body.count",
+        '        respond(task, id, status: outcome.status, contentType: "application/json",',
+        "                body: outcome.body, origin: origin, secret: true,"]
+if not get.startswith("\n".join(gseq)) or get.count("mirrorRead") != 3 or len(re.findall(r"\brespond\(", get)) != 1:
+    fail("the settings GET must read the mirror with its status, answer from settingsOutcome alone, "
+         "seed only when that read succeeded or found no item, and use the status nowhere else (#193)")
 
 # 6. The consumer end: the page's retry list, transcribed in ApiSchemeHandlerCheck, is the page's.
 check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()
@@ -1020,7 +1084,8 @@ else:
 print("PASS: every SettingsMirrorStore Keychain write reports its OSStatus, the settings POST answers "
       "from it before responding (a refused save is a 507, never 200), a refused queue write puts the mirror "
       "back, a refused update is never followed by a delete, a refused mirror read answers 507 before any save "
-      "(no-item still merges over nil) (#189), and the logs carry the number only (#185)")
+      "(no-item still merges over nil) (#189), a refused queue or mirror read is never no item: it queues, releases "
+      "and seeds nothing (#193), and the logs carry the number only (#185)")
 KEYCHAINSTATUSPY
 
 python3 - <<'TIMELABELWIDTHPY'
@@ -1241,9 +1306,9 @@ drain = body_of("private func drainPendingSettings() {")
 for needle, message in [
     ("        guard SettingsMirrorStore.isAheadOfServer else { return }",
      "the drain no longer starts from the hold, so it pushes on every settings GET"),
-    ("        guard let pending = SettingsMirrorStore.pendingPatch() else {",
+    ("        let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()\n        guard let pending = queued else {",
      "the drain no longer takes its bytes from the queue"),
-    ("            SettingsMirrorStore.releaseHold()",
+    ("            if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }",
      "a hold with nothing queued behind it is no longer released, so a phone upgrading from "
      "the #149 build stays permanently stuck"),
     ("            switch Self.pushSettings(pending, to: self.server) {",
@@ -1323,7 +1388,7 @@ queue_fn = body_of("static func queuePatch(_ patch: Data) -> OSStatus {")
 for needle, message in [
     ("        pendingLock.lock(); defer { pendingLock.unlock() }",
      "queuePatch no longer takes the queue lock, so a drain can clear a patch mid-write"),
-    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return errSecParam }",
+    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: pending, patch: patch) else { return errSecParam }",
      "queuePatch no longer accumulates through mergedPatch — the seeded merge would queue nine "
      "keys and clear the Pi's language fields, and replacing instead of accumulating would drop "
      "an earlier Pi-less save"),
@@ -1339,7 +1404,7 @@ if queue_fn.index("write(pendingQuery, accumulated)") > queue_fn.index("UserDefa
 # 8. releaseHold re-checks under the lock. Without it, a patch queued between the
 #    drain's look and this call is abandoned with the hold.
 release = body_of("static func releaseHold() {")
-need(release, "        guard read(pendingQuery) == nil else { return }",
+need(release, "        guard readPending().status == errSecItemNotFound else { return }",
      "releaseHold no longer re-checks the queue under the lock, so it can release a hold that "
      "a patch queued meanwhile still needs")
 
@@ -1351,7 +1416,7 @@ need(src, '    private static let pendingAccount = "api/settings.pending"',
 need(src, "    private static var pendingQuery: [String: Any] { query(pendingAccount) }",
      "the queue's Keychain query no longer uses its own account, so it would collide with the mirror")
 for scope, label in [(queue_fn, "queuePatch"), (clear, "clearPending"),
-                     (body_of("static func pendingPatch() -> Data? {"), "pendingPatch")]:
+                     (body_of("static func pendingPatch() -> (data: Data?, status: OSStatus) {"), "pendingPatch")]:
     for line in scope.splitlines():
         if "UserDefaults" in line and "aheadKey" not in line:
             fail(label + " puts something other than the hold bit in UserDefaults; the queued patch "

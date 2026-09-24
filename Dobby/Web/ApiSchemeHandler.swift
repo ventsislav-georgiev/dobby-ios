@@ -253,14 +253,17 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                     extra: ["Cache-Control": "no-store"])
             return
         }
-        let mirror = SettingsMirrorStore.load()
+        // #193: with its status. A refused read (logged by the store) still falls to the Pi and
+        // is answered with the Pi's body, but does not seed: the mirror it could not see may be
+        // ahead of the Pi with an unpushed patch. No item seeds as before.
+        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()
         source = (mirror?.isEmpty == false) ? "mirror" : "network"
         let outcome = Self.settingsOutcome(mirror: mirror) {
             Self.fetchSettings(from: server)
         }
         // #185: a refused seed of the mirror is logged by the store and does not change
         // this answer — the page is handed the Pi's own body either way.
-        if outcome.store { _ = SettingsMirrorStore.save(outcome.body) }
+        if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }
         status = outcome.status
         length = outcome.body.count
         // no-store: this body carries every secret since #045, so nothing that
@@ -512,13 +515,18 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// holding a patch pushes it on the first page load the Pi answers.
     private func drainPendingSettings() {
         guard SettingsMirrorStore.isAheadOfServer else { return }
-        guard let pending = SettingsMirrorStore.pendingPatch() else {
+        let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()
+        guard let pending = queued else {
             // Held with nothing to push. Every phone already running the #149 build
             // is in exactly this state — the bit was set at write time and there was
             // no queue behind it — and so is the sliver between `markAheadOfServer()`
             // and `queuePatch(_:)` in the POST leg. Nothing to send and nothing to
             // protect, so let the Pi win again rather than hold forever.
-            SettingsMirrorStore.releaseHold()
+            //
+            // #193: only when the read found no item. A refused read (logged by the store)
+            // pushes nothing and keeps the hold: released, the next pull overwrote the mirror
+            // and every later drain returned above, so the queued patch was never pushed.
+            if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }
             return
         }
         refreshing.lock()
@@ -1433,17 +1441,36 @@ enum SettingsMirrorStore {
     /// #185: returns the queue write's status, which the POST answers with. The hold is
     /// re-taken either way: a failed write left any OLDER queued patch in place, and that one
     /// still needs the mirror held for it (with nothing queued, the drain releases it).
+    ///
+    /// #193: a refused read of the queue writes nothing and answers its status. Merging over
+    /// that nil stored the new patch alone over an older queued one, every field of it answered
+    /// 200 earlier. The hold stays as the POST's markAheadOfServer() left it, over whatever is
+    /// still queued.
     static func queuePatch(_ patch: Data) -> OSStatus {
         pendingLock.lock(); defer { pendingLock.unlock() }
-        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: read(pendingQuery), patch: patch) else { return errSecParam }
+        let (pending, pendingRead) = readPending()
+        guard pendingRead == errSecSuccess || pendingRead == errSecItemNotFound else { return pendingRead }
+        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: pending, patch: patch) else { return errSecParam }
         let queued = write(pendingQuery, accumulated)
         UserDefaults.standard.set(true, forKey: aheadKey)
         return queued
     }
 
-    static func pendingPatch() -> Data? {
+    /// #193: with its status, so the drain can tell no item (release the hold) from a refused
+    /// read (keep it: something may be queued that the Pi has never seen).
+    static func pendingPatch() -> (data: Data?, status: OSStatus) {
         pendingLock.lock(); defer { pendingLock.unlock() }
-        return read(pendingQuery)
+        return readPending()
+    }
+
+    /// #193: the queue's one status-carrying read, a refusal logged as the number only. The
+    /// caller holds pendingLock.
+    private static func readPending() -> (data: Data?, status: OSStatus) {
+        let (data, status) = readWithStatus(pendingQuery)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            log.error("keychain queue read refused: OSStatus \(status, privacy: .public)")
+        }
+        return (data, status)
     }
 
     /// Drop the queued patch and release the hold — but only while what is queued
@@ -1466,10 +1493,11 @@ enum SettingsMirrorStore {
 
     /// The hold with nothing behind it, released — a phone upgrading from the #149
     /// build, whose bit was set before a queue existed. Re-checked under the lock,
-    /// so a patch queued since the caller looked is never thrown away.
+    /// so a patch queued since the caller looked is never thrown away. #193: only on a read
+    /// that found no item; a refused one keeps the hold.
     static func releaseHold() {
         pendingLock.lock(); defer { pendingLock.unlock() }
-        guard read(pendingQuery) == nil else { return }
+        guard readPending().status == errSecItemNotFound else { return }
         UserDefaults.standard.set(false, forKey: aheadKey)
     }
 
