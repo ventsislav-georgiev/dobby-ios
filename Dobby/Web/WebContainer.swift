@@ -75,6 +75,12 @@ struct WebContainer {
         #if os(iOS)
         webView.scrollView.bounces = false
         webView.allowsBackForwardNavigationGestures = false
+        // #197: a left-edge swipe is the Android TV Back key. Not the WebKit history gesture
+        // above: most views (settings, pickers, the web player, books) push no history entry,
+        // and Android Back is the page's Escape keydown, not history.back (WebBridge.edgeBack).
+        let edgeBack = UIScreenEdgePanGestureRecognizer(target: coordinator, action: #selector(WebBridge.edgeBack(_:)))
+        edgeBack.edges = .left
+        webView.addGestureRecognizer(edgeBack)
         #endif
         coordinator.attach(webView: webView)
         var loadURL = url

@@ -111,6 +111,16 @@ struct PlayerView: View {
         // out mid-drag the Slider's gesture dies with it, but `sliderTouch` lives on this
         // view, so the reset still reaches a handler that is still mounted.
         .onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }
+        #if os(iOS)
+        // #197: the left-edge back swipe. The player covers the WebView, so its edge recognizer
+        // never sees these touches; this is the macOS Esc / Android PlaybackActivity Back:
+        // an open menu closes first, else the player closes. Simultaneous, so taps and the
+        // Slider keep their own gestures; only a drag that starts at the edge counts.
+        .simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in
+            guard v.startLocation.x < 24, v.translation.width > 50 else { return }
+            if controls.menu != nil { controls.closeMenu() } else { playback.stop() }
+        })
+        #endif
         #if os(macOS)
         .onContinuousHover { phase in
             if case .active = phase { controls.wake() }

@@ -184,6 +184,23 @@ extension WebBridge: WKScriptMessageHandler {
 #if os(iOS)
 import UIKit
 
+// MARK: - Left-edge back swipe (#197)
+
+extension WebBridge {
+    /// The Escape keydown dobby-android's MainActivity.handleWebBackOrRootExit dispatches for
+    /// the TV Back key; the page's document keydown listener is the back action for every
+    /// view. On a root view the page ignores Escape, which is the do-nothing iOS wants (no
+    /// app exit on iOS, so Android's root branch has no counterpart here).
+    static let backJS = "(function(){var t=document.activeElement||document.body||document;"
+        + "t.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true}));})();"
+
+    /// One back per completed swipe; a drag released near the edge (under 50 pt) is a cancel.
+    @objc func edgeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended, gesture.translation(in: gesture.view).x > 50 else { return }
+        callJS(Self.backJS)
+    }
+}
+
 extension WebBridge: WKUIDelegate {
     private func topVC() -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }

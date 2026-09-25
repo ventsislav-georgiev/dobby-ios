@@ -9,6 +9,13 @@ import WebKit
 enum BridgeInjection {
     static let canPlayNative = true
 
+    /// #197: only the iOS build installs the left-edge recognizer (WebContainer.makeWebView).
+    #if os(iOS)
+    static let edgeBack = true
+    #else
+    static let edgeBack = false
+    #endif
+
     /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
     /// the Pi setting, so a reload reads the new value rather than the launch one.
     static func userScript() -> WKUserScript {
@@ -37,6 +44,9 @@ enum BridgeInjection {
             // Audio is routed to a car head unit. Pushed by the wrapper on every
             // route change (and once after 'ready'); read it, don't set it.
             isCarAudio: false,
+            // #197: the wrapper's left-edge swipe sends Back itself (WebBridge.edgeBack), so
+            // the PWA's own flick handler leaves touches that start at the edge alone.
+            edgeBack: \(edgeBack ? "true" : "false"),
             setServerAddresses: function (json) { post('setServerAddresses', json); },
             // #181 "Use a Pi server". The PWA shows its settings row only when BOTH of
             // these are functions; piEnabled() must answer synchronously.

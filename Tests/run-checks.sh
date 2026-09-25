@@ -77,6 +77,8 @@ reads = {
                                  "    text = strip_js(read(path))"],
                       ["def read(path):", '    with open(path, encoding="utf-8") as f:', "        return f.read()"]),
     "SCHEMEMAINPY": ([SWL], ["    lines = strip_swift_lines(open(path).read(), path)"], []),
+    "EDGEBACKPY": ([SW, JS], ['        return strip_swift(f.read(), path).split("\\n")', '    js = strip_js(f.read()).split("\\n")'],
+                   ['    with open(path, encoding="utf-8") as f:', 'with open(pwa, encoding="utf-8") as f:']),
     "PIGATEPY": ([SW, JS], ["        return strip_swift(f.read(), path)", "literal = strip_js(literal)"],
                  ['    with open(path, encoding="utf-8") as f:', '    with open(gate_file, encoding="utf-8") as f:',
                   "        js = f.read()"]),
@@ -2740,3 +2742,151 @@ print("PASS: window.Dobby exposes piEnabled() and setPiEnabled(); start-up consu
 if pending:
     sys.stderr.write(pending + "\n")
 PIGATEPY
+
+# #197: the iOS left-edge back swipe. Nothing observable at runtime from here (a gesture
+# recognizer and a SwiftUI gesture need a running UIKit app; the evidence round drives them
+# through XCUITest), so the wiring is pinned textually, both ends of the bridge:
+#   producer: WebContainer.makeWebView creates a UIScreenEdgePanGestureRecognizer on the LEFT
+#     edge targeting WebBridge.edgeBack and adds it to the web view, inside #if os(iOS), after
+#     the WKWebView exists and before coordinator.attach; WebBridge.edgeBack (iOS-only) fires
+#     backJS once per completed swipe; backJS is the Escape keydown dobby-android's
+#     MainActivity.handleWebBackOrRootExit dispatches for the TV Back key; the native player
+#     (which covers the web view) has its own iOS-only edge drag with the macOS Esc order.
+#   consumer: the PWA's document keydown listener still treats Escape as back, and its own
+#     touch flick handler skips a touch that starts in the edge strip when window.Dobby.edgeBack
+#     is true, which BridgeInjection sets on iOS only (else one edge flick is two backs).
+# Ceiling: textual; a recognizer added through a helper or a differently spelled construct is
+# not seen, which is why the exact lines are pinned.
+EDGEBACK_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+python3 - <<'EDGEBACKPY'
+import os
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#197)\n" % msg)
+    sys.exit(1)
+
+def swift(path):
+    with open(path, encoding="utf-8") as f:
+        return strip_swift(f.read(), path).split("\n")
+
+def one(lines, needle, where):
+    hits = [i for i, l in enumerate(lines) if l.strip() == needle]
+    if len(hits) != 1:
+        fail("%s: expected exactly one live line %r, found %d" % (where, needle, len(hits)))
+    return hits[0]
+
+def ios_only(lines, i, where):
+    # Innermost conditional-compilation block around line i must be the #if os(iOS) branch.
+    depth, in_else = 0, False
+    for j in range(i - 1, -1, -1):
+        t = lines[j].strip()
+        if t.startswith("#endif"):
+            depth += 1
+        elif t.startswith("#if"):
+            if depth == 0:
+                if t != "#if os(iOS)" or in_else:
+                    fail("%s must sit in the #if os(iOS) branch; innermost is %r%s"
+                         % (where, t, " (#else side)" if in_else else ""))
+                return
+            depth -= 1
+        elif depth == 0 and t.startswith(("#else", "#elseif")):
+            in_else = True
+    fail("%s is not inside any #if os(iOS) block, so the macOS target would build it" % where)
+
+def consecutive(lines, needles, where):
+    at = [one(lines, n, where) for n in needles]
+    if at != list(range(at[0], at[0] + len(at))):
+        fail("%s: these lines must stay consecutive and in this order: %r" % (where, needles))
+    for i in at:
+        ios_only(lines, i, where)
+    return at
+
+# --- producer: the recognizer --------------------------------------------------------------
+wc = swift("Dobby/Web/WebContainer.swift")
+rec = consecutive(wc, [
+    "let edgeBack = UIScreenEdgePanGestureRecognizer(target: coordinator, action: #selector(WebBridge.edgeBack(_:)))",
+    "edgeBack.edges = .left",
+    "webView.addGestureRecognizer(edgeBack)"], "WebContainer.makeWebView edge recognizer")
+make = one(wc, "fileprivate func makeWebView(_ coordinator: WebBridge) -> WKWebView {", "WebContainer")
+created = one(wc, "let webView = WKWebView(frame: .zero, configuration: config)", "WebContainer")
+attach = one(wc, "coordinator.attach(webView: webView)", "WebContainer")
+if not make < created < rec[0] and rec[-1] < attach:
+    fail("the edge recognizer must be created and added inside makeWebView, after the WKWebView "
+         "exists and before coordinator.attach (every load path runs after that)")
+if any(l.strip() == "webView.allowsBackForwardNavigationGestures = true" for l in wc):
+    fail("the WebKit history gesture was turned on beside the edge recognizer: views with no "
+         "history entry ignore it and the movies stack would pop twice")
+
+# --- producer: the action and the back JS -----------------------------------------------------
+wb = swift("Dobby/Web/WebBridge.swift")
+action = consecutive(wb, [
+    "@objc func edgeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {",
+    "guard gesture.state == .ended, gesture.translation(in: gesture.view).x > 50 else { return }",
+    "callJS(Self.backJS)"], "WebBridge.edgeBack")[-1]
+if wb[action + 1].strip() != "}":
+    fail("WebBridge.edgeBack must end right after callJS(Self.backJS)")
+js_at = one(wb, 'static let backJS = "(function(){var t=document.activeElement||document.body||document;"', "WebBridge.backJS")
+ios_only(wb, js_at, "WebBridge.backJS")
+android_init = "{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true}"
+if wb[js_at + 1].strip() != "+ \"t.dispatchEvent(new KeyboardEvent('keydown',%s));})();\"" % android_init:
+    fail("WebBridge.backJS must go on to dispatch the Android Back Escape keydown %s on the "
+         "active element, nothing else" % android_init)
+
+# --- producer: the native player's own edge drag ---------------------------------------------
+pv = swift("Dobby/Playback/PlayerView.swift")
+drag = consecutive(pv, [
+    ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
+    "guard v.startLocation.x < 24, v.translation.width > 50 else { return }",
+    "if controls.menu != nil { controls.closeMenu() } else { playback.stop() }"], "PlayerView edge drag")
+if pv[drag[-1] + 1].strip() != "})":
+    fail("PlayerView's edge drag must close right after its back action")
+if not one(pv, "var body: some View {", "PlayerView") < one(
+        pv, ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
+        "PlayerView") < one(pv, "private var tapRegions: some View {", "PlayerView"):
+    fail("the player's edge drag must be a modifier of PlayerView.body")
+
+# --- the flag the PWA reads -------------------------------------------------------------------
+bi = swift("Dobby/Web/BridgeInjection.swift")
+t = one(bi, "static let edgeBack = true", "BridgeInjection")
+ios_only(bi, t, "BridgeInjection edgeBack = true")
+if bi[t + 1].strip() != "#else" or bi[t + 2].strip() != "static let edgeBack = false":
+    fail("BridgeInjection.edgeBack must be false off iOS (the macOS build has no recognizer)")
+lit = one(bi, 'edgeBack: \\(edgeBack ? "true" : "false"),', "BridgeInjection")
+if not one(bi, "window.Dobby = {", "BridgeInjection") < lit < one(
+        bi, "console.log('Dobby native bridge injected (canPlayNative=' + window.Dobby.canPlayNative + ')');", "BridgeInjection"):
+    fail("edgeBack must be a member of the injected window.Dobby literal")
+
+print("PASS: the iOS web view carries a left-edge UIScreenEdgePanGestureRecognizer whose action "
+      "sends the Android Back Escape keydown once per completed swipe, the native player has the "
+      "same edge drag in the macOS Esc order, all iOS-only, and window.Dobby.edgeBack is true on "
+      "iOS only (#197)")
+
+# --- consumer: the PWA ------------------------------------------------------------------------
+pub = os.environ.get("EDGEBACK_PUB", "")
+pwa = os.path.join(pub, "js", "12-service-worker-offline.js")
+if not os.path.isfile(pwa):
+    print("SKIP: no dobby checkout at %r; the PWA half of the #197 edge-back pins needs it" % pub)
+    sys.exit(0)
+with open(pwa, encoding="utf-8") as f:
+    js = strip_js(f.read()).split("\n")
+ts = one(js, "document.addEventListener('touchstart', function(e) {", "PWA touchstart listener")
+end = next((i for i in range(ts, len(js)) if js[i] == "}, { passive: true });"), -1)
+skip = "if (touchStartX < 32 && typeof window.Dobby === 'object' && window.Dobby && window.Dobby.edgeBack === true) { touchStartTime = 0; return; }"
+at = one(js, skip, "PWA touchstart listener")
+x = one(js, "touchStartX = e.changedTouches[0].clientX;", "PWA touchstart listener")
+armed = [i for i in range(ts, end) if js[i].strip() == "touchStartTime = Date.now();"]
+if not (ts < x < at < end and len(armed) == 1 and at < armed[0]):
+    fail("the PWA's flick handler must skip an edge-strip touch inside its touchstart listener, "
+         "after reading touchStartX and before arming touchStartTime")
+kd = one(js, "document.addEventListener('keydown', (e) => {", "PWA keydown listener")
+esc = [i for i in range(kd, len(js)) if js[i] == "    case 'Escape':"]
+if not esc or js[esc[0] + 1] != "    case 'Backspace':" or "closeSettings()" not in "\n".join(js[esc[0]:esc[0] + 12]):
+    fail("the PWA's document keydown listener no longer handles Escape as back (closeSettings "
+         "among its first arms), so the edge swipe's Escape does nothing")
+print("PASS: the PWA treats Escape as back and its touch flick skips edge-strip touches when "
+      "window.Dobby.edgeBack is true (#197)")
+EDGEBACKPY
