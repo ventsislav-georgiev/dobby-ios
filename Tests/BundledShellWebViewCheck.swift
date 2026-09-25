@@ -103,7 +103,7 @@ enum BundledShellWebViewCheck {
         _ = NSApplication.shared
 
         let shellRoot = makeFixtureShell()
-        let html = BundledShell.rewritingSubresources(fixtureHTML)
+        let html = BundledShell.rewritingSubresources(fixtureHTML, root: shellRoot)
         check(html.contains("src=\"\(OfflineSchemeHandler.scheme)://\(BundledShell.host)/js/01-state-init.js\""),
               "the fixture's script tag was rewritten onto the scheme by the shipped rewrite")
 

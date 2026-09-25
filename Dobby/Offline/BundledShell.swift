@@ -18,11 +18,14 @@ import os
 /// `document.baseURI` report the scheme rather than the Pi origin — one of the three
 /// things the Pi-less cold start has to get right (#151 done condition).
 ///
-/// Only the boot set is rewritten: the 26 `<script src="/js/…">` tags and the one
-/// `<link rel="stylesheet" href="/styles.css">`. Those are what a blank page hangs on.
-/// ponytail: the icons and `/manifest.json` stay on the Pi origin and 404 against a dead
-/// Pi — cosmetic, and they are in the bundle already if that ever matters enough to
-/// widen the rule.
+/// Every `src="/…"` / `href="/…"` naming a file the shell actually ships is rewritten —
+/// the boot scripts and stylesheet, and since #196 the images too. #151 rewrote only the
+/// `/js/` and `/styles.css` prefixes and left `<img src="/icon-smarttube.png?v=3">` on the
+/// Pi origin, where #181's `PiRequestBlock` refuses it: the SmartTube mode button drew an
+/// empty box on every Pi-off launch. The rule is "the file is in the shell", not a prefix
+/// list, so the next asset index.html names is covered without touching this file; a path
+/// the shell does not ship (`/`, `/api/…`) stays on the page's own origin. The query
+/// (`?v=3`) is kept on the rewritten URL and ignored by the handler, which reads `url.path`.
 enum BundledShell {
     /// Host component of the sub-resource URLs, and the discriminator
     /// `OfflineSchemeHandler` routes on: `dobby-offline://shell/js/01-state-init.js`
@@ -49,18 +52,33 @@ enum BundledShell {
             log.warning("No bundled app shell in this build")
             return nil
         }
-        return rewritingSubresources(html)
+        return rewritingSubresources(html, root: root)
     }
 
     private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "BundledShell")
 
-    /// Pure, and exercised directly by `Tests/BundledShellCheck.swift`. The scheme comes
-    /// from `OfflineSchemeHandler` rather than a second literal, so the address the markup
-    /// asks for and the address the handler answers cannot drift apart.
-    static func rewritingSubresources(_ html: String, scheme: String = OfflineSchemeHandler.scheme) -> String {
+    /// Pure over `html` and the shell directory, and exercised directly by
+    /// `Tests/BundledShellCheck.swift` against the real copy. The scheme comes from
+    /// `OfflineSchemeHandler` rather than a second literal, so the address the markup asks
+    /// for and the address the handler answers cannot drift apart.
+    static func rewritingSubresources(_ html: String, root: URL,
+                                      scheme: String = OfflineSchemeHandler.scheme) -> String {
         let base = "\(scheme)://\(host)"
-        return html
-            .replacingOccurrences(of: "src=\"/js/", with: "src=\"\(base)/js/")
-            .replacingOccurrences(of: "href=\"/styles.css\"", with: "href=\"\(base)/styles.css\"")
+        let out = NSMutableString(string: html)
+        // Last match first, so each replacement leaves the earlier ranges valid.
+        for match in attribute.matches(in: html, range: NSRange(html.startIndex..., in: html)).reversed() {
+            let path = out.substring(with: match.range(at: 2)).removingPercentEncoding ?? ""   // the handler decodes once too
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path,
+                                                 isDirectory: &isDirectory), !isDirectory.boolValue
+            else { continue }
+            out.insert(base, at: match.range(at: 2).location)
+        }
+        return out as String
     }
+
+    /// `src="/path"` or `href="/path"`, path captured without its `?query` / `#fragment`.
+    /// `//host/…` is protocol-relative, not a shell path, so the path may not start with `/`.
+    private static let attribute = try! NSRegularExpression(
+        pattern: #"\b(src|href)="(/[^/"?#][^"?#]*)[^"]*""#)
 }

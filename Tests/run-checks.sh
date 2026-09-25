@@ -64,6 +64,12 @@ reads = {
                          ['check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()',
                           r'    pm = re.findall(r"var retryStatuses = options\.retryStatuses \|\| \[([\d, ]+)\];", open(page).read())']),
     "TIMELABELWIDTHPY": ([SW], ["src = strip_swift(open(path).read(), path)"], []),
+    "SHELLIMAGESPY": ([SW], ['rewrite = strip_swift(open("Dobby/Offline/BundledShell.swift").read(), "BundledShell.swift")',
+                             'handler = strip_swift(open("Dobby/Offline/OfflineSchemeHandler.swift").read(), "OfflineSchemeHandler.swift")'],
+                      ['with open(os.path.join(shell, "index.html"), encoding="utf-8") as f:',
+                       "    html = f.read()",
+                       'with open(os.path.join(shell, "styles.css"), encoding="utf-8") as f:',
+                       "    css = f.read()"]),
     "BRIDGENAMESPY": ([SW, JS], ['inject = strip_swift(read("Dobby/Web/BridgeInjection.swift"), "BridgeInjection.swift")',
                                  'webbridge = strip_swift(read("Dobby/Web/WebBridge.swift"), "WebBridge.swift")',
                                  "literal = strip_js(inject[start:end])",
@@ -1202,6 +1208,70 @@ if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   xcrun swiftc -o "$OUT7" \
     Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift Tests/BundledShellCheck.swift
   "$OUT7" Dobby/Shell
+
+  # #196: every image the packed markup names must be answered by the shell handler. #151
+  # rewrote only /js/ and /styles.css, so <img src="/icon-smarttube.png?v=3"> stayed on the
+  # Pi origin, which #181 blocks with the Pi off: an empty box on the home screen. This is
+  # the handler's own normalisation replayed in Python (url.path drops the query, the
+  # extension picks the MIME type) over the REAL copy, plus the Swift constructs it rests on.
+  python3 - <<'SHELLIMAGESPY'
+import os
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#196)\n" % msg)
+    sys.exit(1)
+
+shell = "Dobby/Shell"
+rewrite = strip_swift(open("Dobby/Offline/BundledShell.swift").read(), "BundledShell.swift")
+handler = strip_swift(open("Dobby/Offline/OfflineSchemeHandler.swift").read(), "OfflineSchemeHandler.swift")
+with open(os.path.join(shell, "index.html"), encoding="utf-8") as f:
+    html = f.read()
+with open(os.path.join(shell, "styles.css"), encoding="utf-8") as f:
+    css = f.read()
+
+# The rule is "the shell ships that file", applied to every src/href, not a prefix list.
+for needle, why in [
+        ("        return rewritingSubresources(html, root: root)", "indexHTML must rewrite against the shell it read"),
+        (r'pattern: #"\b(src|href)="(/[^/"?#][^"?#]*)[^"]*""#)', "the rewrite must match every src/href path, query excluded"),
+        ("guard FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path,",
+         "the rewrite must key on the file being in the shell"),
+        ("            out.insert(base, at: match.range(at: 2).location)", "the rewrite must prefix the matched path with the scheme"),
+        ("        let parts = url.path.split(separator: \"/\").map(String.init)",
+         "the handler must look up url.path, which carries no ?query"),
+        ('        case "png": return "image/png"', "the handler must serve png as image/png"),
+        ('        case "svg": return "image/svg+xml"', "the handler must serve svg as image/svg+xml")]:
+    if (rewrite + handler).count(needle) != 1:
+        fail("%s: %r" % (why, needle))
+if 'replacingOccurrences(of: "src=' in rewrite:
+    fail("BundledShell went back to a prefix list; an asset outside it stays on the blocked Pi origin")
+
+mimes = dict(re.findall(r'case "(\w+)"(?:, "\w+")*: return "([^"]+)"', handler))
+for ext, typ in re.findall(r'case "\w+", "(\w+)": return "([^"]+)"', handler):
+    mimes[ext] = typ
+
+def answered(path):
+    """The handler's own normalisation: url.path (no query or fragment), decoded once."""
+    rel = unquote(urlsplit(path).path).lstrip("/")
+    return rel and os.path.isfile(os.path.join(shell, rel)), mimes.get(os.path.splitext(rel)[1][1:].lower())
+
+imgs = re.findall(r'<img\b[^>]*\bsrc="(/[^"]*)"', html)
+if "/icon-smarttube.png?v=3" not in imgs:
+    fail("the packed index.html no longer names /icon-smarttube.png?v=3; re-read what this guard should hold")
+versioned = re.findall(r'(?:src|href)="(/[^"]*\?v=[^"]*)"', html) + re.findall(r'url\(["\']?(/[^"\')]*\?v=[^"\')]*)', css)
+for src in sorted(set(imgs + versioned)):
+    found, mime = answered(src)
+    if not found:
+        fail("%s is named by the markup but is not a file in the packed shell" % src)
+    if src in imgs and not (mime or "").startswith("image/"):
+        fail("%s is an <img> the handler would answer as %s, not an image type" % (src, mime or "application/octet-stream"))
+print("PASS: every <img src> and ?v= asset the packed shell names is a shell file the handler answers, query "
+      "dropped, with an image MIME type, and BundledShell rewrites by file presence, not by prefix (#196)")
+SHELLIMAGESPY
 
   # The measurement, not a proxy: a real WKWebView, a real dead app-bound origin, the
   # shipped rewrite and the shipped handler. macOS only, same as ApiSchemeWebViewCheck —
