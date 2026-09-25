@@ -1867,6 +1867,12 @@ def section(start_needle, end_needle, what):
 on_block = section("\non:\n", "\nconcurrency:\n", "the on: block must be followed by the workflow-level concurrency:")
 at(on_block, "\n  schedule:\n    - cron: '", "the hourly schedule: trigger must sit inside on:, or a PWA-only change never builds")
 at(on_block, "\n  workflow_dispatch:\n", "workflow_dispatch must stay a trigger (the manual override of every skip)")
+# #198: the reason input, a closed choice whose default is manual, so an owner's run from
+# the Actions tab (or a bare gh workflow run) always builds; only pwa-push is gated.
+at(on_block, "\n  workflow_dispatch:\n    inputs:\n      reason:\n", "workflow_dispatch must declare the reason input directly under it (#198)")
+reason_in = on_block[on_block.index("\n      reason:\n"):]
+at(reason_in, "\n        type: choice\n        options: [manual, pwa-push]\n        default: manual\n",
+   "the reason input must be a choice of manual and pwa-push, default manual, or a manual dispatch could be pair-checked (#198)")
 at(on_block, "\n  push:\n", "push to main must stay a trigger")
 # Workflow-level, before jobs:: decide has to run after the build ahead of it recorded.
 at(wf, "\nconcurrency:\n  group: testflight\n  cancel-in-progress: false\n", "concurrency must stay at workflow level, one group, no cancelling")
@@ -1880,11 +1886,24 @@ at(decide, "\n      build: ${{ steps.decide.outputs.build }}\n", "decide's build
 step_at = at(decide, "\n        id: decide\n", "the decide job needs a step with id: decide")
 step_end = decide.find("\n      - ", step_at)
 step = decide[step_at:step_end if step_end >= 0 else len(decide)]
-at(step, 'scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$pwa_sha" "$built" "$failed" >> "$GITHUB_OUTPUT"',
+at(step, 'scripts/testflight-decide.sh "$event" "$GITHUB_SHA" "$pwa_sha" "$built" "$failed" >> "$GITHUB_OUTPUT"',
    "the id: decide step must feed the schedule case to testflight-decide.sh and append its answer to GITHUB_OUTPUT")
-at(step, 'scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"',
+at(step, 'scripts/testflight-decide.sh "$event" >> "$GITHUB_OUTPUT"',
    "the id: decide step must answer push and dispatch through the script too")
-guard_at = at(step, 'if [ "$GITHUB_EVENT_NAME" != schedule ]; then', "decide must branch on the event before any API call")
+if 'testflight-decide.sh "$GITHUB_EVENT_NAME"' in step:
+    fail("decide passes the raw event name to testflight-decide.sh; a pwa-push dispatch would then always build (#198)")
+# #198: the input reaches the shell only through env (never ${{ }} inside run:), is read
+# once, and maps workflow_dispatch plus pwa-push, and nothing else, to the pwa-push event,
+# before the guard that lets everything but schedule and pwa-push build without an API call.
+at(step, "\n          REASON: ${{ inputs.reason }}\n", "the decide step must take the reason input through env (#198)")
+if wf.count("inputs.reason") != 1:
+    fail("inputs.reason must appear exactly once, in the decide step's env; interpolated into run: it is a script injection (#198)")
+ev_at = at(step, '\n          event="$GITHUB_EVENT_NAME"\n', "decide must start from the event name (#198)")
+map_at = at(step, '\n          if [ "$event" = workflow_dispatch ] && [ "$REASON" = pwa-push ]; then event=pwa-push; fi\n',
+            "decide must turn a pwa-push workflow_dispatch into the pwa-push event (#198)")
+guard_at = at(step, '\n          if [ "$event" != schedule ] && [ "$event" != pwa-push ]; then\n', "decide must branch on the event before any API call")
+if not ev_at < map_at < guard_at:
+    fail("decide must set event, then map pwa-push, then branch; out of order the pwa-push dispatch always builds (#198)")
 api_at = at(step, "gh api", "decide must look the pair up with gh api")
 if not guard_at < api_at:
     fail("decide calls an API before its non-schedule exit; a transient API error would then skip a push build")
@@ -1970,6 +1989,12 @@ A, B = "a" * 40, "b" * 40
 cases = [
     (["push"], 0, "build=true"),
     (["workflow_dispatch"], 0, "build=true"),
+    (["workflow_dispatch", A, B, "1", "1"], 0, "build=true"),
+    (["pwa-push", A, B, "1", "0"], 0, "build=false"),
+    (["pwa-push", A, B, "0", "0"], 0, "build=true"),
+    (["pwa-push", A, B, "0", "1"], 0, "build=false"),
+    (["pwa-push", A, "not-a-sha", "0", "0"], 1, None),
+    (["pwa-push"], 1, None),
     (["push", A, B, "1", "1"], 0, "build=true"),
     (["schedule", A, B, "1", "0"], 0, "build=false"),
     (["schedule", A, B, "0", "0"], 0, "build=true"),
@@ -1987,9 +2012,60 @@ for args, code, want in cases:
         fail("testflight-decide.sh %s: exit %d, stdout %r; expected exit %d with %r" % (" ".join(args), r.returncode, r.stdout, code, want))
     if code and args[2:3] and args[2] not in ("", B) and args[2] in r.stdout + r.stderr:
         fail("testflight-decide.sh %s echoes the rejected value; on a broken lookup that is the private commit JSON" % " ".join(args))
-    if want and args[0] == "schedule" and ("pwa_sha=" + B) not in lines:
+    if want and args[0] in ("schedule", "pwa-push") and ("pwa_sha=" + B) not in lines:
         fail("testflight-decide.sh %s must output pwa_sha for the failure marker's fallback" % " ".join(args))
 print("PASS: testflight-decide.sh builds on push and dispatch, and on schedule only for a pair with no record and no failure marker, refusing a non-sha head or non-numeric count (%d cases) (#183)" % len(cases))
+
+# 6. #198: the decide step's own shell, run as CI runs it (comment-stripped, from the
+#    workflow file), against a stub gh, for every event and reason the workflow can see.
+#    The stub fails any call the case does not expect, so "always builds" also proves
+#    no API was read.
+import os, tempfile, textwrap
+body = step[step.index("run: |\n") + len("run: |\n"):]
+body = textwrap.dedent(body)
+tmp = tempfile.mkdtemp()
+stub = os.path.join(tmp, "gh")
+with open(stub, "w") as f:
+    f.write("""#!/usr/bin/env bash
+echo "$*" >> "$STUB_LOG"
+[ "${STUB_API:-}" = yes ] || exit 9
+case "$*" in
+  *commits/main*) [ "$GH_TOKEN" = pwa-token ] || exit 8; echo "$STUB_PWA";;
+  *testflight-failed-*) echo "$STUB_FAILED";;
+  *artifacts*) echo "$STUB_BUILT";;
+  *) exit 7;;
+esac
+""")
+os.chmod(stub, 0o755)
+run_cases = [
+    ("push", "", "", "0", "0", "true", False),
+    ("workflow_dispatch", "manual", "yes", "1", "1", "true", False),
+    ("workflow_dispatch", "", "yes", "1", "1", "true", False),
+    ("schedule", "", "yes", "1", "0", "false", True),
+    ("schedule", "", "yes", "0", "0", "true", True),
+    ("workflow_dispatch", "pwa-push", "yes", "1", "0", "false", True),
+    ("workflow_dispatch", "pwa-push", "yes", "0", "1", "false", True),
+    ("workflow_dispatch", "pwa-push", "yes", "0", "0", "true", True),
+    ("push", "pwa-push", "", "0", "0", "true", False),
+]
+for event, reason, api, built, failed, want, reads in run_cases:
+    log = os.path.join(tmp, "log"); out = os.path.join(tmp, "out")
+    for p_ in (log, out):
+        open(p_, "w").close()
+    env = dict(os.environ, PATH=tmp + ":" + os.environ["PATH"], STUB_LOG=log, GITHUB_OUTPUT=out,
+               GITHUB_EVENT_NAME=event, REASON=reason, STUB_API=api, STUB_PWA=B, STUB_BUILT=built,
+               STUB_FAILED=failed, GITHUB_SHA=A, GITHUB_REPOSITORY="o/r", GH_TOKEN="run-token", PWA_TOKEN="pwa-token")
+    r = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True)
+    got = open(out).read().splitlines()
+    calls = open(log).read().splitlines()
+    what = "decide step, event %s reason %r, built %s failed %s" % (event, reason, built, failed)
+    if r.returncode != 0 or ("build=" + want) not in got:
+        fail("%s: exit %d, output %r, stderr %r; expected build=%s (#198)" % (what, r.returncode, got, r.stderr[-300:], want))
+    if bool(calls) != reads or (reads and len(calls) != 3):
+        fail("%s: gh calls %r; expected %s (#198)" % (what, calls, "the PWA head and two record lookups" if reads else "none"))
+    if reads and ("testflight-%s-%s" % (A, B)) not in calls[1]:
+        fail("%s: the record lookup is not by this pair (#198)" % what)
+print("PASS: the decide step itself builds a push or a manual dispatch with no API call, and pair-checks schedule and a pwa-push dispatch (%d cases, stub gh) (#198)" % len(run_cases))
 FOLLOWPWAPY
 
 # ---------------------------------------------------------------------------
