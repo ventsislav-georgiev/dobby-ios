@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    # #198: the private PWA repo dispatches with reason pwa-push after a push to its
+    # served tree; that dispatch goes through the same pair check as schedule, so a
+    # duplicate, or one racing a tick, does not build twice. A manual run (the default)
+    # always builds. Nothing but this fixed string crosses from the private repo.
+    inputs:
+      reason:
+        description: Why this run was requested
+        type: choice
+        options: [manual, pwa-push]
+        default: manual
   # #183: a PWA-only change on dobby main has no dobby-ios push to ride, so TestFlight
   # drifted behind the PWA. Hourly, the decide job below builds when the pair (this
   # dobby-ios commit, PWA main) has no TestFlight build yet. Minute 17: off the
@@ -29,8 +39,8 @@ jobs:
   # testflight-<dobby-ios sha>-<PWA sha> after a successful TestFlight upload (90 days),
   # testflight-failed-<dobby-ios sha>-<PWA sha> when the job fails (1 day, so a broken
   # pair retries once a day instead of every hour). Looked up by exact name. Only a
-  # schedule run reads the APIs at all: a push or dispatch always builds, so no transient
-  # API error can ever skip one. Known edge: force-resetting both mains to a pair built
+  # schedule run or a pwa-push dispatch (#198) reads the APIs at all: a push or a manual
+  # dispatch always builds, so no transient API error can ever skip one. Known edge: force-resetting both mains to a pair built
   # earlier (A to B to A) skips, though TestFlight carries B; a revert is a new sha.
   decide:
     runs-on: ubuntu-latest
@@ -47,10 +57,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PWA_TOKEN: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}
+          REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
-            scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"
+          event="$GITHUB_EVENT_NAME"
+          if [ "$event" = workflow_dispatch ] && [ "$REASON" = pwa-push ]; then event=pwa-push; fi
+          if [ "$event" != schedule ] && [ "$event" != pwa-push ]; then
+            scripts/testflight-decide.sh "$event" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           pwa_sha=$(GH_TOKEN="$PWA_TOKEN" gh api repos/ventsislav-georgiev/bookplay/commits/main --jq .sha)
@@ -58,7 +71,7 @@ jobs:
           live() { gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$1" --jq '[.artifacts[] | select(.expired | not)] | length'; }
           built=$(live "testflight-$pair")
           failed=$(live "testflight-failed-$pair")
-          scripts/testflight-decide.sh "$GITHUB_EVENT_NAME" "$GITHUB_SHA" "$pwa_sha" "$built" "$failed" >> "$GITHUB_OUTPUT"
+          scripts/testflight-decide.sh "$event" "$GITHUB_SHA" "$pwa_sha" "$built" "$failed" >> "$GITHUB_OUTPUT"
 
   release:
     needs: decide
@@ -302,8 +315,8 @@ jobs:
 
       # #183: a failed pair is marked for one day, so a deterministic failure (a PWA
       # commit the shell guard rejects, an expired token) retries once a day on schedule
-      # instead of 24 times, each minting and revoking a certificate. Push and dispatch
-      # ignore the marker. PWA sha from the checkout when it got that far, else decide's.
+      # instead of 24 times, each minting and revoking a certificate. Push and a manual
+      # dispatch ignore the marker; a pwa-push dispatch honours it like schedule (#198). PWA sha from the checkout when it got that far, else decide's.
       - name: Mark this pair failed
         id: failed
         if: failure()
