@@ -81,6 +81,14 @@ reads = {
                  ['    with open(path, encoding="utf-8") as f:', '    with open(gate_file, encoding="utf-8") as f:',
                   "        js = f.read()"]),
 }
+# #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
+# ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
+lines = text.split("\n")
+opener = [i for i, l in enumerate(lines) if l == "  python3 - <<'SHELLIMAGESPY'"]
+copier = [i for i, l in enumerate(lines) if l == '  DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh']
+before = [i for i in copier if opener and i < opener[0]]
+if len(opener) != 1 or not before or any(re.match(r"(else|fi)\b", l) for l in lines[before[-1]:opener[0]]):
+    fail("SHELLIMAGESPY must run as a live python3 heredoc after copy-app-shell.sh, in the same branch (#196)")
 raw = re.compile(r"\bopen\(|\.read\(|readlines\(")
 for name, (imports, needles, allowed) in reads.items():
     if len(blocks.get(name, [])) != 1:
