@@ -33,7 +33,7 @@ enum BundledShellCheck {
 
         // --- the rewrite, against the real markup -----------------------------------
 
-        let rewritten = BundledShell.rewritingSubresources(raw)
+        let rewritten = BundledShell.rewritingSubresources(raw, root: root)
         let base = "\(OfflineSchemeHandler.scheme)://\(BundledShell.host)"
 
         // Producer end: every boot sub-resource the shipped index.html asks for.
@@ -73,6 +73,28 @@ enum BundledShellCheck {
 
         let handler = OfflineSchemeHandler(shellRoot: root)
         func resolved(_ raw: String) -> String? { handler.fileURL(for: URL(string: raw)!)?.path }
+
+        // --- #196: every image the markup names, through the handler ---------------
+        //
+        // #151 moved only /js/ and /styles.css; <img src="/icon-smarttube.png?v=3"> stayed
+        // on the Pi origin, which #181 blocks with the Pi off — an empty box on the home
+        // screen. Every <img src> of the REAL markup must come out on the scheme and be
+        // answered by the handler, query and all, with an image MIME type.
+        let imgSrc = try! NSRegularExpression(pattern: #"<img\b[^>]*\bsrc="([^"]*)""#)
+        let imgs = imgSrc.matches(in: rewritten, range: NSRange(rewritten.startIndex..., in: rewritten))
+            .map { (rewritten as NSString).substring(with: $0.range(at: 1)) }
+        check(imgs.contains("\(base)/icon-smarttube.png?v=3"),
+              "the SmartTube mode icon is rewritten onto \(base), its ?v=3 kept (\(imgs.count) <img> found)")
+        for src in imgs where !src.isEmpty && !src.hasPrefix("data:") {   // src="" is filled in by script
+            let file = src.hasPrefix(base) ? resolved(src) : nil
+            check(file.map { FileManager.default.fileExists(atPath: $0) } == true
+                    && OfflineSchemeHandler.mime(for: URL(fileURLWithPath: file!).pathExtension).hasPrefix("image/"),
+                  "<img src=\"\(src)\"> is answered by the shell handler as an image")
+        }
+        // The rule is "the shell ships that file", so a path it does not ship stays put.
+        check(BundledShell.rewritingSubresources("<img src=\"/api/cover?id=1\"><a href=\"/\">", root: root)
+                == "<img src=\"/api/cover?id=1\"><a href=\"/\">",
+              "a path the shell does not ship (/api/…, /) stays on the page's own origin")
 
         // Depth one: /styles.css is at the shell root, while a downloaded file is always
         // <bookId>/<file> — the old >= 2 rule would have rejected the stylesheet.
