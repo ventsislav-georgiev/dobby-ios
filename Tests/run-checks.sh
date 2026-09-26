@@ -3143,7 +3143,8 @@ for reader in ["dobbyTvNative.tryDispatch(url", "modal.classList.add('active');"
         fail("playStreamUrl: %r must come after the #200 guard (found at %s, guard at %d)" % (reader, hits, g))
 
 # The engine and its bundle are entered only behind the guard, so no producer can reach them
-# around playStreamUrl: playStreamWithEngine is called only in playStreamUrl after the guard,
+# around playStreamUrl: playStreamWithEngine and the web <video> lane playNativeVideoUrl are
+# called only in playStreamUrl after the guard,
 # initPlaysVideo only in playStreamWithEngine, and a playsvideo import sits only in those two
 # or in the one SmartTube lane (22-smarttube.js, a Pi-backed stream).
 g_off = start + len("\n".join(body[:g]))
@@ -3161,9 +3162,10 @@ def call_sites(pattern):
                 out.append((n, m.start()))
     return out
 
-engine = call_sites(r"\bplayStreamWithEngine\s*\(")
-if not engine or any(n != "21-android-tv.js" or not g_off < p < func_end for n, p in engine):
-    fail("playStreamWithEngine must be called only inside playStreamUrl after the #200 guard: %s" % engine)
+for player in ["playStreamWithEngine", "playNativeVideoUrl"]:
+    sites = call_sites(r"\b%s\s*\(" % player)
+    if not sites or any(n != "21-android-tv.js" or not g_off < p < func_end for n, p in sites):
+        fail("%s must be called only inside playStreamUrl after the #200 guard: %s" % (player, sites))
 pws, pwe = body_span("playStreamWithEngine(video, url, modal, sessionId)")
 init = call_sites(r"\binitPlaysVideo\s*\(")
 if not init or any(n != "21-android-tv.js" or not pws < p < pwe for n, p in init):
