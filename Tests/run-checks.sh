@@ -91,6 +91,10 @@ reads = {
                                      '        js[n] = strip_js(f.read()).split("\\n")'],
                           ['    with open(path, encoding="utf-8") as f:',
                            '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
+    "PIOFFBOOKDOWNLOADPY": ([SW, JS], ['        files[path] = strip_swift(f.read(), path).split("\\n")',
+                                       '    off = strip_js(f.read()).split("\\n")'],
+                            ['    with open(path, encoding="utf-8") as f:',
+                             'with open(os.path.join(pub, "js", "12-service-worker-offline.js"), encoding="utf-8") as f:']),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
