@@ -236,7 +236,7 @@ def assert_gated(call_regex, label, expected_calls=1):
 
         print(f"PASS: {label}() call site is #if DEBUG-gated ({path}:{call_idx + 1})")
 
-assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=4)
+assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=5)
 assert_gated(r"autoOfflineSeamActive\(\)", "autoOfflineSeamActive")
 assert_gated(r"AppConfig\.startURL\(origin:", "startURL")
 assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
@@ -3412,3 +3412,117 @@ print("PASS: a book the wrapper downloaded keeps its listing entry and cover in 
       "the Pi setting on only (DEBUG DOBBY_NO_SERVER seam skipped first), and the Pi-off page "
       "lists it after the cache fallback and draws its cover (#210)")
 OFFLINEBOOKMETAPY
+
+# #213: with the Pi setting off the Apple wrapper still started a native book download on the
+# Pi's origin: startBookDownload checked neither ServerAddresses.piEnabled() nor the DEBUG
+# DOBBY_NO_SERVER seam, and URLSession traffic is not WebKit's, so PiRequestBlock never saw it
+# (#210 added fetchBookExtras to the same path). Pinned:
+#   OfflineStore: startBookDownload opens with the seam refusal (#if DEBUG, the #149 form) and
+#     the Pi setting refusal, its first four lines exactly, so nothing (payload decode, folder,
+#     index, fetchBookExtras, URLSession) runs ahead of them; refuseBookDownload's whole body
+#     (a log line and a "kind": "book" error event, no URLSession, no index write), defined
+#     once and called from those two lines only.
+#   WebBridge: downloadNativeBook is startBookDownload's only caller.
+#   PWA: toggleNativeBookDownload's gate before its bridge post and updateNativeBookDownloadButton's
+#     gate (remove and cancel kept) read getPiEnabled(), the #200 predicate. The behaviour is the
+#     PWA's Tests/integration/ios-pi-off-book-download.test.js.
+# Ceiling: textual; a caller reached through a closure stored under another name is not seen.
+PIOFFBOOK_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'PIOFFBOOKDOWNLOADPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#213)\n" % msg)
+    sys.exit(1)
+
+def block(lines, head, what):
+    at = [i for i, l in enumerate(lines) if re.search(head, l)]
+    if len(at) != 1:
+        fail("%s: expected one line matching %r, found %d" % (what, head, len(at)))
+    depth, opened = 0, False
+    for i in range(at[0], len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        opened = opened or "{" in lines[i]
+        if opened and depth <= 0:
+            return at[0], i
+    fail("%s: unbalanced braces" % what)
+
+files = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    with open(path, encoding="utf-8") as f:
+        files[path] = strip_swift(f.read(), path).split("\n")
+store_path, bridge_path = "Dobby/Offline/OfflineStore.swift", "Dobby/Web/WebBridge.swift"
+store, bridge = files[store_path], files[bridge_path]
+
+def calls(name):
+    return [(p, i) for p, ls in files.items() for i, l in enumerate(ls)
+            if re.search(r"\b%s\(" % name, l) and not re.search(r"\bfunc\s+%s\(" % name, l)]
+
+SEAM = '        if ServerAddresses.noServerSeamActive() { refuseBookDownload(json, "DOBBY_NO_SERVER seam"); return }'
+PI = '        if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }'
+bs, be = block(store, r"^    func startBookDownload\(_ json: String\) \{$", "startBookDownload")
+if store[bs + 1:bs + 5] != ["        #if DEBUG", SEAM, "        #endif", PI] \
+        or not store[bs + 5].startswith("        guard let p = BookDownloadPayload.decode(json)"):
+    fail("startBookDownload must open with the seam refusal and the Pi setting refusal, before the "
+         "payload decode: %r" % store[bs + 1:bs + 6])
+if len([l for l in store if re.search(r"\bfunc\s+startBookDownload\s*\(", l)]) != 1:
+    fail("OfflineStore must define startBookDownload exactly once")
+rs, re_ = block(store, r"^    private func refuseBookDownload\(_ json: String, _ why: String\) \{$", "refuseBookDownload")
+if store[rs + 1:re_ + 1] != [
+        '        NSLog("Dobby offline: book download refused (%@)", why)',
+        "        guard let bookId = BookDownloadPayload.decode(json)?.bookId else { return }",
+        '        let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,',
+        '                                "error": "Turn on Use a Pi server to download this book."]',
+        "        if let js = try? jsonString(d) { reportProgress?(js) }",
+        "    }"]:
+    fail("refuseBookDownload no longer reads as pinned: %r" % store[rs + 1:re_ + 1])
+if len([l for l in store if re.search(r"\bfunc\s+refuseBookDownload\s*\(", l)]) != 1:
+    fail("OfflineStore must define refuseBookDownload exactly once; a local one shadows it")
+if sorted(calls("refuseBookDownload")) != [(store_path, bs + 2), (store_path, bs + 4)]:
+    fail("refuseBookDownload must be called from startBookDownload's two refusals only: %s" % calls("refuseBookDownload"))
+case = [i for i, l in enumerate(bridge) if l == '        case "downloadNativeBook":']
+if len(case) != 1 or bridge[case[0] + 1] != "            if let json = payload as? String { offline.startBookDownload(json) }" \
+        or calls("startBookDownload") != [(bridge_path, case[0] + 1)]:
+    fail("WebBridge's downloadNativeBook must be startBookDownload's only caller: %s" % calls("startBookDownload"))
+
+pub = os.environ.get("PIOFFBOOK_PUB", "")
+if not os.path.isfile(os.path.join(pub, "js", "12-service-worker-offline.js")):
+    print("SKIP: no dobby checkout at %r; the PWA half of the #213 check needs it" % pub)
+    sys.exit(0)
+with open(os.path.join(pub, "js", "12-service-worker-offline.js"), encoding="utf-8") as f:
+    off = strip_js(f.read()).split("\n")
+ts, te = block(off, r"^function toggleNativeBookDownload\(\) \{$", "toggleNativeBookDownload")
+live = [l for l in off[ts + 1:te] if l.strip()]
+gate = ("  if (!getPiEnabled()) { if (typeof showToast === 'function') showToast('Turn on Use a Pi server "
+        "to download this book.', true); updateDownloadButton(); return; }")
+flight = "  if (entry && entry.status === 'downloading') return;   "
+post = [i for i, l in enumerate(live) if "b.downloadNativeBook(" in l]
+if live.count(gate) != 1 or live.count(flight) != 1 or live.index(gate) != live.index(flight) + 1 \
+        or len(post) != 1 or not live.index(gate) < post[0]:
+    fail("toggleNativeBookDownload must refuse on getPiEnabled() right after its in-flight return, "
+         "before its one bridge post")
+us, ue = block(off, r"^function updateNativeBookDownloadButton\(\) \{$", "updateNativeBookDownloadButton")
+live = [l for l in off[us + 1:ue] if l.strip()]
+if live[:10] != [
+        "  if (!currentBook) return;",
+        "  var btn = document.getElementById('download-btn');",
+        "  var pauseBtn = document.getElementById('download-pause-btn');",
+        "  var cancelBtn = document.getElementById('download-cancel-btn');",
+        "  var entry = nativeBookEntry(currentBook.id);",
+        "  if (!getPiEnabled() && !(entry && (entry.complete || entry.status === 'downloading'))) {",
+        "    document.getElementById('download-area').style.display = 'none';",
+        "    return;",
+        "  }",
+        "  document.getElementById('download-area').style.display = '';"]:
+    fail("updateNativeBookDownloadButton must hide the area on getPiEnabled() before showing it, "
+         "remove and cancel kept: %r" % live[:10])
+print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startBookDownload refuses "
+      "first, with a book error event and no URLSession, from its one caller, and the page hides the "
+      "download it cannot finish and never posts it, remove and cancel kept (#213)")
+PIOFFBOOKDOWNLOADPY

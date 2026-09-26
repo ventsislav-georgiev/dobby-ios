@@ -116,6 +116,13 @@ final class OfflineStore: NSObject, ObservableObject {
     // MARK: Bridge actions — BOOK (multi-chapter, background)
 
     func startBookDownload(_ json: String) {
+        // #213: every chapter and the #210 extras come from the Pi, and URLSession traffic is
+        // not WebKit's, so PiRequestBlock never sees it. With the Pi setting off (or the DEBUG
+        // DOBBY_NO_SERVER seam, the #149 rule) nothing starts, and an existing entry is untouched.
+        #if DEBUG
+        if ServerAddresses.noServerSeamActive() { refuseBookDownload(json, "DOBBY_NO_SERVER seam"); return }
+        #endif
+        if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }
         guard let p = BookDownloadPayload.decode(json), !p.bookId.isEmpty, !p.chapters.isEmpty else {
             NSLog("Dobby offline: bad book payload"); return
         }
@@ -141,6 +148,16 @@ final class OfflineStore: NSObject, ObservableObject {
             tasks[key] = task
             task.resume()
         }
+    }
+
+    /// #213: an error event the page's handleNativeBookProgress already renders (a toast and
+    /// the button re-read). Reports only; the index and the book's folder stay as they were.
+    private func refuseBookDownload(_ json: String, _ why: String) {
+        NSLog("Dobby offline: book download refused (%@)", why)
+        guard let bookId = BookDownloadPayload.decode(json)?.bookId else { return }
+        let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,
+                                "error": "Turn on Use a Pi server to download this book."]
+        if let js = try? jsonString(d) { reportProgress?(js) }
     }
 
     /// #210: a downloaded book's listing entry and cover, kept beside its audio. The Pi-off
