@@ -326,12 +326,18 @@ if track.count("    let isDefault: Bool?") != 1:
     fail("SubtitleTrack no longer declares isDefault: Bool? once")
 if keys.count('        case isDefault = "default"') != 1 or len([l for l in keys if "isDefault" in l]) != 1:
     fail('SubtitleTrack.CodingKeys must map isDefault to the page\'s "default" key, once: %r' % keys)
-apply = block(swift_lines("Dobby/Playback/PlaybackCoordinator.swift"), "    private func applyInitialSubtitles() {", "applyInitialSubtitles")
+coordinator = swift_lines("Dobby/Playback/PlaybackCoordinator.swift")
+apply = block(coordinator, "    private func applyInitialSubtitles() {", "applyInitialSubtitles")
 if apply.count("            if t.isDefault == true { selected = info }") != 1 \
         or apply.count("        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }") != 1:
     fail("applyInitialSubtitles no longer selects the track the page flagged default")
+# The body alone is a guard on a function nobody calls: pin its one live call, on first open.
+call = "            if resumeSeconds == nil { applyInitialSubtitles() }"
+ready = block(coordinator, "        if state == .readyToPlay, !didSeekToStart {", "the first-open readyToPlay branch")
+if ready.count(call) != 1 or len([l for l in coordinator if "applyInitialSubtitles()" in l and "func " not in l]) != 1:
+    fail("applyInitialSubtitles must be called exactly once, live, from the first-open readyToPlay branch")
 print('PASS: SubtitleTrack.CodingKeys maps isDefault to the page\'s "default" key and '
-      "applyInitialSubtitles selects the flagged track (#228)")
+      "applyInitialSubtitles, called once on first open, selects the flagged track (#228)")
 ISDEFAULTKEYPY
 
 # The seed only exists if PlayerView actually calls it. Deleting `scrub.begin(at:)` from
