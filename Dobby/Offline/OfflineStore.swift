@@ -5,8 +5,8 @@ import Foundation
 /// Unlimited size — straight to disk, no Service-Worker cache quota.
 ///
 /// Two URLSessions:
-///  - `session` (.default): subtitle sidecars only — small, completion-handler based,
-///    which a background session does not allow.
+///  - `session` (.default): subtitle sidecars and a book's listing entry and cover (#210)
+///    only — small, completion-handler based, which a background session does not allow.
 ///  - `bgSession` (.background): the media transfers, AUDIOBOOK chapters and VIDEO
 ///    files alike. iOS suspends the app (and with it any .default task) shortly after
 ///    it leaves the foreground, which killed video downloads with a timeout; a
@@ -131,6 +131,7 @@ final class OfflineStore: NSObject, ObservableObject {
                                 bytes: 0, total: 0, status: "downloading")
         saveIndex()
         emitBook(p.bookId)
+        if let first = files.first.flatMap({ URL(string: $0.url) }) { fetchBookExtras(p.bookId, dir: dir, server: first) }
 
         for ch in files {
             guard let url = URL(string: ch.url) else { markChapter(p.bookId, ch.fileName, "error"); continue }
@@ -141,6 +142,62 @@ final class OfflineStore: NSObject, ObservableObject {
             task.resume()
         }
     }
+
+    /// #210: a downloaded book's listing entry and cover, kept beside its audio. The Pi-off
+    /// page lists, opens and draws the book from these (`nativeOfflineBooks` and
+    /// `nativeBookCoverUrl` in the PWA's js/12-service-worker-offline.js). Without them it
+    /// had only the service worker's Cache Storage, which a Pi-off page may not have (no
+    /// service worker on an origin outside WKAppBoundDomains, a first load, eviction), and
+    /// `PiRequestBlock` refuses the Pi's cover URL whatever that cache holds. Fetched
+    /// natively from `server`'s origin (only scheme, host and port are read), so it needs
+    /// nothing from the page.
+    private func fetchBookExtras(_ bookId: String, dir: URL, server: URL) {
+        guard var c = URLComponents(url: server, resolvingAgainstBaseURL: false),
+              let id = bookId.addingPercentEncoding(withAllowedCharacters: Self.pathSegment) else { return }
+        c.query = nil
+        c.fragment = nil
+        c.percentEncodedPath = "/api/books/" + id
+        guard let metaURL = c.url else { return }
+        session.dataTask(with: metaURL) { [weak self] data, response, _ in
+            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let meta = String(data: data, encoding: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            // The page's own rule (renderBookItem): coverImageURL wins, else the Pi's cover.
+            let cover = (obj["coverImageURL"] as? String).flatMap { URL(string: $0, relativeTo: metaURL)?.absoluteURL }
+                ?? ((obj["hasCover"] as? Bool) == true ? metaURL.appendingPathComponent("cover") : nil)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.storeBookExtras(bookId, meta: meta, cover: cover, dir: dir) }
+            }
+        }.resume()
+    }
+
+    /// #210: a book finished before this build has audio but no listing entry, so the Pi-off
+    /// page still could not list it. Called with the Pi's origin on every Pi-backed page
+    /// load (WebBridge `ready`); a no-op once every finished book has its entry.
+    func backfillBookExtras(server: URL) {
+        for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {
+            fetchBookExtras(id, dir: root.appendingPathComponent(id, isDirectory: true), server: server)
+        }
+    }
+
+    private func storeBookExtras(_ bookId: String, meta: String, cover: URL?, dir: URL) {
+        guard var e = index[bookId] else { return }   // cancelled meanwhile
+        e.meta = meta
+        index[bookId] = e
+        saveIndex()
+        guard let cover else { return }
+        downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in
+            guard ok, let self, var e = self.index[bookId] else { return }
+            e.cover = Self.coverFile
+            self.index[bookId] = e
+            self.saveIndex()
+        }
+    }
+
+    /// No extension on purpose: a cover may be a JPEG or a PNG, and WebKit decodes an
+    /// image by its bytes, not by the scheme handler's `application/octet-stream`.
+    static let coverFile = "cover"
+    private static let pathSegment = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
     func cancel(_ id: String) {
         for (key, t) in tasks where key.hasSuffix("\t\(id)") || key.contains("\t\(id)\t") {
@@ -361,6 +418,11 @@ private struct Entry: Codable {
     var bytes: Int64
     var total: Int64
     var status: String
+    /// #210, books only: GET /api/books/{id} as the Pi answered it (a JSON string this side
+    /// never interprets beyond the cover fields) and the cover's file name in the book's
+    /// folder. Optional, so an index written before #210 still decodes.
+    var meta: String? = nil
+    var cover: String? = nil
 
     /// JSON shape the web reads (`window.Dobby._offline` entries). `anchor` re-bases
     /// a stored absolute path onto the app's current container (#125: the container
@@ -372,6 +434,8 @@ private struct Entry: Codable {
             let p = anchor(s.path)
             return ["path": p, "uri": "file://" + p, "lang": s.lang, "label": s.label]
         }
+        if let meta { d["meta"] = meta }
+        if let cover { d["cover"] = cover }
         if let chapters {
             d["complete"] = (status == "complete")
             d["chapters"] = chapters.map { ["name": $0.name, "status": $0.status] }

@@ -87,6 +87,10 @@ reads = {
     "PLAYSVIDEOGATEPY": ([SW, JS], ["    src = strip_swift(f.read(), path)",
                                     "        texts[os.path.basename(p)] = strip_js(f.read())"],
                          ['with open(path, encoding="utf-8") as f:', '    with open(p, encoding="utf-8") as f:']),
+    "OFFLINEBOOKMETAPY": ([SW, JS], ["        src = strip_swift(f.read(), path)",
+                                     '        js[n] = strip_js(f.read()).split("\\n")'],
+                          ['    with open(path, encoding="utf-8") as f:',
+                           '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -3182,3 +3186,183 @@ print("PASS: with the Pi off the Apple wrapper closes the /offline-video/ web-en
       "of playStreamUrl, before tryDispatch, the modal and the playsvideo engine, on window.Dobby."
       "canPlayNative and getPiEnabled() (#200)")
 PLAYSVIDEOGATEPY
+
+# #210: with the Pi off, a book downloaded while it was on must still be listed, open and draw
+# its cover. The native download never writes the service worker's Cache Storage, so the page's
+# only listing source for it was whatever that cache happened to hold, and its cover URL points
+# at the Pi, which PiRequestBlock refuses. The wrapper now saves GET /api/books/{id} and the
+# cover beside the audio and hands both to the page in its offline index.
+# Pinned, both ends of each name that crosses the bridge:
+#   OfflineStore: the Entry fields, the dict lines that emit "meta" and "cover" (inside dict,
+#     before chapters and return), the fetchBookExtras call at the top level of
+#     startBookDownload after the index entry exists, and the fetch/store/backfill pieces it
+#     rests on, storeBookExtras answering on main.
+#   WebBridge: the backfill at the top level of case "ready", after the index push, behind
+#     ServerAddresses.piEnabled(), outside any #if, and its only caller.
+#   PWA: nativeOfflineBooks reads e.meta, nativeBookCoverUrl reads e.cover (no-server only),
+#     and loadLibrary merges them at its top level, after the cache fallback, before
+#     renderLibrary and renderOfflineBooks. The behaviour is the PWA's
+#     Tests/integration/ios-offline-book-native-meta.test.js.
+# Ceiling: textual; a caller reached through a closure stored under another name is not seen.
+OFFLINEBOOK_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'OFFLINEBOOKMETAPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#210)\n" % msg)
+    sys.exit(1)
+
+def swift(path):
+    with open(path, encoding="utf-8") as f:
+        src = strip_swift(f.read(), path)
+    return src.split("\n")
+
+def block(lines, head, what):
+    at = [i for i, l in enumerate(lines) if re.search(head, l)]
+    if len(at) != 1:
+        fail("%s: expected one line matching %r, found %d" % (what, head, len(at)))
+    depth, opened = 0, False
+    for i in range(at[0], len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        opened = opened or "{" in lines[i]
+        if opened and depth <= 0:
+            return at[0], i
+    fail("%s: unbalanced braces" % what)
+
+def top_level(lines, s, e, line, what):
+    """The one index of `line` in lines[s+1..e-1], at the block's own depth: not inside a
+    nested if, closure or #if, and with no return ahead of it at that depth."""
+    hits = [i for i in range(s + 1, e) if lines[i] == line]
+    if len(hits) != 1:
+        fail("%s: expected exactly one %r, found %d" % (what, line.strip(), len(hits)))
+    depth = ifs = 0
+    for l in lines[s + 1:hits[0]]:
+        st = l.strip()
+        if depth == 0 and ifs == 0 and re.match(r"return\b", st):
+            fail("%s: a return at the top level runs before %r" % (what, line.strip()))
+        depth += l.count("{") - l.count("}")
+        ifs += 1 if st.startswith("#if") else -1 if st.startswith("#endif") else 0
+    if depth or ifs:
+        fail("%s: %r sits inside a nested block or #if" % (what, line.strip()))
+    return hits[0]
+
+def calls(files, name):
+    out = []
+    for path, lines in files.items():
+        for i, l in enumerate(lines):
+            if re.search(r"\b%s\(" % name, l) and not re.search(r"\bfunc\s+%s\(" % name, l):
+                out.append((path, i))
+    return out
+
+store_path, bridge_path = "Dobby/Offline/OfflineStore.swift", "Dobby/Web/WebBridge.swift"
+store, bridge = swift(store_path), swift(bridge_path)
+
+# Entry carries both fields, optional so a pre-#210 index.json still decodes.
+s, e = block(store, r"^private struct Entry: Codable \{$", "Entry")
+for f in ("    var meta: String? = nil", "    var cover: String? = nil"):
+    top_level(store, s, e, f, "Entry")
+# Producer end of both bridge names: in dict, on the book's live path, before chapters/return.
+ds, de = block(store, r"^    func dict\(anchor: \(String\) -> String\) -> \[String: Any\] \{$", "Entry.dict")
+dvar = top_level(store, ds, de, '        var d: [String: Any] = ["id": videoId, "videoId": videoId, "kind": kind, "title": title, "status": status]', "Entry.dict")
+meta = top_level(store, ds, de, '        if let meta { d["meta"] = meta }', "Entry.dict")
+cover = top_level(store, ds, de, '        if let cover { d["cover"] = cover }', "Entry.dict")
+chap = top_level(store, ds, de, "        if let chapters {", "Entry.dict")
+ret = top_level(store, ds, de, "        return d", "Entry.dict")
+if not dvar < meta < chap < ret or not dvar < cover < chap:
+    fail("Entry.dict must emit meta and cover after building d and before chapters and return d")
+
+# The fetch is started by every book download, once the index entry it fills exists.
+bs, be = block(store, r"^    func startBookDownload\(_ json: String\) \{$", "startBookDownload")
+entry = [i for i in range(bs, be) if store[i].startswith("        index[p.bookId] = Entry(")]
+emit = top_level(store, bs, be, "        emitBook(p.bookId)", "startBookDownload")
+call = top_level(store, bs, be, "        if let first = files.first.flatMap({ URL(string: $0.url) }) "
+                 "{ fetchBookExtras(p.bookId, dir: dir, server: first) }", "startBookDownload")
+loop = top_level(store, bs, be, "        for ch in files {", "startBookDownload")
+if len(entry) != 1 or not entry[0] < emit < call < loop:
+    fail("startBookDownload must start fetchBookExtras after the index entry and emitBook, before "
+         "the chapter loop")
+fs_, fe = block(store, r"^    private func fetchBookExtras\(_ bookId: String, dir: URL, server: URL\) \{$", "fetchBookExtras")
+body = store[fs_:fe + 1]
+for l in ['        c.percentEncodedPath = "/api/books/" + id',
+          "        session.dataTask(with: metaURL) { [weak self] data, response, _ in",
+          "            DispatchQueue.main.async {",
+          "                MainActor.assumeIsolated { self?.storeBookExtras(bookId, meta: meta, cover: cover, dir: dir) }"]:
+    if body.count(l) != 1:
+        fail("fetchBookExtras no longer reads as pinned: %r" % l.strip())
+if body.index("            DispatchQueue.main.async {") + 1 != body.index(
+        "                MainActor.assumeIsolated { self?.storeBookExtras(bookId, meta: meta, cover: cover, dir: dir) }"):
+    fail("fetchBookExtras must hand the answer to storeBookExtras on the main queue")
+ss, se = block(store, r"^    private func storeBookExtras\(_ bookId: String, meta: String, cover: URL\?, dir: URL\) \{$", "storeBookExtras")
+sm = top_level(store, ss, se, "        e.meta = meta", "storeBookExtras")
+sv = top_level(store, ss, se, "        saveIndex()", "storeBookExtras")
+sd = top_level(store, ss, se, "        downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in", "storeBookExtras")
+if not sm < sv < sd or store[ss:se].count("            e.cover = Self.coverFile") != 1:
+    fail("storeBookExtras must save meta, then fetch the cover into Self.coverFile and record it")
+if store.count('    static let coverFile = "cover"') != 1:
+    fail('OfflineStore.coverFile must be the one `static let coverFile = "cover"`')
+ks, ke = block(store, r"^    func backfillBookExtras\(server: URL\) \{$", "backfillBookExtras")
+walk = top_level(store, ks, ke, '        for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {',
+                 "backfillBookExtras")
+fill_call = [i for i in range(walk, ke) if store[i] ==
+             "            fetchBookExtras(id, dir: root.appendingPathComponent(id, isDirectory: true), server: server)"]
+if fill_call != [walk + 1]:
+    fail("backfillBookExtras must fetch each unlisted finished book inside its walk")
+files = {}
+for p in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    files[p] = store if p == store_path else bridge if p == bridge_path else swift(p)
+fb = calls(files, "fetchBookExtras")
+if sorted(fb) != sorted([(store_path, call), (store_path, walk + 1)]):
+    fail("fetchBookExtras must be called from startBookDownload and backfillBookExtras only: %s" % fb)
+
+# The backfill runs on every Pi-backed page load, after the page has the index, never Pi-off.
+cs = [i for i, l in enumerate(bridge) if l == '        case "ready":']
+if len(cs) != 1:
+    fail('WebBridge must have one `case "ready":`')
+ce = next(i for i in range(cs[0] + 1, len(bridge)) if re.match(r"        (case |default:)", bridge[i]))
+push = top_level(bridge, cs[0], ce, '            callJS("window.Dobby && window.Dobby._setOffline(\\(offline.indexJSON()));")', "ready")
+fill = top_level(bridge, cs[0], ce, "            if ServerAddresses.piEnabled(), let origin = webView?.url "
+                 "{ offline.backfillBookExtras(server: origin) }", "ready")
+if not push < fill:
+    fail("the backfill must run after the ready index push")
+bf = calls(files, "backfillBookExtras")
+if bf != [(bridge_path, fill)]:
+    fail("backfillBookExtras must be called only from WebBridge's ready: %s" % bf)
+
+pub = os.environ.get("OFFLINEBOOK_PUB", "")
+if not os.path.isfile(os.path.join(pub, "js", "04-library.js")):
+    print("SKIP: no dobby checkout at %r; the PWA half of the #210 check needs it" % pub)
+    sys.exit(0)
+js = {}
+for n in ("04-library.js", "12-service-worker-offline.js"):
+    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:
+        js[n] = strip_js(f.read()).split("\n")
+off, lib = js["12-service-worker-offline.js"], js["04-library.js"]
+# Consumer end of both names.
+ns, ne = block(off, r"^function nativeOfflineBooks\(\) \{$", "nativeOfflineBooks")
+if off[ns:ne].count("    try { var m = e && e.meta ? JSON.parse(e.meta) : null; } catch (x) { return null; }") != 1:
+    fail("nativeOfflineBooks no longer reads the wrapper's e.meta")
+cs_, ce_ = block(off, r"^function nativeBookCoverUrl\(bookId\) \{$", "nativeBookCoverUrl")
+if off[cs_ + 1:ce_] != ["  if (!isNoServer()) return '';", "  var e = nativeBookEntry(bookId);",
+                        "  return e && e.complete === true && e.cover ? window.Dobby.offlineFileURL(bookId, e.cover) : '';"]:
+    fail("nativeBookCoverUrl must read the wrapper's e.cover, no-server only: %r" % off[cs_ + 1:ce_])
+ls, le = block(lib, r"^async function loadLibrary\(\) \{$", "loadLibrary")
+rec = [i for i in range(ls, le) if lib[i] == "      if (recovered.length) allBooks = recovered;"]
+merge = top_level(lib, ls, le, "  if (!gotListingFromServer && typeof nativeOfflineBooks === 'function') {", "loadLibrary")
+if lib[merge + 1:merge + 4] != ["    const listed = new Set(allBooks.map(b => b && b.id));",
+                                "    allBooks = allBooks.concat(nativeOfflineBooks().filter(b => !listed.has(b.id)));", "  }"]:
+    fail("loadLibrary's #210 merge no longer reads as pinned: %r" % lib[merge + 1:merge + 4])
+lr = top_level(lib, ls, le, "  renderLibrary(allBooks);", "loadLibrary")
+ro = top_level(lib, ls, le, "  renderOfflineBooks();", "loadLibrary")
+if len(rec) != 1 or not rec[0] < merge < lr < ro:
+    fail("loadLibrary must merge the wrapper's books after the cache fallback and before "
+         "renderLibrary and renderOfflineBooks")
+print("PASS: a book the wrapper downloaded keeps its listing entry and cover in the offline index "
+      "(meta and cover, both ends), fetched on every book download and backfilled on Pi-backed "
+      "ready only, and the Pi-off page lists it after the cache fallback and draws its cover (#210)")
+OFFLINEBOOKMETAPY
