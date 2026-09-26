@@ -172,9 +172,16 @@ final class OfflineStore: NSObject, ObservableObject {
     }
 
     /// #210: a book finished before this build has audio but no listing entry, so the Pi-off
-    /// page still could not list it. Called with the Pi's origin on every Pi-backed page
-    /// load (WebBridge `ready`); a no-op once every finished book has its entry.
+    /// page still could not list it. Called with the page's origin on every page load while
+    /// the Pi setting is on (WebBridge `ready`); a no-op once every finished book has its
+    /// entry. A Pi that is on but unreachable (Continue offline) only gets GETs that fail,
+    /// and the next reachable load backfills.
     func backfillBookExtras(server: URL) {
+        // #149 rule, as ApiSchemeHandler's pushSettings/fetchSettings: DOBBY_NO_SERVER removes
+        // the Pi from this leg too, so a seam-driven Pi-off round sends nothing to a real Pi.
+        #if DEBUG
+        if ServerAddresses.noServerSeamActive() { NSLog("Dobby offline: book backfill skipped (DOBBY_NO_SERVER seam)"); return }
+        #endif
         for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {
             fetchBookExtras(id, dir: root.appendingPathComponent(id, isDirectory: true), server: server)
         }

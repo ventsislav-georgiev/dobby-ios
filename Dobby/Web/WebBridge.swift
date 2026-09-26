@@ -81,7 +81,8 @@ extension WebBridge: WKScriptMessageHandler {
         case "ready":
             NSLog("%@", "Dobby ready bridge \(String(describing: payload))")
             callJS("window.Dobby && window.Dobby._setOffline(\(offline.indexJSON()));")
-            // #210: Pi-backed pages only; with the Pi off nothing may reach it.
+            // #210: Pi setting on only; with it off nothing may reach the Pi. The DEBUG
+            // DOBBY_NO_SERVER seam is checked inside backfillBookExtras.
             if ServerAddresses.piEnabled(), let origin = webView?.url { offline.backfillBookExtras(server: origin) }
             pushCarRoute(playback.carRoute.isCar)   // page reload lost the latched value
             // Siri may have launched us with a command; the page can run it now.
