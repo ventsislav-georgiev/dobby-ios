@@ -125,6 +125,8 @@ enum ServerAddressesCheck {
         check(ServerAddresses.isPiOrigin("http://192.0.2.31:8080/stream/x.mkv", candidates: pi), "the Pi's LAN address is the Pi")
         check(ServerAddresses.isPiOrigin("https://PI.example.invalid/api/proxy?url=x", candidates: pi), "a candidate host in any case is the Pi")
         check(ServerAddresses.isPiOrigin("https://192.0.2.31/x", candidates: pi), "a candidate host on another scheme and port is the Pi")
+        check(ServerAddresses.isPiOrigin("https://pi.example.invalid/x", candidates: [URL(string: "https://PI.example.invalid")!]),
+              "a candidate saved in upper case is the Pi for a lower-case URL host (#225, URL.host keeps case)")
         check(ServerAddresses.isPiOrigin("/api/subtitles/fetch?provider=a4k&download=1", candidates: pi), "a page-relative URL is the Pi")
         check(!ServerAddresses.isPiOrigin("https://cdn.example.net/dl/x.mkv", candidates: pi), "a debrid link is not the Pi")
         check(!ServerAddresses.isPiOrigin("http://192.0.2.32:8080/x", candidates: pi), "a neighbouring LAN host is not the Pi")
