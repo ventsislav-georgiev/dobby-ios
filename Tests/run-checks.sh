@@ -84,6 +84,9 @@ reads = {
     "PIGATEPY": ([SW, JS], ["        return strip_swift(f.read(), path)", "literal = strip_js(literal)"],
                  ['    with open(path, encoding="utf-8") as f:', '    with open(gate_file, encoding="utf-8") as f:',
                   "        js = f.read()"]),
+    "PLAYSVIDEOGATEPY": ([SW, JS], ["    src = strip_swift(f.read(), path)",
+                                    "        texts[os.path.basename(p)] = strip_js(f.read())"],
+                         ['with open(path, encoding="utf-8") as f:', '    with open(p, encoding="utf-8") as f:']),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -3031,3 +3034,109 @@ print("PASS: the wrapper calls exactly %d dobbyNative page callback(s), %d defin
       "%s by design (#205)" % (len(EXPECTED), len(EXPECTED) - len(NOT_DEFINED_BY_PWA),
                                ", ".join(sorted(NOT_DEFINED_BY_PWA)) + " undefined"))
 NATIVECALLBACKSPY
+
+# #200: the web video engine on the Apple wrapper with "Use a Pi server" off. Every stream goes
+# to KSPlayer (window.Dobby.canPlayNative) except a relative /offline-video/<id> URL, the service
+# worker's cache on the page origin, which dobbyTvNative.tryDispatch leaves to the web engine.
+# With the Pi off, PiRequestBlock refuses that origin before the service worker sees the request
+# (measured: a controlling SW holding the file in Cache Storage still answers "Load failed"), and
+# the playsvideo bundle, which the import does reach over dobby-offline://shell because a classic
+# script's import() resolves against the script URL, cannot start its module worker there. So the
+# lane is closed in the PWA's playStreamUrl, the one place both /offline-video/ producers
+# (playOfflineVideoById, the source picker's cached row) pass through, before any UI opens.
+#   consumer: the exact four-line guard, at the top level of playStreamUrl, before tryDispatch,
+#     before the modal opens and before the engine branch, with no return ahead of it.
+#   producers: the gate's inputs, each defined once: isOfflineVideoUrl and offlineVideoUrl with
+#     the one path literal, isDobbyWrapper reading window.Dobby.canPlayNative, getPiEnabled; on
+#     this side, BridgeInjection's canPlayNative = true outside any #if and its literal member
+#     (piEnabled's members are PIGATEPY's).
+# Ceiling: textual; a playStreamUrl reassigned at runtime from a string is not seen.
+PLAYSVIDEO_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'PLAYSVIDEOGATEPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#200)\n" % msg)
+    sys.exit(1)
+
+path = "Dobby/Web/BridgeInjection.swift"
+with open(path, encoding="utf-8") as f:
+    src = strip_swift(f.read(), path)
+lines = src.split("\n")
+decl = [i for i, l in enumerate(lines) if re.search(r"\bstatic\s+(let|var)\s+canPlayNative\b", l)]
+if len(decl) != 1 or lines[decl[0]] != "    static let canPlayNative = true":
+    fail("BridgeInjection must declare exactly one `    static let canPlayNative = true`, found %s"
+         % [lines[i] for i in decl])
+depth = 0
+for l in lines[:decl[0]]:
+    s = l.strip()
+    depth += 1 if s.startswith("#if") else -1 if s.startswith("#endif") else 0
+if depth != 0:
+    fail("`static let canPlayNative = true` sits inside an #if block; it must hold in every build")
+member = '            canPlayNative: \\(canPlayNative ? "true" : "false"),'
+if lines.count(member) != 1:
+    fail("the window.Dobby literal must carry exactly one %r" % member)
+
+pub = os.environ.get("PLAYSVIDEO_PUB", "")
+js_files = sorted(glob.glob(os.path.join(pub, "js", "*.js")))
+if not js_files:
+    print("SKIP: no dobby checkout at %r; the PWA half of the #200 playsvideo gate needs it" % pub)
+    sys.exit(0)
+texts = {}
+for p in js_files:
+    with open(p, encoding="utf-8") as f:
+        texts[os.path.basename(p)] = strip_js(f.read())
+
+def defined_once(name, file, block):
+    where = [n for n, t in texts.items() if re.search(r"^function\s+%s\s*\(|\b%s\s*=(?!=)" % (name, name), t, re.M)]
+    if where != [file]:
+        fail("%s must be defined once, in js/%s; found in %s" % (name, file, where))
+    if ("\n" + block + "\n") not in texts[file]:
+        fail("js/%s: %s no longer reads as pinned:\n%s" % (file, name, block))
+
+defined_once("offlineVideoUrl", "07-bookmarks.js",
+             "function offlineVideoUrl(videoId) {\n  return '/offline-video/' + encodeURIComponent(videoId);\n}")
+defined_once("isOfflineVideoUrl", "07-bookmarks.js",
+             "function isOfflineVideoUrl(url) {\n"
+             "  try { return new URL(url, window.location.origin).pathname.startsWith('/offline-video/'); }\n"
+             "  catch(e) { return String(url || '').startsWith('/offline-video/'); }\n}")
+defined_once("isDobbyWrapper", "20-all-cast.js",
+             "function isDobbyWrapper() {\n  return !!(window.Dobby && window.Dobby.canPlayNative === true);\n}")
+defined_once("getPiEnabled", "12-service-worker-offline.js",
+             "function getPiEnabled() {\n  var bridge = piEnabledBridge();\n  if (!bridge) return true;\n"
+             "  try { return bridge.piEnabled() === true; } catch (e) { return true; }\n}")
+defined_once("playStreamUrl", "21-android-tv.js", "function playStreamUrl(url) {")
+
+text = texts["21-android-tv.js"]
+start = text.index("\nfunction playStreamUrl(url) {\n") + 1
+end = text.find("\n}\n", start)
+body = text[start:end].split("\n")
+GUARD = ["  if (isOfflineVideoUrl(url) && isDobbyWrapper() && !getPiEnabled()) {",
+         "    showToast('This offline copy lives in the Pi web cache. Turn on Use a Pi server to play it.', true);",
+         "    return;",
+         "  }"]
+at = [i for i in range(len(body)) if body[i:i + len(GUARD)] == GUARD]
+if len(at) != 1 or sum(l.count("getPiEnabled") for l in body) != 1:
+    fail("playStreamUrl must open with the exact #200 guard, once:\n%s" % "\n".join(GUARD))
+g = at[0]
+depth = 0
+for l in body[1:g]:
+    depth += l.count("{") - l.count("}")
+    if re.search(r"\breturn\b", l) and depth == 0:
+        fail("playStreamUrl returns before the #200 guard: %r" % l)
+if depth != 0:
+    fail("the #200 guard is nested inside a block of playStreamUrl; it must sit at its top level")
+for reader in ["dobbyTvNative.tryDispatch(url", "modal.classList.add('active');", "  if (isOfflineVideoUrl(url)) {"]:
+    hits = [i for i, l in enumerate(body) if reader in l]
+    if not hits or hits[0] < g:
+        fail("playStreamUrl: %r must come after the #200 guard (found at %s, guard at %d)" % (reader, hits, g))
+print("PASS: with the Pi off the Apple wrapper closes the /offline-video/ web-engine lane at the top "
+      "of playStreamUrl, before tryDispatch, the modal and the playsvideo engine, on window.Dobby."
+      "canPlayNative and getPiEnabled() (#200)")
+PLAYSVIDEOGATEPY
