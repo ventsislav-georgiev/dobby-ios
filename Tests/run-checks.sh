@@ -1791,6 +1791,8 @@ need(wf, "gh release download bundle-latest",
 #    ends so the workflow and the script cannot drift apart.
 need(wf, 'dest="dobby/Sources/DobbyServer/Public/playsvideo/assets"',
      "the extraction target must be dobby/Sources/DobbyServer/Public/playsvideo/assets (#167)")
+need(sh, 'PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}"',
+     "copy-app-shell.sh must default to ../dobby/Sources/DobbyServer/Public, the checkout the workflow extracts into (#167, #205)")
 need(sh, 'os.path.join(public_dir, "playsvideo/assets")',
      "copy-app-shell.sh must still read playsvideo/assets under Public — if this literal moves, the workflow's extraction target has to move with it (#167)")
 
@@ -2961,7 +2963,7 @@ swift_files = sorted(p for d in ("Dobby", "Shared", "DobbyWidgets")
 if len(swift_files) < 20:
     fail("only %d Swift file(s) found; the scan has gone blind" % len(swift_files))
 called = {}
-emit_forward = 0
+coordinator = None
 for path in swift_files:
     with open(path, encoding="utf-8") as f:
         src = strip_swift(f.read(), path)
@@ -2971,10 +2973,25 @@ for path in swift_files:
         called.setdefault(m.group(1), set()).add(path)
     for m in re.finditer(r'\bemit\("([A-Za-z_]\w*)"', src):
         called.setdefault(m.group(1), set()).add(path)
-    emit_forward += src.count('bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")')
-if emit_forward != 1:
-    fail("PlaybackCoordinator.emit must forward fn into exactly one guarded callJS "
-         "'window.\\(fn) && window.\\(fn)(...)', found %d" % emit_forward)
+    if path == "Dobby/Playback/PlaybackCoordinator.swift":
+        coordinator = src
+# emit() is pinned by its own body, not a file-wide count: strip_swift keeps #if blocks, so a
+# count is satisfied by a forwarding line under #if false or parked in a dead helper.
+EMIT_SIG = "    private func emit(_ fn: String, completed: Bool) {"
+EMIT_FWD = 'bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")'
+if coordinator is None or coordinator.count(EMIT_SIG) != 1:
+    fail("PlaybackCoordinator.swift must declare exactly one %r" % EMIT_SIG.strip())
+start = coordinator.index(EMIT_SIG)
+end = coordinator.find("\n    }\n", start)
+if end < 0:
+    fail("PlaybackCoordinator.emit has no closing '    }' line")
+emit_body = [l.strip() for l in coordinator[start:end].split("\n")[1:]]
+emit_body = [l for l in emit_body if l]
+if any(l.startswith("#") for l in emit_body):
+    fail("PlaybackCoordinator.emit must carry no #if/#else/#endif line in its body, or the "
+         "forwarding line may be compiled out")
+if emit_body.count(EMIT_FWD) != 1 or emit_body[-1] != EMIT_FWD:
+    fail("PlaybackCoordinator.emit must end with exactly one %r as its last statement" % EMIT_FWD)
 bad = sorted(n for n in called if not n.startswith("dobbyNative"))
 if bad:
     fail("the wrapper calls page callback(s) without the dobbyNative prefix: %s. The PWA defines "
@@ -2994,7 +3011,8 @@ defined = set()
 for path in js_files:
     with open(path, encoding="utf-8") as f:
         text = strip_js(f.read())
-    defined |= set(re.findall(r"\bfunction\s+(dobbyNative\w+)\s*\(", text))
+    # Column 0 only: a function declared inside another one is not on window (the #158 layout).
+    defined |= set(re.findall(r"^function\s+(dobbyNative\w+)\s*\(", text, re.M))
     defined |= set(re.findall(r"\bwindow\.(dobbyNative\w+)\s*=(?!=)", text))
 missing = sorted(n for n in EXPECTED if n not in defined and n not in NOT_DEFINED_BY_PWA)
 if missing:
