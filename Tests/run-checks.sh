@@ -64,6 +64,7 @@ reads = {
                          ['check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()',
                           r'    pm = re.findall(r"var retryStatuses = options\.retryStatuses \|\| \[([\d, ]+)\];", open(page).read())']),
     "TIMELABELWIDTHPY": ([SW], ["src = strip_swift(open(path).read(), path)"], []),
+    "ISDEFAULTKEYPY": ([SW], ['    return strip_swift(open(path).read(), path).split("\\n")'], []),
     "SHELLIMAGESPY": ([SW], ['rewrite = strip_swift(open("Dobby/Offline/BundledShell.swift").read(), "BundledShell.swift")',
                              'handler = strip_swift(open("Dobby/Offline/OfflineSchemeHandler.swift").read(), "OfflineSchemeHandler.swift")'],
                       ['with open(os.path.join(shell, "index.html"), encoding="utf-8") as f:',
@@ -290,6 +291,48 @@ if 'stored.range(of: "/Offline/")' not in anchor:
 
 print("PASS: OfflineStore.root ends in /Offline and anchorOfflinePath splits on that literal (#125)")
 OFFLINEROOTPY
+
+# #228: the page marks the offline sidecar to select with the JSON key "default"
+# (dobbyTvNative.playOfflineNative), the key Android reads too. iOS selects only a track whose
+# SubtitleTrack.isDefault decoded true, so the payload must map isDefault to "default" and
+# applyInitialSubtitles must select on it. A bare `case isDefault` decodes nothing and the
+# sidecar sits unselected with every other check green.
+python3 - <<'ISDEFAULTKEYPY'
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#228)\n" % msg)
+    sys.exit(1)
+
+def swift_lines(path):
+    return strip_swift(open(path).read(), path).split("\n")
+
+def block(lines, head, what):
+    starts = [i for i, l in enumerate(lines) if l == head]
+    if len(starts) != 1:
+        fail("expected exactly one %r for %s, found %d" % (head, what, len(starts)))
+    depth = 0
+    for i in range(starts[0], len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        if depth == 0:
+            return lines[starts[0] + 1:i]
+    fail("%s never closes" % what)
+
+track = block(swift_lines("Dobby/Playback/PlayNativePayload.swift"), "struct SubtitleTrack: Decodable {", "SubtitleTrack")
+keys = block(track, "    enum CodingKeys: String, CodingKey {", "SubtitleTrack.CodingKeys")
+if track.count("    let isDefault: Bool?") != 1:
+    fail("SubtitleTrack no longer declares isDefault: Bool? once")
+if keys.count('        case isDefault = "default"') != 1 or len([l for l in keys if "isDefault" in l]) != 1:
+    fail('SubtitleTrack.CodingKeys must map isDefault to the page\'s "default" key, once: %r' % keys)
+apply = block(swift_lines("Dobby/Playback/PlaybackCoordinator.swift"), "    private func applyInitialSubtitles() {", "applyInitialSubtitles")
+if apply.count("            if t.isDefault == true { selected = info }") != 1 \
+        or apply.count("        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }") != 1:
+    fail("applyInitialSubtitles no longer selects the track the page flagged default")
+print('PASS: SubtitleTrack.CodingKeys maps isDefault to the page\'s "default" key and '
+      "applyInitialSubtitles selects the flagged track (#228)")
+ISDEFAULTKEYPY
 
 # The seed only exists if PlayerView actually calls it. Deleting `scrub.begin(at:)` from
 # the Slider onEditingChanged leaves ScrubStateCheck green while the app is broken again -
