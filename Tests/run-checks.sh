@@ -3045,7 +3045,9 @@ NATIVECALLBACKSPY
 # lane is closed in the PWA's playStreamUrl, the one place both /offline-video/ producers
 # (playOfflineVideoById, the source picker's cached row) pass through, before any UI opens.
 #   consumer: the exact four-line guard, at the top level of playStreamUrl, before tryDispatch,
-#     before the modal opens and before the engine branch, with no return ahead of it.
+#     before the modal opens and before the engine branch, with no return or playback start ahead
+#     of it at any depth; the engine, initPlaysVideo and every playsvideo import reachable only
+#     behind it (the SmartTube lane aside).
 #   producers: the gate's inputs, each defined once: isOfflineVideoUrl and offlineVideoUrl with
 #     the one path literal, isDobbyWrapper reading window.Dobby.canPlayNative, getPiEnabled; on
 #     this side, BridgeInjection's canPlayNative = true outside any #if and its literal member
@@ -3126,16 +3128,54 @@ if len(at) != 1 or sum(l.count("getPiEnabled") for l in body) != 1:
     fail("playStreamUrl must open with the exact #200 guard, once:\n%s" % "\n".join(GUARD))
 g = at[0]
 depth = 0
+# Nothing ahead of the guard may leave playStreamUrl or start playback, at any depth: a return
+# inside a block, or a braceless engine call, would bypass it for some URLs.
+AHEAD = r"\breturn\b|\bplayStreamWithEngine\s*\(|\binitPlaysVideo\s*\(|\bplayNativeVideoUrl\s*\(|\bimport\s*\(|tryDispatch"
 for l in body[1:g]:
     depth += l.count("{") - l.count("}")
-    if re.search(r"\breturn\b", l) and depth == 0:
-        fail("playStreamUrl returns before the #200 guard: %r" % l)
+    if re.search(AHEAD, l):
+        fail("playStreamUrl: %r runs before the #200 guard" % l.strip())
 if depth != 0:
     fail("the #200 guard is nested inside a block of playStreamUrl; it must sit at its top level")
 for reader in ["dobbyTvNative.tryDispatch(url", "modal.classList.add('active');", "  if (isOfflineVideoUrl(url)) {"]:
     hits = [i for i, l in enumerate(body) if reader in l]
     if not hits or hits[0] < g:
         fail("playStreamUrl: %r must come after the #200 guard (found at %s, guard at %d)" % (reader, hits, g))
+
+# The engine and its bundle are entered only behind the guard, so no producer can reach them
+# around playStreamUrl: playStreamWithEngine is called only in playStreamUrl after the guard,
+# initPlaysVideo only in playStreamWithEngine, and a playsvideo import sits only in those two
+# or in the one SmartTube lane (22-smarttube.js, a Pi-backed stream).
+g_off = start + len("\n".join(body[:g]))
+func_end = end
+
+def body_span(sig):
+    s = text.index("\nfunction %s {\n" % sig) + 1
+    return s, text.find("\n}\n", s)
+
+def call_sites(pattern):
+    out = []
+    for n, t in texts.items():
+        for m in re.finditer(pattern, t):
+            if not re.search(r"function\s+$", t[max(0, m.start() - 20):m.start()]):
+                out.append((n, m.start()))
+    return out
+
+engine = call_sites(r"\bplayStreamWithEngine\s*\(")
+if not engine or any(n != "21-android-tv.js" or not g_off < p < func_end for n, p in engine):
+    fail("playStreamWithEngine must be called only inside playStreamUrl after the #200 guard: %s" % engine)
+pws, pwe = body_span("playStreamWithEngine(video, url, modal, sessionId)")
+init = call_sites(r"\binitPlaysVideo\s*\(")
+if not init or any(n != "21-android-tv.js" or not pws < p < pwe for n, p in init):
+    fail("initPlaysVideo must be called only inside playStreamWithEngine: %s" % init)
+ips, ipe = body_span("initPlaysVideo(video, url, modal, sessionId)")
+imports = call_sites(r"\bimport\s*\(\s*['\"`][^'\"`]*playsvideo/")
+smarttube = [p for n, p in imports if n == "22-smarttube.js"]
+stray = [(n, p) for n, p in imports
+         if not (n == "21-android-tv.js" and (ips < p < ipe or g_off < p < func_end)) and n != "22-smarttube.js"]
+if stray or len(smarttube) != 1 or not any(n == "21-android-tv.js" and ips < p < ipe for n, p in imports):
+    fail("a playsvideo import sits outside initPlaysVideo, playStreamUrl after the guard and the one "
+         "SmartTube lane: stray %s, smarttube %d" % (stray, len(smarttube)))
 print("PASS: with the Pi off the Apple wrapper closes the /offline-video/ web-engine lane at the top "
       "of playStreamUrl, before tryDispatch, the modal and the playsvideo engine, on window.Dobby."
       "canPlayNative and getPiEnabled() (#200)")
