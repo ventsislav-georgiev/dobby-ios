@@ -2975,23 +2975,28 @@ for path in swift_files:
         called.setdefault(m.group(1), set()).add(path)
     if path == "Dobby/Playback/PlaybackCoordinator.swift":
         coordinator = src
-# emit() is pinned by its own body, not a file-wide count: strip_swift keeps #if blocks, so a
-# count is satisfied by a forwarding line under #if false or parked in a dead helper.
+# emit() is pinned as its whole body, one exact needle compared after strip_swift, not a
+# file-wide count of the forwarding line: strip_swift keeps #if blocks, and anything added
+# before the forwarding line (an always-true early return, a dropped guard) changes what
+# reaches the page while the line itself still reads the same.
 EMIT_SIG = "    private func emit(_ fn: String, completed: Bool) {"
-EMIT_FWD = 'bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")'
-if coordinator is None or coordinator.count(EMIT_SIG) != 1:
-    fail("PlaybackCoordinator.swift must declare exactly one %r" % EMIT_SIG.strip())
-start = coordinator.index(EMIT_SIG)
-end = coordinator.find("\n    }\n", start)
-if end < 0:
-    fail("PlaybackCoordinator.emit has no closing '    }' line")
-emit_body = [l.strip() for l in coordinator[start:end].split("\n")[1:]]
-emit_body = [l for l in emit_body if l]
-if any(l.startswith("#") for l in emit_body):
-    fail("PlaybackCoordinator.emit must carry no #if/#else/#endif line in its body, or the "
-         "forwarding line may be compiled out")
-if emit_body.count(EMIT_FWD) != 1 or emit_body[-1] != EMIT_FWD:
-    fail("PlaybackCoordinator.emit must end with exactly one %r as its last statement" % EMIT_FWD)
+EMIT_BLOCK = """    private func emit(_ fn: String, completed: Bool) {
+        guard let ref = activeRef else { return }
+        let payload: [String: Any] = [
+            "ref": ref,
+            "positionMs": lastPositionMs,
+            "durationMs": lastDurationMs,
+            "completed": completed,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")
+    }"""
+if coordinator is None or coordinator.count(EMIT_SIG) != 1 or coordinator.count("\n" + EMIT_BLOCK + "\n") != 1:
+    fail("PlaybackCoordinator.emit must read exactly as the EMIT_BLOCK needle in Tests/run-checks.sh "
+         "(signature through its closing brace, after comment stripping). Any change to emit must "
+         "update that needle on purpose, after checking that every emit() call still reaches the "
+         "guarded window.<callback> call")
 bad = sorted(n for n in called if not n.startswith("dobbyNative"))
 if bad:
     fail("the wrapper calls page callback(s) without the dobbyNative prefix: %s. The PWA defines "
