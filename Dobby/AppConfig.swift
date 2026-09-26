@@ -1,6 +1,6 @@
 import Foundation
 
-/// Static app configuration. The legacy web app is "bookplay"; the native app is Dobby.
+/// Static app configuration. The web app and this native app are both Dobby.
 enum AppConfig {
     /// Web app origin (served from the Pi over Tailscale, valid TLS via `tailscale serve`).
     static let serverURL = URL(string: "https://dobby.solarflare-tarpon.ts.net")!

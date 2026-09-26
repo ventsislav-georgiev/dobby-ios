@@ -30,7 +30,7 @@ set -euo pipefail
 # the path next to the script when a human or Tests/run-checks.sh runs it.
 cd "${SRCROOT:-$(dirname "$0")/..}"
 
-PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}"
+PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}"
 SHELL_DIR="$PWD/Dobby/Shell"
 
 if [ ! -d "$PUBLIC_DIR" ]; then

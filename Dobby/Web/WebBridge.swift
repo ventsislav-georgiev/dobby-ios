@@ -30,7 +30,7 @@ final class WebBridge: NSObject {
             self?.callJS("window.Dobby && window.Dobby._setOffline(\(json));")
         }
         offline.reportProgress = { [weak self] json in
-            self?.callJS("window.bookPlayNativeDownloadProgress && window.bookPlayNativeDownloadProgress(\(json));")
+            self?.callJS("window.dobbyNativeDownloadProgress && window.dobbyNativeDownloadProgress(\(json));")
         }
     }
 
@@ -39,14 +39,14 @@ final class WebBridge: NSObject {
     /// the audio route). Latched on `window.Dobby` so late readers see it too.
     private func pushCarRoute(_ isCar: Bool) {
         callJS("window.Dobby && (window.Dobby.isCarAudio = \(isCar));"
-             + "window.bookPlayNativeAudioRoute && window.bookPlayNativeAudioRoute({car:\(isCar)});")
+             + "window.dobbyNativeAudioRoute && window.dobbyNativeAudioRoute({car:\(isCar)});")
     }
 
     /// Hand a Siri command to the web app (see `js/23-voice.js`).
     private func pushVoiceCommand(_ command: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: command),
               let json = String(data: data, encoding: .utf8) else { return }
-        callJS("window.bookPlayNativeVoiceCommand && window.bookPlayNativeVoiceCommand(\(json));")
+        callJS("window.dobbyNativeVoiceCommand && window.dobbyNativeVoiceCommand(\(json));")
     }
 
     /// Evaluate a JS expression in the web app (native → web callback).

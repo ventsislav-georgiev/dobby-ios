@@ -69,7 +69,7 @@ struct AttachSubtitlePayload: Decodable {
 
 /// One entry of the web's online-subtitle catalog (`setSubtitleCatalog`) — results the
 /// user hasn't downloaded yet. Selecting one asks the web (via
-/// `bookPlayNativeRequestSubtitle`) to fetch it and call `attachSubtitle` back.
+/// `dobbyNativeRequestSubtitle`) to fetch it and call `attachSubtitle` back.
 struct SubtitleCatalogEntry: Decodable, Identifiable {
     let id: String
     let lang: String?

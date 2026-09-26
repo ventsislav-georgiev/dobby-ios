@@ -109,7 +109,7 @@ final class PlaybackCoordinator: ObservableObject {
                 NSLog("%@", "Dobby: ytdlpAdaptive MPD synth failed (missing duration?); reporting fallback ref=\(req.ref)")
                 activeRef = req.ref
                 lastPositionMs = req.startMs ?? 0
-                emit("bookPlayNativePlaybackEnded", completed: false)
+                emit("dobbyNativePlaybackEnded", completed: false)
                 activeRef = nil
                 return
             }
@@ -181,7 +181,7 @@ final class PlaybackCoordinator: ObservableObject {
     func requestCatalogSubtitle(id: String) {
         guard let data = try? JSONSerialization.data(withJSONObject: ["catalogId": id]),
               let json = String(data: data, encoding: .utf8) else { return }
-        bridge?.callJS("window.bookPlayNativeRequestSubtitle && window.bookPlayNativeRequestSubtitle(\(json));")
+        bridge?.callJS("window.dobbyNativeRequestSubtitle && window.dobbyNativeRequestSubtitle(\(json));")
     }
 
     func setSubtitleOffset(ref: String, ms: Int) {
@@ -225,7 +225,7 @@ final class PlaybackCoordinator: ObservableObject {
     /// Web-initiated stop, or user closed the overlay. Reports a non-final position.
     func stop() {
         guard activeRef != nil else { return }
-        emit("bookPlayNativePlaybackEnded", completed: false)
+        emit("dobbyNativePlaybackEnded", completed: false)
         clear()
     }
 
@@ -429,13 +429,13 @@ final class PlaybackCoordinator: ObservableObject {
         // ponytail: report every ~5s — matches the web's SmartTube save cadence.
         if current - lastReportSec >= 5 {
             lastReportSec = current
-            emit("bookPlayNativePlaybackProgress", completed: false)
+            emit("dobbyNativePlaybackProgress", completed: false)
         }
     }
 
     func onFinish(error: Error?) {
         mark("finish err=\(error?.localizedDescription ?? "nil")")
-        emit("bookPlayNativePlaybackEnded", completed: error == nil)
+        emit("dobbyNativePlaybackEnded", completed: error == nil)
         clear()
     }
 

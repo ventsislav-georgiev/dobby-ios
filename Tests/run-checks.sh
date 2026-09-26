@@ -79,6 +79,8 @@ reads = {
     "SCHEMEMAINPY": ([SWL], ["    lines = strip_swift_lines(open(path).read(), path)"], []),
     "EDGEBACKPY": ([SW, JS], ['        return strip_swift(f.read(), path).split("\\n")', '    js = strip_js(f.read()).split("\\n")'],
                    ['    with open(path, encoding="utf-8") as f:', 'with open(pwa, encoding="utf-8") as f:']),
+    "NATIVECALLBACKSPY": ([SW, JS], ["        src = strip_swift(f.read(), path)", "        text = strip_js(f.read())"],
+                          ['    with open(path, encoding="utf-8") as f:']),
     "PIGATEPY": ([SW, JS], ["        return strip_swift(f.read(), path)", "literal = strip_js(literal)"],
                  ['    with open(path, encoding="utf-8") as f:', '    with open(gate_file, encoding="utf-8") as f:',
                   "        js = f.read()"]),
@@ -826,7 +828,7 @@ if not m:
     fail("presenceFlaggedKeys is gone")
 swift_keys = re.findall(r'"(\w+)"', m.group(1))
 
-routes = "../dobby/Sources/BookPlayServer/SettingsRoutes.swift"
+routes = "../dobby/Sources/DobbyServer/SettingsRoutes.swift"
 if not os.path.isfile(routes):
     print("SKIP: no sibling dobby checkout, the has* key list is not compared with the server (#184)")
 else:
@@ -1159,7 +1161,7 @@ m = re.search(r"static let pageRetryStatuses = \[([\d, ]+)\]", check_src)
 if not m:
     fail("ApiSchemeHandlerCheck.pageRetryStatuses is gone")
 ours = [int(x) for x in m.group(1).split(",")]
-page = "../dobby/Sources/BookPlayServer/Public/js/03-storage-net.js"
+page = "../dobby/Sources/DobbyServer/Public/js/03-storage-net.js"
 if not os.path.isfile(page):
     print("SKIP: no sibling dobby checkout, the page's retry list is not compared (#185)")
 else:
@@ -1210,7 +1212,7 @@ TIMELABELWIDTHPY
 # half-empty shell would ship a blank page), and BundledShellCheck holds the rewrite
 # rule against the REAL index.html it copies rather than a fixture that can drift.
 # ---------------------------------------------------------------------------
-DOBBY_PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}"
+DOBBY_PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}"
 if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
 
@@ -1686,7 +1688,7 @@ def need(needle, why):
         sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
         sys.exit(1)
 
-need("repository: ventsislav-georgiev/bookplay",
+need("repository: ventsislav-georgiev/dobby",
      "testflight.yml must check out the PWA repo as a sibling, or scripts/copy-app-shell.sh finds no dobby checkout and every release still ships without the #151 shell (#155)")
 need("token: ${{ secrets.DOBBY_PWA_CHECKOUT_TOKEN }}",
      "the sibling checkout needs a token wider than the default GITHUB_TOKEN to reach a private repo (#155)")
@@ -1787,8 +1789,8 @@ need(wf, "gh release download bundle-latest",
 
 # 3. Extracts into the exact path copy-app-shell.sh reads — pinned on BOTH
 #    ends so the workflow and the script cannot drift apart.
-need(wf, 'dest="dobby/Sources/BookPlayServer/Public/playsvideo/assets"',
-     "the extraction target must be dobby/Sources/BookPlayServer/Public/playsvideo/assets (#167)")
+need(wf, 'dest="dobby/Sources/DobbyServer/Public/playsvideo/assets"',
+     "the extraction target must be dobby/Sources/DobbyServer/Public/playsvideo/assets (#167)")
 need(sh, 'os.path.join(public_dir, "playsvideo/assets")',
      "copy-app-shell.sh must still read playsvideo/assets under Public — if this literal moves, the workflow's extraction target has to move with it (#167)")
 
@@ -1910,7 +1912,7 @@ api_at = at(step, "gh api", "decide must look the pair up with gh api")
 if not guard_at < api_at:
     fail("decide calls an API before its non-schedule exit; a transient API error would then skip a push build")
 # The two ends of each record name: the lookup here, the producers in release.
-at(step, 'gh api repos/ventsislav-georgiev/bookplay/commits/main --jq .sha)',
+at(step, 'gh api repos/ventsislav-georgiev/dobby/commits/main --jq .sha)',
    "decide must reduce the PWA commit lookup to its sha; the whole commit JSON carries the private message and author")
 at(step, 'pair="$GITHUB_SHA-$pwa_sha"', "the lookup key must be the dobby-ios and PWA pair")
 at(step, 'actions/artifacts?name=$1', "records must be looked up by exact name, not by listing")
@@ -2111,7 +2113,7 @@ FOLLOWPWAPY
 # count and fiction, exactly as #157's bridgeMethodsWithNoCaller is on the Android
 # side. It is not a place to silence a failure unread.
 # Called by the PWA, deliberately not declared: same rule, other direction.
-DOBBY_PUBLIC_DIR_158="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+DOBBY_PUBLIC_DIR_158="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
 python3 - <<'BRIDGENAMESPY'
 import glob
 import os
@@ -2127,7 +2129,7 @@ MEMBERS_WITH_NO_PWA_CALLER = {
     "version": "same — advertised, never read. Kept so a future PWA can gate on a wrapper age.",
     "isCarAudio": "written by the wrapper, not called: WebBridge.pushCarRoute assigns "
                   "window.Dobby.isCarAudio and the PWA is notified through the separate "
-                  "window.bookPlayNativeAudioRoute callback. Part C pins that assignment.",
+                  "window.dobbyNativeAudioRoute callback. Part C pins that assignment.",
     "_offline": "the native-pushed offline cache itself; listNativeOffline/getNativeOffline "
                 "read it from inside the literal, so no PWA call site names it.",
     "_setOffline": "called by the WRAPPER, not the PWA — WebBridge.swift callJS pushes the "
@@ -2135,7 +2137,7 @@ MEMBERS_WITH_NO_PWA_CALLER = {
     "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
                   "inside the literal, like _offline; no PWA call site names it.",
     "piEnabled": "#181: the PWA gate piEnabledBridge() (12-service-worker-offline.js) calls it, "
-                 "but through window.BookPlayAndroid only; drop this entry when that gate also "
+                 "but through window.DobbyAndroid only; drop this entry when that gate also "
                  "accepts window.Dobby (the #181 guard prints PENDING until then).",
     "setPiEnabled": "#181: same gate, same pending dobby change as piEnabled.",
 }
@@ -2303,23 +2305,23 @@ calls = {}
 files_with_receivers = 0
 for path in sources:
     text = strip_js(read(path))
-    if "window.Dobby" not in text:
+    if not re.search(r"window\.Dobby(?![A-Za-z0-9_$])", text):
         continue
     files_with_receivers += 1
     fn_aliases = []
-    for m in re.finditer(r"return\b[^;]*?window\.Dobby[^;]*?;", text, re.S):
+    for m in re.finditer(r"return\b[^;]*?window\.Dobby(?![A-Za-z0-9_$])[^;]*?;", text, re.S):
         enclosing = None
         for f in re.finditer(r"function\s+([A-Za-z0-9_]+)\s*\(", text[:m.start()]):
             enclosing = f.group(1)
         if enclosing:
             fn_aliases.append(enclosing)
     fn_aliases = list(dict.fromkeys(fn_aliases))
-    dobby_expr = re.compile(r"window\.Dobby" + "".join(
+    dobby_expr = re.compile(r"window\.Dobby(?![A-Za-z0-9_$])" + "".join(
         "|" + re.escape(f) + r"\s*\(" for f in fn_aliases))
     closers = [m.start() for m in re.finditer(r"^\}", text, re.M)]
     binds = [(m.start(), m.group(1), bool(dobby_expr.search(m.group(2))))
              for m in re.finditer(r"\b(?:var|let|const)\s+([A-Za-z0-9_]+)\s*=\s*([^;]*?);", text, re.S)]
-    windows = [(r"window\.Dobby", 0, len(text))]
+    windows = [(r"window\.Dobby(?![A-Za-z0-9_$])", 0, len(text))]
     windows += [(re.escape(f) + r"\s*\(\s*\)", 0, len(text)) for f in fn_aliases]
     for i, (pos, name, is_dobby) in enumerate(binds):
         if not is_dobby:
@@ -2590,7 +2592,7 @@ NOSPOTIFYPY
 # test passes), that start-up consults the setting BEFORE the probe, and that each native
 # Pi leg and the page-origin block are reached on the path production takes.
 # ---------------------------------------------------------------------------
-DOBBY_PUBLIC_DIR_181="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+DOBBY_PUBLIC_DIR_181="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
 python3 - <<'PIGATEPY'
 import os
 import re
@@ -2679,9 +2681,9 @@ if os.path.isfile(gate_file):
     if required != {"piEnabled", "setPiEnabled"}:
         fail("the PWA gate now requires %s; window.Dobby declares piEnabled and setPiEnabled"
              % sorted(required))
-    if "window.Dobby" not in gate:
+    if not re.search(r"window\.Dobby(?![A-Za-z0-9_$])", gate):
         pending = ("PENDING: the PWA's piEnabledBridge() (js/12-service-worker-offline.js) reads "
-                   "window.BookPlayAndroid only, so the iOS row stays hidden until it also accepts "
+                   "window.DobbyAndroid only, so the iOS row stays hidden until it also accepts "
                    "window.Dobby — a one-line dobby change, not this repo's (#181)")
 else:
     print("SKIP: no dobby checkout at %r — the PWA gate's name set is unchecked (#181)" % pub)
@@ -2757,7 +2759,7 @@ PIGATEPY
 #     is true, which BridgeInjection sets on iOS only (else one edge flick is two backs).
 # Ceiling: textual; a recognizer added through a helper or a differently spelled construct is
 # not seen, which is why the exact lines are pinned.
-EDGEBACK_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/BookPlayServer/Public}" \
+EDGEBACK_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
 python3 - <<'EDGEBACKPY'
 import os
 import sys
@@ -2914,3 +2916,95 @@ if not esc or js[esc[0] + 1] != "    case 'Backspace':" or "closeSettings()" not
 print("PASS: the PWA treats Escape as back and its touch flick skips edge-strip touches when "
       "window.Dobby.edgeBack is true (#197)")
 EDGEBACKPY
+
+# ---------------------------------------------------------------------------
+# #205: the native-to-page callbacks the Swift code calls carry the dobbyNative prefix and are
+# the ones the PWA defines.
+#
+# The wrapper notifies the page by calling window.dobbyNative<X>(...) through callJS, guarded
+# with "window.X && window.X(...)", so a name the PWA does not define is a silent no-op on the
+# device: progress not saved, playback-ended queue advance lost. The pre-rename callback
+# spelling is exactly that since the PWA renamed its handlers (no aliases were kept).
+#   producer: every window.<name>Native<X> the Swift sources name, plus the emit("<name>")
+#     call sites in PlaybackCoordinator, whose emit() forwards fn into that same guarded call.
+#   consumer: a "function <name>(" or "window.<name> =" definition under the PWA's js/.
+# dobbyNativeAudioRoute is the one exception: the PWA has never defined it (car detection is
+# read from window.Dobby.isCarAudio instead), so it is listed with that reason, and a WARN asks
+# for the entry to go once the PWA defines it.
+# Ceiling: textual; a callback name assembled at runtime from pieces is not seen, which is why
+# the exact name set is pinned.
+NATIVECB_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'NATIVECALLBACKSPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#205)\n" % msg)
+    sys.exit(1)
+
+EXPECTED = {
+    "dobbyNativeDownloadProgress", "dobbyNativeAudioRoute", "dobbyNativeVoiceCommand",
+    "dobbyNativeRequestSubtitle", "dobbyNativePlaybackEnded", "dobbyNativePlaybackProgress",
+}
+NOT_DEFINED_BY_PWA = {
+    "dobbyNativeAudioRoute": "never defined by the PWA; it reads window.Dobby.isCarAudio, which "
+                             "WebBridge.pushCarRoute latches in the same statement.",
+}
+
+swift_files = sorted(p for d in ("Dobby", "Shared", "DobbyWidgets")
+                     for p in glob.glob(os.path.join(d, "**", "*.swift"), recursive=True))
+if len(swift_files) < 20:
+    fail("only %d Swift file(s) found; the scan has gone blind" % len(swift_files))
+called = {}
+emit_forward = 0
+for path in swift_files:
+    with open(path, encoding="utf-8") as f:
+        src = strip_swift(f.read(), path)
+    if re.search(r"(?i)book_?play", src):
+        fail("%s still names the legacy app name in live code" % path)
+    for m in re.finditer(r"window\.([A-Za-z_]\w*Native[A-Z]\w*)", src):
+        called.setdefault(m.group(1), set()).add(path)
+    for m in re.finditer(r'\bemit\("([A-Za-z_]\w*)"', src):
+        called.setdefault(m.group(1), set()).add(path)
+    emit_forward += src.count('bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")')
+if emit_forward != 1:
+    fail("PlaybackCoordinator.emit must forward fn into exactly one guarded callJS "
+         "'window.\\(fn) && window.\\(fn)(...)', found %d" % emit_forward)
+bad = sorted(n for n in called if not n.startswith("dobbyNative"))
+if bad:
+    fail("the wrapper calls page callback(s) without the dobbyNative prefix: %s. The PWA defines "
+         "dobbyNative* only, so each is a silent no-op on the device"
+         % "; ".join("%s in %s" % (n, ", ".join(sorted(called[n]))) for n in bad))
+if set(called) != EXPECTED:
+    fail("the wrapper's page callbacks changed: missing %s, new %s. Update EXPECTED only after "
+         "checking each new name against the PWA's definitions"
+         % (sorted(EXPECTED - set(called)), sorted(set(called) - EXPECTED)))
+
+pub = os.environ.get("NATIVECB_PUB", "")
+js_files = sorted(glob.glob(os.path.join(pub, "js", "*.js")))
+if not js_files:
+    print("SKIP: no dobby checkout at %r; the PWA half of the #205 callback pins needs it" % pub)
+    sys.exit(0)
+defined = set()
+for path in js_files:
+    with open(path, encoding="utf-8") as f:
+        text = strip_js(f.read())
+    defined |= set(re.findall(r"\bfunction\s+(dobbyNative\w+)\s*\(", text))
+    defined |= set(re.findall(r"\bwindow\.(dobbyNative\w+)\s*=(?!=)", text))
+missing = sorted(n for n in EXPECTED if n not in defined and n not in NOT_DEFINED_BY_PWA)
+if missing:
+    fail("the wrapper calls %s, which the PWA under %s does not define: a silent no-op on the "
+         "device" % (", ".join(missing), pub))
+for n in sorted(NOT_DEFINED_BY_PWA):
+    if n in defined:
+        sys.stderr.write("WARN: NOT_DEFINED_BY_PWA lists %s, but the PWA now defines it; drop "
+                         "the entry.\n" % n)
+print("PASS: the wrapper calls exactly %d dobbyNative page callback(s), %d defined by the PWA, "
+      "%s by design (#205)" % (len(EXPECTED), len(EXPECTED) - len(NOT_DEFINED_BY_PWA),
+                               ", ".join(sorted(NOT_DEFINED_BY_PWA)) + " undefined"))
+NATIVECALLBACKSPY

@@ -164,7 +164,7 @@ puts "Book — chapter N of M" in the album line, honours the head unit's own
 deliberately not treated as a car: headphones report the same port type.) When a car is
 connected, an adaptive YouTube pair plays its **audio representation alone** — no video
 decode, no heat, works with the phone pocketed. The flag is latched on
-`window.Dobby.isCarAudio` and pushed to `window.bookPlayNativeAudioRoute`.
+`window.Dobby.isCarAudio` and pushed to `window.dobbyNativeAudioRoute`.
 
 **Lane 3 — Siri.** `Dobby/Intents/` adds `PlayBookIntent` (a `BookEntity` backed by
 `/api/books`, not free text — Siri matches a resolved candidate set far better),
@@ -180,7 +180,7 @@ lock screen, Dynamic Island **and the CarPlay Dashboard**. Driven by
 bridge action for the web audiobook lane. Pushes are throttled to one per 15 s — the
 widget's `ProgressView(timerInterval:)` advances on its own clock in between.
 
-**Lane 6 — OpenSubsonic facade.** `Sources/BookPlayServer/SubsonicRoutes.swift` serves
+**Lane 6 — OpenSubsonic facade.** `Sources/DobbyServer/SubsonicRoutes.swift` serves
 `/rest/*` (author = artist, book = album, chapter = song), in XML and JSON. Position
 sync is real: `createBookmark` / `savePlayQueue` write straight into `ProgressStore`, so
 a drive and the web app share one resume point.
@@ -203,7 +203,7 @@ Two things to know:
   YouTube's other audio-only option, so an Opus pick would fail silently in the car.
 - When a video resolves with no separate audio representation, the muxed progressive
   stream is served instead — audio still plays, but at video bitrate. Each resolve
-  logs which path it took, visible with `systemctl --user status bookplay -n 40`:
+  logs which path it took, visible with `systemctl --user status dobby -n 40`:
 
   ```
   [subsonic] yt e1xr7KiN3KY audio-only audio/mp4; codecs="mp4a.40.2"
@@ -247,8 +247,8 @@ setting. `[subsonic] GET stream … maxBitRate=` in the log says whether it did.
 
 **Logs survive restarts now.** The user journal is not persisted on this Pi, so a
 restart destroyed the only copy — twice, mid-investigation. A drop-in at
-`~/.config/systemd/user/bookplay.service.d/logfile.conf` appends stdout and stderr to
-`~/bookplay/data/bookplay.log`. `[stream]` lines carry user-agent, `Range`, and bytes
+`~/.config/systemd/user/dobby.service.d/logfile.conf` appends stdout and stderr to
+`~/dobby/data/dobby.log`. `[stream]` lines carry user-agent, `Range`, and bytes
 offered, plus a distinct line when a transfer is cut short, which separates "the
 player stopped asking" from "we stopped sending".
 
@@ -264,11 +264,11 @@ still ships.
 ## Turning on the Subsonic facade
 
 Disabled unless a password is set — an open library endpoint is not a safe default.
-In `bookplay.service`:
+In `dobby.service`:
 
 ```
-Environment=BOOKPLAY_SUBSONIC_USER=dobby
-Environment=BOOKPLAY_SUBSONIC_PASSWORD=<pick one>
+Environment=DOBBY_SUBSONIC_USER=dobby
+Environment=DOBBY_SUBSONIC_PASSWORD=<pick one>
 ```
 
 Then in Amperfy (or play:Sub): server `https://dobby.solarflare-tarpon.ts.net`, that

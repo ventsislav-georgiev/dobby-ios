@@ -260,7 +260,7 @@ enum ServerAddresses {
     }
 
     /// Debug-only test seam (#068 device done-condition, mirrors Android's
-    /// `debug.bookplay.pioff`, which reads `BuildConfig.DEBUG`): DOBBY_NO_SERVER=1 makes every
+    /// `debug.dobby.pioff`, which reads `BuildConfig.DEBUG`): DOBBY_NO_SERVER=1 makes every
     /// probe report the Pi absent without touching the network, so "Continue offline" can be
     /// exercised on a Mac/simulator build against a Pi that is actually reachable. The predicate
     /// itself stays compiled in every configuration so it is checkable without a socket in the
