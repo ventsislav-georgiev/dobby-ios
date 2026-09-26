@@ -298,6 +298,7 @@ OFFLINEROOTPY
 # applyInitialSubtitles must select on it. A bare `case isDefault` decodes nothing and the
 # sidecar sits unselected with every other check green.
 python3 - <<'ISDEFAULTKEYPY'
+import re
 import sys
 sys.path.insert(0, "Tests")
 from swift_strip import strip_swift
@@ -336,6 +337,8 @@ call = "            if resumeSeconds == nil { applyInitialSubtitles() }"
 ready = block(coordinator, "        if state == .readyToPlay, !didSeekToStart {", "the first-open readyToPlay branch")
 if ready.count(call) != 1 or len([l for l in coordinator if "applyInitialSubtitles()" in l and "func " not in l]) != 1:
     fail("applyInitialSubtitles must be called exactly once, live, from the first-open readyToPlay branch")
+if [l for l in ready[:ready.index(call)] if re.search(r"\breturn\b", l)]:
+    fail("the first-open readyToPlay branch returns before it reaches applyInitialSubtitles()")
 print('PASS: SubtitleTrack.CodingKeys maps isDefault to the page\'s "default" key and '
       "applyInitialSubtitles, called once on first open, selects the flagged track (#228)")
 ISDEFAULTKEYPY
