@@ -2862,6 +2862,10 @@ if not one(pv, "var body: some View {", "PlayerView") < one(
         pv, ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
         "PlayerView") < one(pv, "private var tapRegions: some View {", "PlayerView"):
     fail("the player's edge drag must be a modifier of PlayerView.body")
+# Reviewer K1: moved onto subtitleOverlay inside the ZStack (allowsHitTesting(false)) the drag was
+# still in body, iOS-only and consecutive, but dead. It has to sit on body's root chain: depth 1.
+if depth(pv, one(pv, "var body: some View {", "PlayerView"), drag[0]) != 1:
+    fail("the player's edge drag must modify body's root view, not a child inside the ZStack")
 
 # --- the flag the PWA reads -------------------------------------------------------------------
 bi = swift("Dobby/Web/BridgeInjection.swift")
