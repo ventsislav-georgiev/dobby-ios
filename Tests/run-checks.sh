@@ -2797,6 +2797,11 @@ def ios_only(lines, i, where):
             in_else = True
     fail("%s is not inside any #if os(iOS) block, so the macOS target would build it" % where)
 
+def depth(lines, a, b):
+    # Brace depth at line b counted from line a (whose own opening brace counts), on stripped
+    # source: 1 means directly in the body that line a opens.
+    return sum(l.count("{") - l.count("}") for l in lines[a:b])
+
 def consecutive(lines, needles, where):
     at = [one(lines, n, where) for n in needles]
     if at != list(range(at[0], at[0] + len(at))):
@@ -2814,9 +2819,12 @@ rec = consecutive(wc, [
 make = one(wc, "fileprivate func makeWebView(_ coordinator: WebBridge) -> WKWebView {", "WebContainer")
 created = one(wc, "let webView = WKWebView(frame: .zero, configuration: config)", "WebContainer")
 attach = one(wc, "coordinator.attach(webView: webView)", "WebContainer")
-if not make < created < rec[0] and rec[-1] < attach:
+if not (make < created < rec[0] and rec[-1] < attach):
     fail("the edge recognizer must be created and added inside makeWebView, after the WKWebView "
          "exists and before coordinator.attach (every load path runs after that)")
+if depth(wc, make, rec[0]) != 1:
+    fail("the edge recognizer lines must sit directly in makeWebView's body, not inside a nested "
+         "block (an if, a closure) that production may never enter")
 if any(l.strip() == "webView.allowsBackForwardNavigationGestures = true" for l in wc):
     fail("the WebKit history gesture was turned on beside the edge recognizer: views with no "
          "history entry ignore it and the movies stack would pop twice")
@@ -2859,6 +2867,9 @@ lit = one(bi, 'edgeBack: \\(edgeBack ? "true" : "false"),', "BridgeInjection")
 if not one(bi, "window.Dobby = {", "BridgeInjection") < lit < one(
         bi, "console.log('Dobby native bridge injected (canPlayNative=' + window.Dobby.canPlayNative + ')');", "BridgeInjection"):
     fail("edgeBack must be a member of the injected window.Dobby literal")
+if len(bi[lit]) - len(bi[lit].lstrip(" ")) != 12:
+    fail("edgeBack must be a top-level window.Dobby member (12-space indent, the #158 member "
+         "reader's shape), not nested in another object")
 
 print("PASS: the iOS web view carries a left-edge UIScreenEdgePanGestureRecognizer whose action "
       "sends the Android Back Escape keydown once per completed swipe, the native player has the "
@@ -2882,6 +2893,9 @@ armed = [i for i in range(ts, end) if js[i].strip() == "touchStartTime = Date.no
 if not (ts < x < at < end and len(armed) == 1 and at < armed[0]):
     fail("the PWA's flick handler must skip an edge-strip touch inside its touchstart listener, "
          "after reading touchStartX and before arming touchStartTime")
+if depth(js, ts, at) != 1:
+    fail("the PWA's edge-strip skip must sit directly in the touchstart listener body, not in a "
+         "nested block the listener may never enter")
 kd = one(js, "document.addEventListener('keydown', (e) => {", "PWA keydown listener")
 esc = [i for i in range(kd, len(js)) if js[i] == "    case 'Escape':"]
 if not esc or js[esc[0] + 1] != "    case 'Backspace':" or "closeSettings()" not in "\n".join(js[esc[0]:esc[0] + 12]):
