@@ -2141,10 +2141,6 @@ MEMBERS_WITH_NO_PWA_CALLER = {
                    "index into it. Part C pins those two call sites.",
     "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
                   "inside the literal, like _offline; no PWA call site names it.",
-    "piEnabled": "#181: the PWA gate piEnabledBridge() (12-service-worker-offline.js) calls it, "
-                 "but through window.DobbyAndroid only; drop this entry when that gate also "
-                 "accepts window.Dobby (the #181 guard prints PENDING until then).",
-    "setPiEnabled": "#181: same gate, same pending dobby change as piEnabled.",
 }
 
 PWA_CALLS_NOT_DECLARED = {
@@ -2674,7 +2670,6 @@ if 'static func script(piEnabled: Bool) -> String' not in inject or \
 # --- 2. the PWA gate asks for exactly these names (sibling checkout only) ---------------
 pub = os.environ.get("DOBBY_PUBLIC_DIR_181", "")
 gate_file = os.path.join(pub, "js", "12-service-worker-offline.js")
-pending = None
 if os.path.isfile(gate_file):
     with open(gate_file, encoding="utf-8") as f:
         js = f.read()
@@ -2687,9 +2682,9 @@ if os.path.isfile(gate_file):
         fail("the PWA gate now requires %s; window.Dobby declares piEnabled and setPiEnabled"
              % sorted(required))
     if not re.search(r"window\.Dobby(?![A-Za-z0-9_$])", gate):
-        pending = ("PENDING: the PWA's piEnabledBridge() (js/12-service-worker-offline.js) reads "
-                   "window.DobbyAndroid only, so the iOS row stays hidden until it also accepts "
-                   "window.Dobby — a one-line dobby change, not this repo's (#181)")
+        fail("the PWA's piEnabledBridge() (js/12-service-worker-offline.js) no longer accepts "
+             "window.Dobby, so getPiEnabled() answers true on iOS and every Pi-off gate there "
+             "(the settings row, the #200 playStreamUrl guard) goes dead")
 else:
     print("SKIP: no dobby checkout at %r — the PWA gate's name set is unchecked (#181)" % pub)
 
@@ -2746,8 +2741,6 @@ if make.count("load(loadURL, in: webView)") != 2:
 
 print("PASS: window.Dobby exposes piEnabled() and setPiEnabled(); start-up consults the setting "
       "before the probe; push, fetch and Siri legs and the page-origin block honour it (#181)")
-if pending:
-    sys.stderr.write(pending + "\n")
 PIGATEPY
 
 # #197: the iOS left-edge back swipe. Nothing observable at runtime from here (a gesture
@@ -3049,7 +3042,8 @@ NATIVECALLBACKSPY
 #     of it at any depth; the engine, initPlaysVideo and every playsvideo import reachable only
 #     behind it (the SmartTube lane aside).
 #   producers: the gate's inputs, each defined once: isOfflineVideoUrl and offlineVideoUrl with
-#     the one path literal, isDobbyWrapper reading window.Dobby.canPlayNative, getPiEnabled; on
+#     the one path literal, isDobbyWrapper reading window.Dobby.canPlayNative, getPiEnabled and
+#     the piEnabledBridge it reads (with its window.Dobby leg, or getPiEnabled is true on iOS); on
 #     this side, BridgeInjection's canPlayNative = true outside any #if and its literal member
 #     (piEnabled's members are PIGATEPY's).
 # Ceiling: textual; a playStreamUrl reassigned at runtime from a string is not seen.
@@ -3110,6 +3104,12 @@ defined_once("isOfflineVideoUrl", "07-bookmarks.js",
              "  catch(e) { return String(url || '').startsWith('/offline-video/'); }\n}")
 defined_once("isDobbyWrapper", "20-all-cast.js",
              "function isDobbyWrapper() {\n  return !!(window.Dobby && window.Dobby.canPlayNative === true);\n}")
+defined_once("piEnabledBridge", "12-service-worker-offline.js",
+             "function piEnabledBridge() {\n"
+             "  var bridge = (typeof window.DobbyAndroid === 'object' && window.DobbyAndroid)\n"
+             "    || (typeof window.Dobby === 'object' && window.Dobby) || null;\n"
+             "  return (bridge && typeof bridge.piEnabled === 'function' && typeof bridge.setPiEnabled === 'function')\n"
+             "    ? bridge : null;\n}")
 defined_once("getPiEnabled", "12-service-worker-offline.js",
              "function getPiEnabled() {\n  var bridge = piEnabledBridge();\n  if (!bridge) return true;\n"
              "  try { return bridge.piEnabled() === true; } catch (e) { return true; }\n}")
