@@ -78,6 +78,16 @@ final class OfflineStore: NSObject, ObservableObject {
         guard let p = DownloadPayload.decode(json), !p.videoId.isEmpty else {
             NSLog("Dobby offline: bad download payload"); return
         }
+        // #217: URLSession is not WebKit, so PiRequestBlock never sees this. Unlike a book, a
+        // video need not come from the Pi (a debrid or direct link downloads fine with it off),
+        // so with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam, the #149 rule) only the
+        // Pi-origin parts are refused: a Pi video URL refuses the whole download, a Pi subtitle
+        // row is skipped. Before the folder, the index and any URLSession task.
+        var piOff: String? = ServerAddresses.piEnabled() ? nil : "Pi disabled by the user setting"
+        #if DEBUG
+        if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }
+        #endif
+        if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }
         let dir = root.appendingPathComponent(p.videoId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -87,6 +97,7 @@ final class OfflineStore: NSObject, ObservableObject {
         if let subs = p.subs {
             for s in subs {
                 guard let urlStr = s.url, let url = URL(string: urlStr) else { continue }
+                if piOff != nil, ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin subtitle skipped (Pi off)"); continue }
                 let name = "sub-\(abs((s.lang ?? s.label ?? urlStr).hashValue)).\(subExt(s.mimeType, urlStr))"
                 let dest = dir.appendingPathComponent(name)
                 downloadSidecar(url, to: dest) { [weak self] ok in
@@ -111,6 +122,13 @@ final class OfflineStore: NSObject, ObservableObject {
         task.taskDescription = key
         tasks[key] = task
         task.resume()
+    }
+
+    /// #217: an error event the page's handleDownloadProgress already renders (a toast and
+    /// the button re-read). Reports only; the index and the video's folder stay as they were.
+    private func refuseVideoDownload(_ videoId: String, _ why: String) {
+        NSLog("Dobby offline: video download refused (%@)", why)
+        emit(videoId, status: "error", bytes: 0, total: 0, error: "Turn on Use a Pi server to download this video.")
     }
 
     // MARK: Bridge actions — BOOK (multi-chapter, background)

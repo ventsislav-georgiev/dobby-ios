@@ -19,6 +19,7 @@ enum ServerAddressesCheck {
         autoOfflineSeam()
         piEnabledRule()
         piEnabledPersistence()
+        piOriginRule()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -115,6 +116,21 @@ enum ServerAddressesCheck {
         defaults.removeObject(forKey: "dobby.serverAddresses.lastGood")
         ServerAddresses.setPiEnabled(true, defaults)
         check(ServerAddresses.piEnabled(defaults) == true, "an explicit on holds with no stored origin")
+    }
+
+    /// #217: the video download gate's origin test. Host against every candidate's host,
+    /// any scheme and port, hostless = page-relative = the Pi; everything else downloads.
+    static func piOriginRule() {
+        let pi = [URL(string: "http://192.0.2.31:8080")!, URL(string: "https://pi.example.invalid")!]
+        check(ServerAddresses.isPiOrigin("http://192.0.2.31:8080/stream/x.mkv", candidates: pi), "the Pi's LAN address is the Pi")
+        check(ServerAddresses.isPiOrigin("https://PI.example.invalid/api/proxy?url=x", candidates: pi), "a candidate host in any case is the Pi")
+        check(ServerAddresses.isPiOrigin("https://192.0.2.31/x", candidates: pi), "a candidate host on another scheme and port is the Pi")
+        check(ServerAddresses.isPiOrigin("/api/subtitles/fetch?provider=a4k&download=1", candidates: pi), "a page-relative URL is the Pi")
+        check(!ServerAddresses.isPiOrigin("https://cdn.example.net/dl/x.mkv", candidates: pi), "a debrid link is not the Pi")
+        check(!ServerAddresses.isPiOrigin("http://192.0.2.32:8080/x", candidates: pi), "a neighbouring LAN host is not the Pi")
+        check(!ServerAddresses.isPiOrigin("https://pi.example.invalid.cdn.example.net/x", candidates: pi), "a host that only starts like the Pi is not the Pi")
+        check(!ServerAddresses.isPiOrigin(nil, candidates: pi), "no URL is nothing to fetch")
+        check(!ServerAddresses.isPiOrigin("https://cdn.example.net/x", candidates: []), "no candidates means nothing is the Pi")
     }
 
     static func autoOfflineSeam() {

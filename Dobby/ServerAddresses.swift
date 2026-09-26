@@ -88,6 +88,17 @@ enum ServerAddresses {
         explicitlySet ? explicitValue : hasLastGood
     }
 
+    /// #217: whether a URL the app would fetch natively points at the Pi. Its host, compared
+    /// case-insensitively with the host of every candidate (last known-good, the configured
+    /// list, the baked default): any scheme and any port, the rule PiRequestBlock applies to
+    /// WebKit's loads. A URL with no host is page-relative, and the page always sits on a
+    /// candidate, so it is the Pi. No parseable URL is nothing to fetch.
+    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates()) -> Bool {
+        guard let raw, let url = URL(string: raw) else { return false }
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return true }
+        return candidates.contains { $0.host?.lowercased() == host }
+    }
+
     /// Persisted on the spot. Nothing is erased either way: `lastGoodKey` and the address
     /// list stay, so turning the Pi back on finds it where it was.
     static func setPiEnabled(_ enabled: Bool, _ defaults: UserDefaults = .standard) {

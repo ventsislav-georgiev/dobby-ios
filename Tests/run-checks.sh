@@ -95,6 +95,10 @@ reads = {
                                        '    off = strip_js(f.read()).split("\\n")'],
                             ['    with open(path, encoding="utf-8") as f:',
                              'with open(os.path.join(pub, "js", "12-service-worker-offline.js"), encoding="utf-8") as f:']),
+    "PIOFFVIDEODOWNLOADPY": ([SW, JS], ['        files[path] = strip_swift(f.read(), path).split("\\n")',
+                                        '        js[n] = strip_js(f.read()).split("\\n")'],
+                             ['    with open(path, encoding="utf-8") as f:',
+                              '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -240,7 +244,7 @@ def assert_gated(call_regex, label, expected_calls=1):
 
         print(f"PASS: {label}() call site is #if DEBUG-gated ({path}:{call_idx + 1})")
 
-assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=5)
+assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=6)
 assert_gated(r"autoOfflineSeamActive\(\)", "autoOfflineSeamActive")
 assert_gated(r"AppConfig\.startURL\(origin:", "startURL")
 assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
@@ -3530,3 +3534,134 @@ print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startBo
       "first, with a book error event and no URLSession, from its one caller, and the page hides the "
       "download it cannot finish and never posts it, remove and cancel kept (#213)")
 PIOFFBOOKDOWNLOADPY
+
+# #217: the video half of #213. startDownload (downloadNativeOffline) started URLSession work
+# with no Pi check either. A video need not come from the Pi (a debrid or direct link downloads
+# with it off), so only the Pi-origin parts are refused: ServerAddresses.isPiOrigin compares the
+# URL's host with every candidate's host (hostless = page-relative = the Pi); its rows are
+# ServerAddressesCheck's piOriginRule. Pinned:
+#   OfflineStore: startDownload's live lines after the payload decode guard are exactly the Pi-off
+#     reason (the setting, then the #if DEBUG seam), the whole-download refusal of a Pi video URL,
+#     then the folder; no URLSession, folder, index or sidecar line runs ahead of the refusal.
+#     The Pi subtitle row skip sits right after the sidecar's URL guard, before downloadSidecar.
+#     refuseVideoDownload's whole body (a log line and an error event, no index write), defined
+#     once and called from that one refusal.
+#   WebBridge: downloadNativeOffline is startDownload's only caller.
+#   PWA: startVideoDownload opens with the gate before both posts (native and service worker),
+#     and dobbyTvNative.startDownload drops a Pi subtitle row; both read getPiEnabled(), the #200
+#     predicate, and isPiOriginUrl. The behaviour is the PWA's
+#     Tests/integration/ios-pi-off-video-download.test.js.
+# Ceiling: textual; a caller reached through a closure stored under another name is not seen.
+PIOFFVIDEO_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'PIOFFVIDEODOWNLOADPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#217)\n" % msg)
+    sys.exit(1)
+
+def block(lines, head, what):
+    at = [i for i, l in enumerate(lines) if re.search(head, l)]
+    if len(at) != 1:
+        fail("%s: expected one line matching %r, found %d" % (what, head, len(at)))
+    depth, opened = 0, False
+    for i in range(at[0], len(lines)):
+        depth += lines[i].count("{") - lines[i].count("}")
+        opened = opened or "{" in lines[i]
+        if opened and depth <= 0:
+            return at[0], i
+    fail("%s: unbalanced braces" % what)
+
+files = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    with open(path, encoding="utf-8") as f:
+        files[path] = strip_swift(f.read(), path).split("\n")
+store_path, bridge_path, sa_path = "Dobby/Offline/OfflineStore.swift", "Dobby/Web/WebBridge.swift", "Dobby/ServerAddresses.swift"
+store, bridge = files[store_path], files[bridge_path]
+
+def calls(name):
+    return [(p, i) for p, ls in files.items() for i, l in enumerate(ls)
+            if re.search(r"\b%s\(" % name, l) and not re.search(r"\bfunc\s+%s\(" % name, l)]
+
+ds, de = block(store, r"^    func startDownload\(_ json: String\) \{$", "startDownload")
+live = [(i, l) for i, l in enumerate(store[ds + 1:de], ds + 1) if l.strip()]
+opening = [
+    "        guard let p = DownloadPayload.decode(json), !p.videoId.isEmpty else {",
+    '            NSLog("Dobby offline: bad download payload"); return',
+    "        }",
+    '        var piOff: String? = ServerAddresses.piEnabled() ? nil : "Pi disabled by the user setting"',
+    "        #if DEBUG",
+    '        if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }',
+    "        #endif",
+    "        if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }",
+    "        let dir = root.appendingPathComponent(p.videoId, isDirectory: true)"]
+if [l for _, l in live[:9]] != opening:
+    fail("startDownload must open with the payload decode, the Pi-off reason (setting, then the "
+         "DEBUG seam) and the Pi video URL refusal, before the folder: %r" % [l for _, l in live[:9]])
+refusal = live[7][0]
+for i, l in live[:7]:
+    if re.search(r"activeBgSession|session\.|downloadSidecar\(|createDirectory|index\[|saveIndex\(|emit\(", l):
+        fail("startDownload runs %r before its Pi refusal" % l.strip())
+guard = "                guard let urlStr = s.url, let url = URL(string: urlStr) else { continue }"
+skip = ('                if piOff != nil, ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin '
+        'subtitle skipped (Pi off)"); continue }')
+body = [l for _, l in live]
+if body.count(guard) != 1 or body.count(skip) != 1 or body.index(skip) != body.index(guard) + 1 \
+        or body.index(skip) > next(k for k, l in enumerate(body) if "downloadSidecar(url, to: dest)" in l):
+    fail("startDownload must skip a Pi subtitle row right after the sidecar URL guard, before downloadSidecar")
+if sorted(calls(r"ServerAddresses\.isPiOrigin")) != sorted([(store_path, refusal), (store_path, live[body.index(skip)][0])]):
+    fail("ServerAddresses.isPiOrigin must be called from startDownload's two gates only: %s" % calls(r"ServerAddresses\.isPiOrigin"))
+if len([l for ls in files.values() for l in ls if re.search(r"\bfunc\s+isPiOrigin\s*\(", l)]) != 1 \
+        or not any(re.search(r"^    static func isPiOrigin\(_ raw: String\?, candidates: \[URL\] = candidates\(\)\) -> Bool \{$", l) for l in files[sa_path]):
+    fail("ServerAddresses must define isPiOrigin once, defaulting to candidates()")
+if len([l for l in store if re.search(r"\bfunc\s+startDownload\s*\(", l)]) != 1:
+    fail("OfflineStore must define startDownload exactly once")
+rs, re_ = block(store, r"^    private func refuseVideoDownload\(_ videoId: String, _ why: String\) \{$", "refuseVideoDownload")
+if store[rs + 1:re_ + 1] != [
+        '        NSLog("Dobby offline: video download refused (%@)", why)',
+        '        emit(videoId, status: "error", bytes: 0, total: 0, error: "Turn on Use a Pi server to download this video.")',
+        "    }"]:
+    fail("refuseVideoDownload no longer reads as pinned: %r" % store[rs + 1:re_ + 1])
+if len([l for l in store if re.search(r"\bfunc\s+(refuseVideoDownload|emit)\s*\(", l)]) != 2:
+    fail("OfflineStore must define refuseVideoDownload and emit exactly once each; a local one shadows them")
+if calls("refuseVideoDownload") != [(store_path, refusal)]:
+    fail("refuseVideoDownload must be called from startDownload's refusal only: %s" % calls("refuseVideoDownload"))
+case = [i for i, l in enumerate(bridge) if l == '        case "downloadNativeOffline":']
+if len(case) != 1 or bridge[case[0] + 1] != "            if let json = payload as? String { offline.startDownload(json) }" \
+        or calls(r"\.startDownload") != [(bridge_path, case[0] + 1)]:
+    fail("WebBridge's downloadNativeOffline must be startDownload's only caller: %s" % calls(r"\.startDownload"))
+
+pub = os.environ.get("PIOFFVIDEO_PUB", "")
+if not os.path.isfile(os.path.join(pub, "js", "07-bookmarks.js")):
+    print("SKIP: no dobby checkout at %r; the PWA half of the #217 check needs it" % pub)
+    sys.exit(0)
+js = {}
+for n in ("07-bookmarks.js", "21-android-tv.js", "12-service-worker-offline.js"):
+    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:
+        js[n] = strip_js(f.read()).split("\n")
+ss, se = block(js["07-bookmarks.js"], r"^function startVideoDownload\(vid, streamUrl, stream\) \{$", "startVideoDownload")
+live = [l for l in js["07-bookmarks.js"][ss + 1:se] if l.strip()]
+if live[:2] != [
+        "  if (isDobbyWrapper() && !getPiEnabled() && isPiOriginUrl(streamUrl)) { showToast('Turn on Use a "
+        "Pi server to download this video.', true); return; }",
+        "  if (dobbyTvNative.startDownload(vid, streamUrl, stream)) return;"]:
+    fail("startVideoDownload must open with the Pi gate, before the native and service worker posts: %r" % live[:2])
+ns, ne = block(js["21-android-tv.js"], r"^  function startDownload\(vid, streamUrl, stream\) \{$", "startDownload (page)")
+live = [l.rstrip() for l in js["21-android-tv.js"][ns + 1:ne] if l.strip()]
+row = "                if (isDobbyWrapper() && !getPiEnabled() && isPiOriginUrl(url)) return null;"
+if live.count(row) != 1 or live[live.index(row) - 1] != "                if (!url) return null;" \
+        or not live[live.index(row) + 1].startswith("                return {"):
+    fail("dobbyTvNative.startDownload must drop a Pi subtitle row after the empty-row drop, before building it")
+if len([l for l in js["12-service-worker-offline.js"] if re.search(r"^function isPiOriginUrl\(url\) \{$", l)]) != 1:
+    fail("12-service-worker-offline.js must define isPiOriginUrl once")
+print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startDownload refuses a "
+      "Pi-origin video URL first, with an error event and no URLSession, and skips a Pi-origin "
+      "subtitle row, from its one caller; a debrid or direct link still downloads; the page holds "
+      "back the same two before posting (#217)")
+PIOFFVIDEODOWNLOADPY
