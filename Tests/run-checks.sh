@@ -339,6 +339,14 @@ if ready.count(call) != 1 or len([l for l in coordinator if "applyInitialSubtitl
     fail("applyInitialSubtitles must be called exactly once, live, from the first-open readyToPlay branch")
 if [l for l in ready[:ready.index(call)] if re.search(r"\breturn\b", l)]:
     fail("the first-open readyToPlay branch returns before it reaches applyInitialSubtitles()")
+before = ready[:ready.index(call)]
+if sum(l.count("{") - l.count("}") for l in before) != 0 \
+        or sum(l.lstrip().startswith("#if") for l in before) != sum(l.lstrip().startswith("#endif") for l in before):
+    fail("applyInitialSubtitles() sits in a nested scope or #if of the first-open readyToPlay branch, not at its top level")
+if ready.count("            resumeSeconds = nil") != 1 or ready.index(call) > ready.index("            resumeSeconds = nil"):
+    fail("resumeSeconds is cleared before the first-open check, so a quality switch re-adds every track")
+if apply[-2:] != ["        }", "        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }"]:
+    fail("applyInitialSubtitles must hand the flagged track over right after its loop")
 print('PASS: SubtitleTrack.CodingKeys maps isDefault to the page\'s "default" key and '
       "applyInitialSubtitles, called once on first open, selects the flagged track (#228)")
 ISDEFAULTKEYPY
