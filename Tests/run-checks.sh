@@ -2825,6 +2825,12 @@ if not (make < created < rec[0] and rec[-1] < attach):
 if depth(wc, make, rec[0]) != 1:
     fail("the edge recognizer lines must sit directly in makeWebView's body, not inside a nested "
          "block (an if, a closure) that production may never enter")
+# Supervisor review: "edgeBack.isEnabled = false" after the add left all three lines in place and
+# the guard green, so the recognizer's name may appear on those three lines and nowhere else.
+touched = [i for i, l in enumerate(wc) if "edgeBack" in l.replace("WebBridge.edgeBack(_:)", "")]
+if touched != rec:
+    fail("the edge recognizer is touched outside its three lines (disabled, re-targeted or removed?): "
+         "lines %r" % [i + 1 for i in touched if i not in rec])
 if any(l.strip() == "webView.allowsBackForwardNavigationGestures = true" for l in wc):
     fail("the WebKit history gesture was turned on beside the edge recognizer: views with no "
          "history entry ignore it and the movies stack would pop twice")
