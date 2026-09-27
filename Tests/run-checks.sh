@@ -3797,8 +3797,8 @@ if body.count(guard) != 1 or body.count(skip) != 1 or body.index(skip) != body.i
 if sorted(calls(r"ServerAddresses\.isPiOrigin")) != sorted([(store_path, refusal), (store_path, live[body.index(skip)][0])]):
     fail("ServerAddresses.isPiOrigin must be called from startDownload's two gates only: %s" % calls(r"ServerAddresses\.isPiOrigin"))
 if len([l for ls in files.values() for l in ls if re.search(r"\bfunc\s+isPiOrigin\s*\(", l)]) != 1 \
-        or not any(re.search(r"^    static func isPiOrigin\(_ raw: String\?, candidates: \[URL\] = candidates\(\)\) -> Bool \{$", l) for l in files[sa_path]):
-    fail("ServerAddresses must define isPiOrigin once, defaulting to candidates()")
+        or not any(re.search(r"^    static func isPiOrigin\(_ raw: String\?, candidates: \[URL\] = candidates\(rule: \.keepAll\)\) -> Bool \{$", l) for l in files[sa_path]):
+    fail("ServerAddresses must define isPiOrigin once, defaulting to the unfiltered candidates(rule: .keepAll) (#245)")
 if len([l for l in store if re.search(r"\bfunc\s+startDownload\s*\(", l)]) != 1:
     fail("OfflineStore must define startDownload exactly once")
 rs, re_ = block(store, r"^    private func refuseVideoDownload\(_ videoId: String, _ why: String\) \{$", "refuseVideoDownload")

@@ -23,6 +23,7 @@ enum ServerAddressesCheck {
         appBoundRule()
         appBoundStoreAndCandidates()
         appBoundPlatformPin()
+        piOriginIgnoresTheAppBoundFilter()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -228,5 +229,30 @@ enum ServerAddressesCheck {
                     "        static let current = AppBound(enforced: enforcedHere, loopback: loopbackHere,\n"] {
             check(src.components(separatedBy: arm).count == 2, "#245 platformPin: ServerAddresses.swift carries \(arm.debugDescription) exactly once")
         }
+    }
+
+    /// #245 review: isPiOrigin is identity, not usability. On iOS a stored LAN address of the Pi
+    /// is dropped from candidates() but must still count as the Pi, or the #217 Pi-off download
+    /// refusal lets it through. The default argument is pinned textually: on this macOS host the
+    /// filtered and unfiltered sets are equal, so only the text tells them apart.
+    static func piOriginIgnoresTheAppBoundFilter() {
+        let suite = "dobby.check.piOrigin.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(["http://192.0.2.10:8080", AppConfig.serverURL.absoluteString], forKey: "dobby.serverAddresses")
+        defaults.set("http://198.51.100.20:8080", forKey: "dobby.serverAddresses.lastGood")
+        let usable = ServerAddresses.candidates(defaults, rule: iOSDevice)
+        check(!usable.contains { ["192.0.2.10", "198.51.100.20"].contains($0.host ?? "") },
+              "#245 piOriginUnfiltered: candidates(rule: iOS) excludes the LAN entry and the LAN lastGood")
+        let all = ServerAddresses.candidates(defaults, rule: .keepAll)
+        for raw in ["http://192.0.2.10:8080/stream/x.mkv", "http://198.51.100.20:8080/x"] {
+            check(ServerAddresses.isPiOrigin(raw, candidates: all),
+                  "#245 piOriginUnfiltered: with the iOS rule on, \(raw) is still the Pi")
+        }
+        check(!ServerAddresses.AppBound.keepAll.enforced, "#245 piOriginUnfiltered: keepAll never filters")
+        let src = (try? String(contentsOfFile: "Dobby/ServerAddresses.swift", encoding: .utf8)) ?? ""
+        let decl = "    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates(rule: .keepAll)) -> Bool {\n"
+        check(src.components(separatedBy: decl).count == 2,
+              "#245 piOriginUnfiltered: isPiOrigin defaults to the unfiltered candidates(rule: .keepAll)")
     }
 }

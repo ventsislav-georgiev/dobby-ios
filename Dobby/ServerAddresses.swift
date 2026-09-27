@@ -65,6 +65,9 @@ enum ServerAddresses {
         #endif
         static let current = AppBound(enforced: enforcedHere, loopback: loopbackHere,
                                       domains: Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String] ?? [])
+        /// Every address, on every platform: for questions of identity (is this host the Pi),
+        /// not of which address this device can load.
+        static let keepAll = AppBound(enforced: false, loopback: false, domains: [])
 
         /// True when `url`'s host is covered by `domains` (the entry matches the host or a
         /// suffix of it). LAN IPs never are: WKAppBoundDomains only takes domains.
@@ -115,7 +118,7 @@ enum ServerAddresses {
     /// #245: the trust boundary. Both editors (the PWA over the bridge, the native one on the
     /// unreachable screen) land here, so this is where an address the platform cannot use is
     /// dropped. The PWA list is shared with Android, where a LAN address is wanted, so the
-    /// drop is silent and per device. Counts only in the log: this repo never logs an address.
+    /// drop is silent and per device. The drop line logs counts, never the dropped entries.
     static func store(_ addresses: [URL], _ defaults: UserDefaults = .standard, rule: AppBound = .current) {
         let kept = addresses.filter(rule.keeps)
         if kept.count != addresses.count {
@@ -148,7 +151,10 @@ enum ServerAddresses {
     /// list, the baked default): any scheme and any port, the rule PiRequestBlock applies to
     /// WebKit's loads. A URL with no host is page-relative, and the page always sits on a
     /// candidate, so it is the Pi. No parseable URL is nothing to fetch.
-    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates()) -> Bool {
+    /// #245: identity, not usability, so the candidates are unfiltered (`.keepAll`): on iOS a
+    /// stored LAN address of the Pi is not loadable but is still the Pi, and the Pi-off
+    /// download refusal must keep refusing it.
+    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates(rule: .keepAll)) -> Bool {
         guard let raw, let url = URL(string: raw) else { return false }
         guard let host = url.host?.lowercased(), !host.isEmpty else { return true }
         return candidates.contains { $0.host?.lowercased() == host }
