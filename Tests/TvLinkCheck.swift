@@ -1,0 +1,161 @@
+import Foundation
+import Network
+import Security
+
+/// #237 Type on TV, the pure parts: the pair answer, the Keychain decisions (a 401 drops the item,
+/// a refusal never does, a refused read is not "not paired"), and the URL the TV's Host check
+/// accepts. Fake values only: a token of 64 'a', code 123456, addresses from the documentation
+/// ranges. The store is a fake that records what it was asked; the real Keychain is not touched.
+@main
+enum TvLinkCheck {
+    static func main() {
+        let checks: [(String, () -> Void)] = [
+            ("pairAnswerTakesOnlyAWellFormedToken", pairAnswerTakesOnlyAWellFormedToken),
+            ("pairRefusalsLeaveTheStoreAlone", pairRefusalsLeaveTheStoreAlone),
+            ("aTokenCall401DropsTheItem", aTokenCall401DropsTheItem),
+            ("onlyItemNotFoundIsNotPaired", onlyItemNotFoundIsNotPaired),
+            ("urlIsAnIpLiteralTheTvAccepts", urlIsAnIpLiteralTheTvAccepts),
+            ("codeIsSixAsciiDigits", codeIsSixAsciiDigits),
+        ]
+        let only = Set(CommandLine.arguments.dropFirst())
+        for (name, run) in checks where only.isEmpty || only.contains(name) { run() }
+        print("TvLinkCheck: all checks passed")
+    }
+
+    static func check(_ condition: Bool, _ what: String) {
+        guard condition else {
+            FileHandle.standardError.write(Data("FAIL: \(what) (#237)\n".utf8))
+            exit(1)
+        }
+    }
+
+    static let token = String(repeating: "a", count: 64)
+
+    /// A store that records every call and answers with the given statuses.
+    final class Fake {
+        var saved: [(String, Data)] = []
+        var dropped: [String] = []
+        var dropStatus: OSStatus = errSecSuccess
+        var store: TvLinkStore {
+            TvLinkStore(read: { _ in (nil, errSecItemNotFound) },
+                        save: { self.saved.append(($0, $1)); return errSecSuccess },
+                        drop: { self.dropped.append($0); return self.dropStatus })
+        }
+    }
+
+    static func body(_ json: String) -> Data { Data(json.utf8) }
+
+    static func pairAnswerTakesOnlyAWellFormedToken() {
+        check(TvLink.pairAnswer(status: 200, body: body("{\"ok\":true,\"token\":\"\(token)\"}")) == .paired(token),
+              "a 200 with ok true and a 64 lower-case hex token must pair")
+        check(TvLink.pairAnswer(status: 200, body: body("{\"ok\":true,\"token\":\"\(token)\",\"tv\":\"x\",\"v\":2}")) == .paired(token),
+              "extra fields in a 200 pair answer must be ignored")
+        let refused: [(String, String)] = [
+            ("{\"ok\":true,\"token\":\"\(String(token.dropLast()))\"}", "a 63-digit token"),
+            ("{\"ok\":true,\"token\":\"\(token)a\"}", "a 65-digit token"),
+            ("{\"ok\":true,\"token\":\"\(token.uppercased())\"}", "an upper-case hex token"),
+            ("{\"ok\":true,\"token\":\"\(String(repeating: "g", count: 64))\"}", "a non-hex token"),
+            ("{\"ok\":true,\"token\":\"\(String(repeating: "a", count: 63)) \"}", "a token with a space"),
+            ("{\"ok\":false,\"token\":\"\(token)\"}", "ok false"),
+            ("{\"token\":\"\(token)\"}", "no ok"),
+            ("{\"ok\":true}", "no token"),
+            ("{\"ok\":true,\"token\":7}", "a number token"),
+            ("[\"\(token)\"]", "an array"),
+            ("not json", "a non-JSON body"),
+            ("", "an empty body"),
+        ]
+        for (json, what) in refused {
+            check(TvLink.pairAnswer(status: 200, body: body(json)) == .refused, "a 200 pair answer with \(what) must be refused")
+        }
+        let good = body("{\"ok\":true,\"token\":\"\(token)\"}")
+        for status in [201, 204, 400, 403, 404, 405, 429, 500] {
+            check(TvLink.pairAnswer(status: status, body: good) == .refused, "a \(status) pair answer must be refused, token or not")
+        }
+        check(TvLink.pairAnswer(status: 401, body: body("{\"ok\":false,\"error\":\"code\"}")) == .wrongCode, "401 is a wrong code")
+        check(TvLink.pairAnswer(status: 409, body: body("{\"ok\":false,\"error\":\"closed\"}")) == .closed, "409 is a closed guide")
+        check(TvLink.pairAnswer(status: 400, body: body("{\"ok\":false,\"error\":\"json\"}")) == .refused, "400 is refused")
+    }
+
+    static func pairRefusalsLeaveTheStoreAlone() {
+        for answer in [TvLink.Pair.wrongCode, .closed, .refused] {
+            let fake = Fake()
+            check(TvLink.settle(answer, tv: "Dobby Fake TV", store: fake.store) == nil, "\(answer) must not pair")
+            check(fake.saved.isEmpty && fake.dropped.isEmpty, "\(answer) must leave the store as it was")
+        }
+        for (status, json) in [(409, "{\"ok\":false,\"error\":\"closed\"}"), (400, "{\"ok\":false,\"error\":\"host\"}"),
+                               (401, "{\"ok\":false,\"error\":\"code\"}")] {
+            let fake = Fake()
+            let answer = TvLink.pairAnswer(status: status, body: body(json))
+            check(TvLink.settle(answer, tv: "Dobby Fake TV", store: fake.store) == nil && fake.saved.isEmpty && fake.dropped.isEmpty,
+                  "a \(status) from /v1/pair must be not paired, with nothing saved or dropped")
+        }
+        let fake = Fake()
+        check(TvLink.settle(.paired(token), tv: "Dobby Fake TV", store: fake.store) == token, "a pairing hands the token back")
+        check(fake.saved.count == 1 && fake.saved[0].0 == "Dobby Fake TV" && fake.saved[0].1 == Data(token.utf8) && fake.dropped.isEmpty,
+              "a pairing saves the token under the TV's name and drops nothing")
+    }
+
+    static func aTokenCall401DropsTheItem() {
+        let fake = Fake()
+        check(!TvLink.answered(401, tv: "Dobby Fake TV", store: fake.store), "a 401 must say ask for a new code")
+        check(fake.dropped == ["Dobby Fake TV"] && fake.saved.isEmpty, "a 401 must drop that TV's item and save nothing")
+        let refusing = Fake()
+        refusing.dropStatus = errSecInteractionNotAllowed
+        check(!TvLink.answered(401, tv: "Dobby Fake TV", store: refusing.store) && refusing.dropped == ["Dobby Fake TV"],
+              "a 401 asks for a new code even when the drop is refused")
+        for status in [200, 204, 400, 403, 404, 405, 409, 429, 500] {
+            let kept = Fake()
+            check(TvLink.answered(status, tv: "Dobby Fake TV", store: kept.store) && kept.dropped.isEmpty && kept.saved.isEmpty,
+                  "a \(status) must keep the token")
+        }
+    }
+
+    static func onlyItemNotFoundIsNotPaired() {
+        check(TvLink.saved((nil, errSecItemNotFound)) == .none, "errSecItemNotFound is not paired")
+        check(TvLink.saved((Data(token.utf8), errSecSuccess)) == .token(token), "a stored token is read back")
+        for status in [errSecInteractionNotAllowed, errSecAuthFailed, errSecMissingEntitlement, errSecNotAvailable, OSStatus(-1)] {
+            check(TvLink.saved((nil, status)) == .refused, "a read refused with \(status) must not read as not paired")
+        }
+    }
+
+    static func urlIsAnIpLiteralTheTvAccepts() {
+        // PhoneLink.IP_LITERAL_HOST, the TV's Host check, transcribed.
+        let hostRule = try! NSRegularExpression(pattern: #"^(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$"#)
+        func hostHeader(_ url: URL) -> String {
+            String(url.absoluteString.dropFirst("http://".count).prefix { $0 != "/" })
+        }
+        func accepted(_ url: URL) -> Bool {
+            let h = hostHeader(url)
+            return hostRule.firstMatch(in: h, range: NSRange(h.startIndex..., in: h)) != nil
+        }
+        let port = NWEndpoint.Port(rawValue: 8080)!
+        let v4 = TvLink.Address(host: .ipv4(IPv4Address("192.0.2.1")!), port: port)
+        check(TvLink.url(v4, token: token)?.absoluteString == "http://192.0.2.1:8080/#\(token)",
+              "IPv4: http://<literal>:<port>/#<token>")
+        check(TvLink.url(v4, path: "/v1/pair")?.absoluteString == "http://192.0.2.1:8080/v1/pair", "IPv4 route, no fragment")
+        let v6 = TvLink.Address(host: .ipv6(IPv6Address("2001:db8::1")!), port: port)
+        check(TvLink.url(v6, token: token)?.absoluteString == "http://[2001:db8::1]:8080/#\(token)",
+              "IPv6: bracketed literal, no zone")
+        for url in [TvLink.url(v4, token: token), TvLink.url(v6, path: "/v1/pair")].compactMap({ $0 }) {
+            check(accepted(url), "the TV's Host rule must accept the URL's host and port")
+        }
+        check(TvLink.url(v4, token: token)?.fragment == token && TvLink.url(v4, token: token)?.path == "/",
+              "the token rides only in the fragment")
+        for (host, what) in [(NWEndpoint.Host.ipv6(IPv6Address("fe80::1%lo0")!), "a zone-id link-local IPv6"),
+                             (.ipv6(IPv6Address("fe80::1")!), "a link-local IPv6 (it needs a zone)"),
+                             (.ipv6(IPv6Address("2001:db8::1%lo0")!), "an IPv6 with a zone"),
+                             (.name("dobby-tv.example", nil), "a host name")] {
+            check(TvLink.hostLiteral(host) == nil && TvLink.url(TvLink.Address(host: host, port: port), token: token) == nil,
+                  "\(what) must be refused")
+        }
+        check(TvLink.url(v4, token: token.uppercased()) == nil && TvLink.url(v4, token: "a") == nil,
+              "a malformed token never reaches the fragment")
+    }
+
+    static func codeIsSixAsciiDigits() {
+        check(TvLink.isCode("123456"), "six digits is a code")
+        for bad in ["12345", "1234567", "12345a", "", " 12345", "１２３４５６", "12 456"] {
+            check(!TvLink.isCode(bad), "\(bad.debugDescription) is not a code")
+        }
+    }
+}

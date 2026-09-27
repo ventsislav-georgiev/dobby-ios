@@ -63,6 +63,7 @@ enum BridgeInjection {
             // playback pushes its own; call this only for <audio>-element playback.
             // { title, subtitle, elapsed, duration, isPlaying, ended }
             setNowPlaying: function (json) { post('setNowPlaying', json); },
+            openTvLink: function () { post('openTvLink', null); },
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.
             // #243: a tab or Offline Books pass that ran before this push read an empty cache,
             // so the push re-renders; an older PWA without the function is skipped. Only when the

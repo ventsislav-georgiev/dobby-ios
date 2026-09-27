@@ -105,6 +105,7 @@ reads = {
                                         '        js[n] = strip_js(f.read()).split("\\n")'],
                              ['    with open(path, encoding="utf-8") as f:',
                               '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
+    "TVLINKGUARDPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -2323,6 +2324,8 @@ MEMBERS_WITH_NO_PWA_CALLER = {
                    "index into it. Part C pins those two call sites.",
     "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
                   "inside the literal, like _offline; no PWA call site names it.",
+    "openTvLink": "#237: the iOS Settings \"Type on TV\" row (#236, being built in the dobby repo) "
+                  "calls it; until that row lands no PWA call site does. Drop this entry once it has.",
 }
 
 PWA_CALLS_NOT_DECLARED = {
@@ -3841,3 +3844,137 @@ print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startDo
       "subtitle row, from its one caller; a debrid or direct link still downloads; the page holds "
       "back the same two before posting (#217)")
 PIOFFVIDEODOWNLOADPY
+
+# ---------------------------------------------------------------------------
+# #237 Type on TV. TvLinkCheck runs the pure parts against a fake store: the /v1/pair answer
+# (only a 200 with ok true and a 64 lower-case hex token pairs, extra fields ignored), a 401 from a
+# token call drops that TV's Keychain item while 409, 400 and the rest drop and save nothing, a
+# refused Keychain read is never "not paired" (#189), and the URL is an IP literal the TV's Host
+# check accepts (IPv4, bracketed IPv6 with no zone; a zone, a link-local IPv6 or a name refused).
+# ---------------------------------------------------------------------------
+OUT11="$(mktemp -d)/tv-link-check"
+xcrun swiftc -o "$OUT11" \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
+  Dobby/TvLink/TvLink.swift Tests/TvLinkCheck.swift
+"$OUT11"
+
+# #237, the source guard: nothing in Dobby/TvLink shows or logs the address, port, token or code.
+# (1) no print-style call at all; (2) logs only through the one tv-link Logger, each a literal whose
+# only interpolation is an OSStatus; (3) every other string interpolation sits inside TvLink.url,
+# the one place an address and a token meet; (4) every view text is a plain literal, a choice of
+# two, the TV's service name on its list button, or `note`, which is only ever nil or a literal;
+# (5) the service name is the DNS-SD instance name and nothing else. Ceiling: textual; a view text
+# API outside the pinned set, or a value reaching one through a helper, is not seen.
+python3 - <<'TVLINKGUARDPY'
+import glob
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#237)\n" % msg)
+    sys.exit(1)
+
+paths = sorted(glob.glob("Dobby/TvLink/*.swift"))
+if paths != ["Dobby/TvLink/TvLink.swift", "Dobby/TvLink/TvLinkSheet.swift"]:
+    fail("Dobby/TvLink is expected to hold TvLink.swift and TvLinkSheet.swift, found %r; guard the new file too" % paths)
+src = {}
+for path in paths:
+    src[path] = strip_swift(open(path).read(), path)
+link, sheet = src["Dobby/TvLink/TvLink.swift"], src["Dobby/TvLink/TvLinkSheet.swift"]
+
+def call(text, at):
+    # The call text from `at` (the name) through its matching close paren.
+    depth, i = 0, text.index("(", at)
+    while True:
+        c = text[i]
+        depth += c == "("
+        depth -= c == ")"
+        i += 1
+        if depth == 0:
+            return text[at:i]
+
+def first_arg(text):
+    inner, depth = text[text.index("(") + 1:-1], 0
+    for i, c in enumerate(inner):
+        depth += c in "([{"
+        depth -= c in ")]}"
+        if c == "," and depth == 0:
+            return inner[:i].strip()
+    return inner.strip()
+
+# (1)
+for path, text in src.items():
+    printers = re.findall(r"(?<![\w.])(NSLog|NSLogv|print|debugPrint|dump|os_log|os_signpost|fputs|putchar)\s*\(", text)
+    if printers:
+        fail("%s calls %s: TvLink logs only through its Logger, an OSStatus at most" % (path, sorted(set(printers))))
+
+# (2)
+decl = '    private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "tv-link")'
+if link.split("\n").count(decl) != 1 or sum(t.count("Logger(") for t in src.values()) != 1:
+    fail("expected exactly one Logger, TvLink's private tv-link one")
+log_form = re.compile(r'log\.(error|warning|notice|info|debug|trace|fault|critical)\("[^"\\]*\\\(status, privacy: \.public\)"\)')
+logs = []
+for path, text in src.items():
+    refs = [m.start() for m in re.finditer(r"(?<![\w.])log\b", text)]
+    for at in refs:
+        if text.startswith("log = Logger(", at):
+            continue
+        whole = call(text, at) if re.match(r"log\s*\.\s*\w+\s*\(", text[at:]) else text[at:at + 40]
+        if not log_form.fullmatch(whole):
+            fail("%s: a log reference outside the one allowed form, a literal interpolating only "
+                 "\\(status, privacy: .public): %r" % (path, whole))
+        logs.append(whole)
+if len(logs) < 2:
+    fail("only %d log call(s) found in TvLink; the log scan is blind" % len(logs))
+
+# (3)
+url_at = link.index("    static func url(")
+url_body = link[url_at:link.index("\n    }\n", url_at)]
+if url_body.count("\\(") != 4:
+    fail("TvLink.url must build its URL from exactly four interpolations; got %d" % url_body.count("\\("))
+for path, text in src.items():
+    n = text.count("\\(")
+    allowed = len(logs) + url_body.count("\\(") if path.endswith("TvLink.swift") else 0
+    if n != allowed:
+        fail("%s has %d string interpolation(s); only the log OSStatus lines and TvLink.url's four may "
+             "interpolate (%d allowed): a view or log string carrying a value" % (path, n, allowed))
+
+# (4)
+if "import SwiftUI" in link:
+    fail("TvLink.swift must stay view-free; views live in TvLinkSheet.swift")
+literal = r'"[^"\\]*"'
+allowed_args = {"note", "found.name"}
+views = re.compile(r"(?<![\w.])(Text|Button|Label|TextField|SecureField|Link|Toggle|Section|Menu|Picker|LabeledContent)\s*\("
+                   r"|\.(navigationTitle|alert|confirmationDialog|help|accessibilityLabel|accessibilityValue|accessibilityHint|badge|prompt)\s*\(")
+seen = 0
+for m in views.finditer(sheet):
+    arg = first_arg(call(sheet, m.start()))
+    seen += 1
+    two = re.fullmatch(r"[\w.]+\s*\?\s*(%s)\s*:\s*(%s)" % (literal, literal), arg, re.S)
+    if not (re.fullmatch(literal, arg) or two or arg in allowed_args):
+        fail("TvLinkSheet shows %r: a view text must be a plain literal, a choice of two literals, "
+             "found.name or note" % arg)
+if seen < 8:
+    fail("only %d view text call(s) found in TvLinkSheet; the view scan is blind" % seen)
+note_lines = [l.strip() for l in sheet.split("\n") if re.search(r"\bnote\b", l)]
+odd = [l for l in note_lines if l not in ("@State private var note: String?", "if let note { Text(note) }")
+       and not re.fullmatch(r"note = (nil|%s)" % literal, l)]
+if odd or note_lines.count("@State private var note: String?") != 1 or len(note_lines) < 8:
+    fail("note must be the sheet's one @State String?, shown only by `if let note { Text(note) }` and "
+         "set only to nil or a plain literal; got %r" % (odd or note_lines))
+
+# (5)
+lines = [l.strip() for l in link.split("\n")]
+for need in ["guard case .service(let name, _, _, _) = result.endpoint else { return nil }",
+             "return Tv(name: name, endpoint: result.endpoint)"]:
+    if lines.count(need) != 1:
+        fail("the listed TV's name must be the DNS-SD instance name: missing %r" % need)
+if len(re.findall(r"(?<![\w.])Tv\(", link + sheet)) != 1:
+    fail("a Tv is built somewhere other than from a browse result")
+
+print("PASS: Dobby/TvLink logs an OSStatus at most through its one Logger, interpolates a value only "
+      "inside TvLink.url, and shows only literals, the TV's DNS-SD name and a literal-only note: no view "
+      "or log carries the address, port, token or code (#237)")
+TVLINKGUARDPY

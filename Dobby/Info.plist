@@ -41,7 +41,12 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Dobby connects directly to your home server when you are on the same network.</string>
+	<string>Dobby connects directly to your home server when you are on the same network, and finds Dobby on your TV so you can type on it from this device.</string>
+	<!-- #237 Type on TV: the one service type the TV advertises while Dobby is in front on it. -->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dobby-link._tcp</string>
+	</array>
 	<!-- App-Bound Domains: opting in turns on Service Workers (and other
 	     privileged web APIs) inside WKWebView. Covers the host + subdomains.
 	     Only domains are accepted here, so a LAN address can't be listed — the

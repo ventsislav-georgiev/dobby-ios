@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var offlineShell = false
     @State private var resolving = true
     @State private var editingAddresses = false
+    @State private var typingOnTv = false
 
     var body: some View {
         ZStack {
@@ -35,6 +36,10 @@ struct ContentView: View {
         .task { await resolve() }
         .sheet(isPresented: $editingAddresses) {
             AddressEditor { await resolve() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: TvLink.open)) { _ in typingOnTv = true }
+        .sheet(isPresented: $typingOnTv) {
+            TvLinkSheet()
         }
     }
 

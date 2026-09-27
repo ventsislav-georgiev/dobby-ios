@@ -1386,6 +1386,12 @@ enum SettingsMirrorStore {
     /// errSecSuccess or the OSStatus the Keychain refused the write with (#185).
     static func save(_ body: Data) -> OSStatus { write(baseQuery, body) }
 
+    /// #237: the Type on TV link token, one item per TV service name beside the mirror. The read
+    /// carries its status (#189: only errSecItemNotFound is "not paired"); TvLink logs.
+    static func tvLinkToken(_ tv: String) -> (data: Data?, status: OSStatus) { readWithStatus(query("tv-link/" + tv)) }
+    static func saveTvLinkToken(_ tv: String, _ token: Data) -> OSStatus { write(query("tv-link/" + tv), token) }
+    static func dropTvLinkToken(_ tv: String) -> OSStatus { SecItemDelete(query("tv-link/" + tv) as CFDictionary) }
+
     /// #185: put the mirror back to what `load()` read before a settings POST whose queue write
     /// was then refused — nil is "there was no mirror item", so the saved one is removed. Keep
     /// going: a refused put-back is logged (write logs its own, the delete here) and nothing

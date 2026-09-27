@@ -151,6 +151,8 @@ extension WebBridge: WKScriptMessageHandler {
             }
         case "stop":
             playback.stop()
+        case "openTvLink":
+            NotificationCenter.default.post(name: TvLink.open, object: nil)
         case "setNowPlaying":
             #if os(iOS)
             guard let json = payload as? String,
