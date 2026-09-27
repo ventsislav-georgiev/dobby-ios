@@ -1391,6 +1391,11 @@ enum SettingsMirrorStore {
     static func tvLinkToken(_ tv: String) -> (data: Data?, status: OSStatus) { readWithStatus(query("tv-link/" + tv)) }
     static func saveTvLinkToken(_ tv: String, _ token: Data) -> OSStatus { write(query("tv-link/" + tv), token) }
     static func dropTvLinkToken(_ tv: String) -> OSStatus { SecItemDelete(query("tv-link/" + tv) as CFDictionary) }
+    /// #248: the settings key from the TV's QR, its own item beside the token so a #237
+    /// code-only pairing keeps reading exactly as it was written.
+    static func tvLinkKey(_ tv: String) -> (data: Data?, status: OSStatus) { readWithStatus(query("tv-link-key/" + tv)) }
+    static func saveTvLinkKey(_ tv: String, _ key: Data) -> OSStatus { write(query("tv-link-key/" + tv), key) }
+    static func dropTvLinkKey(_ tv: String) -> OSStatus { SecItemDelete(query("tv-link-key/" + tv) as CFDictionary) }
 
     /// #185: put the mirror back to what `load()` read before a settings POST whose queue write
     /// was then refused — nil is "there was no mirror item", so the saved one is removed. Keep

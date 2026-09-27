@@ -8,9 +8,11 @@ import Security
 /// Settings guide shows for the TV's link token, keeps that token in the Keychain, and opens the
 /// TV's own phone page with it (TvLinkSheet). The TV refuses a Host that is not an IP literal,
 /// so every URL is built from the resolved address, never from the service name.
+/// #248: or the phone scans the guide's QR, which carries the token and the settings key; with
+/// the key the page can send Settings, with the token alone it only searches.
 ///
-/// Nothing here logs or shows an address, port, token or code: logs carry an OSStatus only
-/// (a textual guard in Tests/run-checks.sh pins it).
+/// Nothing here logs or shows an address, port, token, key, code or scanned payload: logs carry
+/// an OSStatus only (a textual guard in Tests/run-checks.sh pins it).
 enum TvLink {
     static let serviceType = "_dobby-link._tcp"
     /// Posted by WebBridge for window.Dobby.openTvLink(); ContentView presents the sheet.
@@ -63,26 +65,78 @@ enum TvLink {
         return token
     }
 
-    enum Saved: Equatable { case token(String), none, refused }
+    enum Saved: Equatable { case token(String, key: String?), none, refused }
 
     /// #189: only errSecItemNotFound is "not paired". Any other failed read is a refusal: it is
-    /// never answered with a new pairing that would overwrite the item.
-    static func saved(_ read: (data: Data?, status: OSStatus)) -> Saved {
+    /// never answered with a new pairing that would overwrite the item. #248: the key is its own
+    /// item under the same rule; a token without a key is a search-only pairing, a key without a
+    /// token is not a pairing, and a refused key read refuses the whole open.
+    static func saved(_ read: (data: Data?, status: OSStatus), key: (data: Data?, status: OSStatus)) -> Saved {
         if read.status == errSecItemNotFound { return .none }
-        guard read.status == errSecSuccess else { return .refused }
+        guard read.status == errSecSuccess, key.status == errSecSuccess || key.status == errSecItemNotFound else { return .refused }
         guard let data = read.data, let token = String(data: data, encoding: .utf8), isToken(token) else { return .none }
-        return .token(token)
+        let held = key.data.flatMap { String(data: $0, encoding: .utf8) }.flatMap { isToken($0) ? $0 : nil }
+        return .token(token, key: held)
     }
 
-    /// A token-bearing call's HTTP status. 401 means the TV forgot this phone (its token was
-    /// rotated): the item is dropped and false says "ask for a new code". Anything else keeps it.
+    /// A token-bearing call's HTTP status. 401 means the TV forgot this phone (its token and key
+    /// were rotated together, PhoneLink.forget): both items are dropped and false says "ask for
+    /// a new code". Anything else keeps them.
     static func answered(_ http: Int, tv: String, store: TvLinkStore) -> Bool {
         guard http == 401 else { return true }
-        let status = store.drop(tv)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            log.error("tv link token drop failed: OSStatus \(status, privacy: .public)")
+        for status in [store.drop(tv), store.dropKey(tv)] where status != errSecSuccess && status != errSecItemNotFound {
+            log.error("tv link drop failed: OSStatus \(status, privacy: .public)")
         }
         return false
+    }
+
+    /// #248: the guide's QR payload, http://<ip>:<port>/#<token>.<key> (PhoneLink.link).
+    struct Scanned: Equatable {
+        let host: String
+        let port: UInt16
+        let token: String
+        let key: String
+    }
+
+    /// Only that exact shape: http, a host literal exactly as hostLiteral writes it, an explicit
+    /// port in its plain decimal form, path "/" or none, no userinfo or query, and a fragment of
+    /// exactly token "." key. Anything else, a hostname or https or trailing junk, is nil.
+    static func scanned(_ payload: String) -> Scanned? {
+        guard payload.hasPrefix("http://"), let hash = payload.firstIndex(of: "#") else { return nil }
+        var authority = payload[payload.index(payload.startIndex, offsetBy: 7)..<hash]
+        if authority.hasSuffix("/") { authority = authority.dropLast() }
+        guard let colon = authority.lastIndex(of: ":") else { return nil }
+        let host = String(authority[..<colon]), portText = String(authority[authority.index(after: colon)...])
+        guard let port = UInt16(portText), port > 0, String(port) == portText else { return nil }
+        let parsed: NWEndpoint.Host? = host.hasPrefix("[") && host.hasSuffix("]")
+            ? IPv6Address(String(host.dropFirst().dropLast())).map { .ipv6($0) }
+            : IPv4Address(host).map { .ipv4($0) }
+        guard let parsed, hostLiteral(parsed) == host else { return nil }
+        let parts = payload[payload.index(after: hash)...].split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 2, isToken(String(parts[0])), isToken(String(parts[1])) else { return nil }
+        return Scanned(host: host, port: port, token: String(parts[0]), key: String(parts[1]))
+    }
+
+    /// The scanned QR is this TV's: its host literal and port are the ones the picked TV resolved to.
+    static func matches(_ scan: Scanned, _ at: Address) -> Bool {
+        // ponytail: the QR carries the TV's first site-local IPv4 (PhoneLink.lanIpv4) while
+        // resolve takes whichever address the connection reached, so a TV on Ethernet and Wi-Fi
+        // at once, or one reached over IPv6 only, can read as another TV and save nothing (never
+        // the wrong TV). Upgrade: match against every address the service resolves to.
+        hostLiteral(at.host) == scan.host && at.port.rawValue == scan.port
+    }
+
+    enum Scan: Equatable { case kept(token: String, key: String), otherTv, notALink }
+
+    /// A scanned payload applied to the store: a well-formed QR of the picked TV saves its token
+    /// and key under the TV's name; another TV's QR, or anything that is not one, saves nothing.
+    static func keep(_ payload: String, tv: String, at: Address, store: TvLinkStore) -> Scan {
+        guard let scan = scanned(payload) else { return .notALink }
+        guard matches(scan, at) else { return .otherTv }
+        for status in [store.save(tv, Data(scan.token.utf8)), store.saveKey(tv, Data(scan.key.utf8))] where status != errSecSuccess {
+            log.error("tv link scan save failed: OSStatus \(status, privacy: .public)")
+        }
+        return .kept(token: scan.token, key: scan.key)
     }
 
     /// The host as the TV's Host check accepts it: dotted IPv4, or bracketed IPv6 with no zone.
@@ -102,10 +156,12 @@ enum TvLink {
     }
 
     /// http://<literal>:<port><path>, with the token as the fragment for the page: a fragment
-    /// never travels in a request line.
-    static func url(_ at: Address, path: String = "/", token: String? = nil) -> URL? {
-        guard let literal = hostLiteral(at.host), token.map(isToken) ?? true else { return nil }
-        let fragment = token.map { "#" + $0 } ?? ""
+    /// never travels in a request line. #248: with a key, the fragment is token "." key, the
+    /// shape the page reads the settings key from; a key needs a token and both must be isToken.
+    static func url(_ at: Address, path: String = "/", token: String? = nil, key: String? = nil) -> URL? {
+        guard let literal = hostLiteral(at.host), token.map(isToken) ?? true,
+              key.map({ isToken($0) && token != nil }) ?? true else { return nil }
+        let fragment = token.map { "#" + $0 + (key.map { "." + $0 } ?? "") } ?? ""
         return URL(string: "http://\(literal):\(at.port.rawValue)\(path)\(fragment)")
     }
 
@@ -175,16 +231,23 @@ enum TvLink {
     }
 }
 
-/// The token's Keychain item, one per TV service name, through SettingsMirrorStore's
-/// readWithStatus/write. A seam so TvLinkCheck can see what is saved and dropped.
+/// The token's Keychain item and (#248) the settings key's, one pair per TV service name,
+/// through SettingsMirrorStore's readWithStatus/write. A seam so TvLinkCheck can see what is
+/// saved and dropped.
 struct TvLinkStore {
     var read: (String) -> (data: Data?, status: OSStatus)
     var save: (String, Data) -> OSStatus
     var drop: (String) -> OSStatus
+    var readKey: (String) -> (data: Data?, status: OSStatus)
+    var saveKey: (String, Data) -> OSStatus
+    var dropKey: (String) -> OSStatus
 
     static let keychain = TvLinkStore(read: SettingsMirrorStore.tvLinkToken,
                                       save: SettingsMirrorStore.saveTvLinkToken,
-                                      drop: SettingsMirrorStore.dropTvLinkToken)
+                                      drop: SettingsMirrorStore.dropTvLinkToken,
+                                      readKey: SettingsMirrorStore.tvLinkKey,
+                                      saveKey: SettingsMirrorStore.saveTvLinkKey,
+                                      dropKey: SettingsMirrorStore.dropTvLinkKey)
 }
 
 /// Dobby TVs on the LAN. A TV advertises only while Dobby is in front on it.

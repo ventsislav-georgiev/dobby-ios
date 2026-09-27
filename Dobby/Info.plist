@@ -42,6 +42,9 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Dobby connects directly to your home server when you are on the same network, and finds Dobby on your TV so you can type on it from this device.</string>
+	<!-- #248 Type on TV: the in-app scan of the QR the TV's Settings guide shows (iOS only). -->
+	<key>NSCameraUsageDescription</key>
+	<string>Dobby uses the camera to scan the QR code on your TV, so this phone can send Settings to it.</string>
 	<!-- #237 Type on TV: the one service type the TV advertises while Dobby is in front on it. -->
 	<key>NSBonjourServices</key>
 	<array>

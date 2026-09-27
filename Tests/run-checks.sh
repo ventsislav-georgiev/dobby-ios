@@ -105,7 +105,8 @@ reads = {
                                         '        js[n] = strip_js(f.read()).split("\\n")'],
                              ['    with open(path, encoding="utf-8") as f:',
                               '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
-    "TVLINKGUARDPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
+    "TVLINKGUARDPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"],
+                      ['with open("Dobby/Info.plist", "rb") as f:']),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -3866,8 +3867,15 @@ xcrun swiftc -o "$OUT11" \
 # two, the TV's service name on its list button, or `note`, which is only ever nil or a literal;
 # (5) the service name is the DNS-SD instance name and nothing else. Ceiling: textual; a view text
 # API outside the pinned set, or a value reaching one through a helper, is not seen.
+# #248, the QR scan, which the host cannot run (no capture device): (6) the scanned payload goes
+# only to TvLink.keep and the settings key only to TvLink.url, and the URL adds the key by
+# concatenation behind its isToken guard; (7) the scanner and every scan affordance sit inside
+# #if os(iOS), so the macOS build has none; (8) Info.plist carries the one fixed
+# NSCameraUsageDescription; (9) the capture session starts and stops on its own queue, never
+# main, and stops on the first read and on dismiss.
 python3 - <<'TVLINKGUARDPY'
 import glob
+import plistlib
 import re
 import sys
 sys.path.insert(0, "Tests")
@@ -3975,7 +3983,87 @@ for need in ["guard case .service(let name, _, _, _) = result.endpoint else { re
 if len(re.findall(r"(?<![\w.])Tv\(", link + sheet)) != 1:
     fail("a Tv is built somewhere other than from a browse result")
 
+def fail248(msg):
+    sys.stderr.write("FAIL: %s (#248)\n" % msg)
+    sys.exit(1)
+
+def only(text, word, allowed, what):
+    got = [l.strip() for l in text.split("\n") if re.search(r"\b%s\b" % word, l)]
+    if sorted(got) != sorted(allowed):
+        fail248("%s: the lines naming %s must be exactly %r; got %r" % (what, word, sorted(allowed), sorted(got)))
+
+# (6)
+only(sheet, "payload", ["@MainActor private func scanned(_ payload: String?) {", "guard let payload else {",
+                        "switch TvLink.keep(payload, tv: tv.name, at: at, store: TvLink.store) {",
+                        "private func finish(_ payload: String?) {", "found(payload)"],
+     "the scanned payload goes only to TvLink.keep")
+only(sheet, "stringValue", ["guard let code = objects.compactMap({ $0 as? AVMetadataMachineReadableCodeObject }).first?.stringValue else { return }"],
+     "the camera's one read")
+if [l.strip() for l in sheet.split("\n")].count("finish(code)") != 1:
+    fail248("the camera's read must go only to finish(code)")
+# The first line is split so the #194 raw-read scan of this block does not read it as a file read.
+only(sheet, "key", ["switch TvLink.saved(TvLink.store." + "read(found.name), key: TvLink.store.readKey(found.name)) {",
+                    "case .token(let token, let key):", "keyed = key != nil",
+                    "page = TvLink.url(address, token: token, key: key)", "case .kept(let token, let key):",
+                    "page = TvLink.url(at, token: token, key: key)"],
+     "the settings key goes only to TvLink.url")
+for need in ["        guard let literal = hostLiteral(at.host), token.map(isToken) ?? true,",
+             "              key.map({ isToken($0) && token != nil }) ?? true else { return nil }",
+             '        let fragment = token.map { "#" + $0 + (key.map { "." + $0 } ?? "") } ?? ""']:
+    if url_body.split("\n").count(need) != 1:
+        fail248("TvLink.url must add the key only behind its isToken guard, by concatenation: missing %r" % need)
+
+# (7)
+ios, stack = [], []
+for l in sheet.split("\n"):
+    t = l.strip()
+    if t.startswith("#if "):
+        stack.append(t == "#if os(iOS)")
+    elif (t.startswith("#elseif") or t == "#else" or t == "#endif") and not stack:
+        fail248("TvLinkSheet's #if blocks do not balance: %r with no open #if" % t)
+    elif t.startswith("#elseif") or t == "#else":
+        stack[-1] = False
+    elif t == "#endif":
+        stack.pop()
+    ios.append((l, any(stack)))
+if stack:
+    fail248("TvLinkSheet's #if blocks do not balance: %d left open" % len(stack))
+scan_rx = re.compile(r'\b(AVFoundation|AVCapture\w*|AVMetadata\w*|TvLinkScanner|UIViewController\w*|requestAccess|scan|scanned|Camera)\b'
+                     r'|"Scan QR code"|scanning = true|\bif scanning\b')
+outside = [l.strip() for l, inside in ios if scan_rx.search(l) and not inside]
+hits = [l.strip() for l, inside in ios if scan_rx.search(l) and inside]
+if outside:
+    fail248("the scanner and every scan affordance must sit inside #if os(iOS); outside: %r" % outside)
+if sum(l.count('"Scan QR code"') for l in hits) != 2 or sum(l.count("scanning = true") for l in hits) != 1 \
+        or not any(l.startswith("struct TvLinkScanner: UIViewControllerRepresentable {") for l in hits) or len(hits) < 20:
+    fail248("the scan pins are blind: expected the two Scan QR code buttons, one scanning = true and "
+            "the TvLinkScanner struct inside #if os(iOS)")
+
+# (8)
+with open("Dobby/Info.plist", "rb") as f:
+    usage = plistlib.load(f).get("NSCameraUsageDescription")
+if usage != "Dobby uses the camera to scan the QR code on your TV, so this phone can send Settings to it.":
+    fail248("Dobby/Info.plist must carry the one fixed NSCameraUsageDescription; got %r" % usage)
+
+# (9)
+lines = [l.strip() for l in sheet.split("\n")]
+for need, n in [('private let queue = DispatchQueue(label: "tv-link.scan")', 1),
+                ("queue.async { [session] in session.startRunning() }", 1),
+                ("func stop() { queue.async { [session] in session.stopRunning() } }", 1),
+                ("static func dismantleUIViewController(_ camera: Camera, coordinator: ()) { camera.stop() }", 1)]:
+    if lines.count(need) != n:
+        fail248("the capture session must start and stop off main on its own queue, and stop on dismiss: "
+                "missing %r" % need)
+if sheet.count("startRunning") != 1 or sheet.count("stopRunning") != 1:
+    fail248("startRunning and stopRunning must each have only their one queued call")
+fin_at = sheet.index("private func finish(_ payload: String?) {")
+if [l.strip() for l in sheet[fin_at:].split("\n")[1:5]] != ["guard !read else { return }", "read = true", "stop()", "found(payload)"]:
+    fail248("finish must take only the first read and stop the session before handing it on")
+
 print("PASS: Dobby/TvLink logs an OSStatus at most through its one Logger, interpolates a value only "
       "inside TvLink.url, and shows only literals, the TV's DNS-SD name and a literal-only note: no view "
       "or log carries the address, port, token or code (#237)")
+print("PASS: the scanned QR payload reaches only TvLink.keep and the settings key only TvLink.url, "
+      "the scanner and every scan affordance sit inside #if os(iOS), NSCameraUsageDescription is "
+      "the one fixed sentence, and the capture session starts and stops off main (#248)")
 TVLINKGUARDPY
