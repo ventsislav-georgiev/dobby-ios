@@ -310,7 +310,7 @@ final class OfflineStore: NSObject, ObservableObject {
     /// Offline/<id>, or Offline/<id>/<name> when a name is given, only while it stays inside its
     /// parent after standardizing; nil for ".", "..", "../x" or "a/../..", which resolve to
     /// Offline itself or above it (a late transfer keyed "." removed Offline and index.json); a "."
-/// or ".." segment anywhere is refused, so no id can alias another id's folder.
+    /// or ".." segment anywhere is refused, so no id can alias another id's folder.
     nonisolated private func contained(_ id: String, _ name: String? = nil) -> URL? {
         func under(_ base: URL, _ component: String) -> URL? {
             guard !component.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }) else { return nil }
