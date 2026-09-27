@@ -99,7 +99,8 @@ enum ServerAddresses {
         return out.filter(rule.keeps)
     }
 
-    /// The configured list alone, in the order the user set — what the editor shows.
+    /// The configured list alone, in the order the user set, unfiltered (#245: on iOS the
+    /// entries that are not app-bound are kept here and skipped by `candidates()`).
     static func stored(_ defaults: UserDefaults = .standard) -> [URL] {
         var out: [URL] = []
         for raw in defaults.stringArray(forKey: listKey) ?? [] { append(&out, raw) }
@@ -115,17 +116,19 @@ enum ServerAddresses {
         store(parsed, defaults, rule: rule)
     }
 
-    /// #245: the trust boundary. Both editors (the PWA over the bridge, the native one on the
-    /// unreachable screen) land here, so this is where an address the platform cannot use is
-    /// dropped. The PWA list is shared with Android, where a LAN address is wanted, so the
-    /// drop is silent and per device. The drop line logs counts, never the dropped entries.
+    /// #245: both editors (the PWA over the bridge, the native one on the unreachable screen)
+    /// land here. The list is stored whole: an entry this device cannot load (on iOS, anything
+    /// that is not https on an app-bound host) is still the Pi's address, which `isPiOrigin`
+    /// needs for the #217 Pi-off refusal, and the list is shared with Android, which wants its
+    /// LAN address. It is filtered on read instead: `candidates()` never probes such an entry.
+    /// A push with nothing usable on this device is refused. The line logs counts, never entries.
     static func store(_ addresses: [URL], _ defaults: UserDefaults = .standard, rule: AppBound = .current) {
-        let kept = addresses.filter(rule.keeps)
-        if kept.count != addresses.count {
-            logger.log("kept \(kept.count, privacy: .public) of \(addresses.count, privacy: .public) server addresses, the rest are not app-bound")
+        let usable = addresses.filter(rule.keeps).count
+        if usable != addresses.count {
+            logger.log("\(usable, privacy: .public) of \(addresses.count, privacy: .public) server addresses are app-bound; the rest are kept but never probed")
         }
-        guard !kept.isEmpty else { return } // never let a bad push erase the way back in
-        defaults.set(kept.map(\.absoluteString), forKey: listKey)
+        guard usable > 0 else { return } // never let a push with nothing usable here erase the way back in
+        defaults.set(addresses.map(\.absoluteString), forKey: listKey)
     }
 
     /// #181: whether this device uses a Pi at all — Android's `ServerAddresses.piEnabled`

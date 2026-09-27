@@ -128,7 +128,9 @@ private struct ServerUnreachableView: View {
 private struct AddressEditor: View {
     let retry: () async -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var text = ServerAddresses.candidates().map(\.absoluteString).joined(separator: "\n")
+    /// #245: the whole stored list, not the probe order `candidates()` gives on iOS, or a Save
+    /// here would drop the entries this device skips (the Pi's LAN address, still the Pi).
+    @State private var text = ServerAddresses.candidates(rule: .keepAll).map(\.absoluteString).joined(separator: "\n")
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -142,6 +144,11 @@ private struct AddressEditor: View {
                 #endif
                 .frame(minHeight: 120)
                 .border(.secondary)
+            #if os(iOS)
+            // #245: the PWA's Settings note, word for word. Fixed text: no name, no address.
+            Text("Only the https Tailscale address works on iPhone and iPad; the others are ignored on this device.")
+                .font(.caption).foregroundStyle(.secondary)
+            #endif
             HStack {
                 Button("Cancel") { dismiss() }
                 Spacer()

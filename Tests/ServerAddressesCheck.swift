@@ -24,6 +24,8 @@ enum ServerAddressesCheck {
         appBoundStoreAndCandidates()
         appBoundPlatformPin()
         piOriginIgnoresTheAppBoundFilter()
+        piOriginAfterAProductionPush()
+        addressEditorPin()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -194,7 +196,9 @@ enum ServerAddressesCheck {
         let push = "[\"192.0.2.10:8080\", \"https://dobby.example.com\", \"http://box.home.arpa:8080\", \"\(good.absoluteString)\"]"
 
         ServerAddresses.store(json: push, defaults, rule: iOSDevice)
-        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: iOS stores only the app-bound entry of a mixed push")
+        check(ServerAddresses.stored(defaults).count == 4 && ServerAddresses.candidates(defaults, rule: iOSDevice) == [good],
+              "#245 storeFilter: iOS stores a mixed push whole and probes only its app-bound entry")
+        ServerAddresses.store([good], defaults, rule: iOSDevice)
         ServerAddresses.store(json: "[\"192.0.2.10:8080\", \"https://dobby.example.com\"]", defaults, rule: iOSDevice)
         check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: a push with nothing usable never erases the stored list")
         ServerAddresses.store(refused, defaults, rule: iOSDevice)
@@ -254,5 +258,36 @@ enum ServerAddressesCheck {
         let decl = "    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates(rule: .keepAll)) -> Bool {\n"
         check(src.components(separatedBy: decl).count == 2,
               "#245 piOriginUnfiltered: isPiOrigin defaults to the unfiltered candidates(rule: .keepAll)")
+    }
+
+    /// #245 review 2: the production write path. WebBridge hands the PWA push to store(json:), so
+    /// a Pi LAN address pushed there must still be the Pi afterwards (the #217 refusal).
+    static func piOriginAfterAProductionPush() {
+        let suite = "dobby.check.piOriginPush.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        ServerAddresses.store(json: "[\"http://192.0.2.10:8080\", \"\(AppConfig.serverURL.absoluteString)\"]", defaults, rule: iOSDevice)
+        check(ServerAddresses.isPiOrigin("http://192.0.2.10:8080/x.mkv", candidates: ServerAddresses.candidates(defaults, rule: .keepAll)),
+              "#245 piOriginAfterPush: a Pi LAN address pushed through store(json:) on iOS is still the Pi")
+        check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [AppConfig.serverURL],
+              "#245 piOriginAfterPush: and it is never probed on iOS")
+    }
+
+    /// #245 review 2: AddressEditor is a SwiftUI view with no host runtime here, so textual: it
+    /// prefills from the unfiltered list and carries the iOS-only fixed caption.
+    static func addressEditorPin() {
+        let src = (try? String(contentsOfFile: "Dobby/ContentView.swift", encoding: .utf8)) ?? ""
+        guard let at = src.range(of: "private struct AddressEditor: View {") else {
+            check(false, "#245 addressEditorPin: AddressEditor found in ContentView.swift"); return
+        }
+        let editor = String(src[at.lowerBound...])
+        let prefill = "    @State private var text = ServerAddresses.candidates(rule: .keepAll).map(\\.absoluteString).joined(separator: \"\\n\")\n"
+        check(editor.components(separatedBy: prefill).count == 2 && editor.components(separatedBy: "@State private var text").count == 2,
+              "#245 addressEditorPin: AddressEditor prefills from the unfiltered candidates(rule: .keepAll)")
+        let caption = "            #if os(iOS)\n            // #245: the PWA's Settings note, word for word. Fixed text: no name, no address.\n"
+            + "            Text(\"Only the https Tailscale address works on iPhone and iPad; the others are ignored on this device.\")\n"
+            + "                .font(.caption).foregroundStyle(.secondary)\n            #endif\n"
+        check(editor.components(separatedBy: caption).count == 2,
+              "#245 addressEditorPin: AddressEditor carries the fixed iOS-only caption under the editor")
     }
 }
