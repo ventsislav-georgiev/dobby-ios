@@ -4,6 +4,9 @@ import WebKit
 /// #237 Type on TV: pick a TV, pair by the code its Settings guide shows (once per TV), then the
 /// TV's own phone page in a bare web view. Every text here is a fixed string or the TV's service
 /// name; no address, port, token or code is ever shown or logged (guarded in run-checks.sh).
+/// A rotated token: the TV's page shows its own "pair again" status on a 401, and the next open's
+/// GET /v1/state probe drops the Keychain item (TvLink.answered). No WKWebView hook can do more:
+/// with App-Bound Domains on, iOS turns off user scripts and message handlers on a LAN origin.
 struct TvLinkSheet: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var browser = TvLinkBrowser()
@@ -29,7 +32,7 @@ struct TvLinkSheet: View {
 
     @ViewBuilder private var content: some View {
         if let page {
-            TvLinkPage(url: page, unpaired: unpaired)
+            TvLinkPage(url: page)
         } else if askCode {
             Form {
                 Section {
@@ -79,6 +82,10 @@ struct TvLinkSheet: View {
                 note = "That TV did not answer. Is Dobby open on it?"
                 return
             }
+            if http == 429 {
+                note = "The TV is busy. Wait a minute and try again."
+                return
+            }
             if TvLink.answered(http, tv: found.name, store: TvLink.store) {
                 page = TvLink.url(address, token: token)
             } else {
@@ -105,62 +112,27 @@ struct TvLinkSheet: View {
             note = "Wrong code. Check the TV and try again."
         case .closed:
             note = "Open Settings on the TV so it shows a code."
+        case .busy:
+            note = "The TV is busy. Wait a minute and try again."
         case .refused:
             note = "The TV refused the pairing. Try again."
         }
     }
-
-    /// The page saw a 401: the TV forgot this phone.
-    private func unpaired() {
-        guard let tv else { return }
-        _ = TvLink.answered(401, tv: tv.name, store: TvLink.store)
-        page = nil
-        note = "The TV forgot this phone. Enter a new code."
-        askCode = true
-    }
 }
 
-/// The TV's phone page, with no address bar. Nothing persists (a non-persistent data store), and
-/// a 401 from any of the page's own calls is reported back so the token is dropped.
+/// The TV's phone page, with no address bar, and nothing persists. A 401 is the page's own to
+/// show; the Keychain item goes on the next open's probe (see TvLinkSheet).
 struct TvLinkPage {
     let url: URL
-    let unpaired: () -> Void
 
-    static let watch401 = """
-    (function () {
-      var fetch = window.fetch;
-      window.fetch = function () {
-        return fetch.apply(this, arguments).then(function (response) {
-          if (response.status === 401) window.webkit.messageHandlers.tvLink.postMessage('401');
-          return response;
-        });
-      };
-    })();
-    """
-
-    final class Coordinator: NSObject, WKScriptMessageHandler {
-        let unpaired: () -> Void
-        init(unpaired: @escaping () -> Void) { self.unpaired = unpaired }
-
-        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.body as? String == "401" { unpaired() }
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(unpaired: unpaired) }
-
-    /// The page's configuration: nothing persists, and watch401 reports to the tvLink handler.
-    static func configuration(_ coordinator: Coordinator) -> WKWebViewConfiguration {
+    static func configuration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        config.userContentController.add(coordinator, name: "tvLink")
-        config.userContentController.addUserScript(
-            WKUserScript(source: Self.watch401, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         return config
     }
 
-    fileprivate func makeWebView(_ coordinator: Coordinator) -> WKWebView {
-        let webView = WKWebView(frame: .zero, configuration: Self.configuration(coordinator))
+    fileprivate func makeWebView() -> WKWebView {
+        let webView = WKWebView(frame: .zero, configuration: Self.configuration())
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -168,12 +140,12 @@ struct TvLinkPage {
 
 #if os(macOS)
 extension TvLinkPage: NSViewRepresentable {
-    func makeNSView(context: Context) -> WKWebView { makeWebView(context.coordinator) }
+    func makeNSView(context: Context) -> WKWebView { makeWebView() }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 #else
 extension TvLinkPage: UIViewRepresentable {
-    func makeUIView(context: Context) -> WKWebView { makeWebView(context.coordinator) }
+    func makeUIView(context: Context) -> WKWebView { makeWebView() }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 }
 #endif

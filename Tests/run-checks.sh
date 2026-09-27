@@ -2324,8 +2324,6 @@ MEMBERS_WITH_NO_PWA_CALLER = {
                    "index into it. Part C pins those two call sites.",
     "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
                   "inside the literal, like _offline; no PWA call site names it.",
-    "openTvLink": "#237: the iOS Settings \"Type on TV\" row (#236, being built in the dobby repo) "
-                  "calls it; until that row lands no PWA call site does. Drop this entry once it has.",
 }
 
 PWA_CALLS_NOT_DECLARED = {
@@ -2557,8 +2555,10 @@ for name, why in sorted(MEMBERS_WITH_NO_PWA_CALLER.items()):
         sys.stderr.write("WARN: MEMBERS_WITH_NO_PWA_CALLER lists %s, which BridgeInjection.swift "
                          "no longer declares — drop the entry.\n" % name)
     elif name in calls:
-        sys.stderr.write("WARN: MEMBERS_WITH_NO_PWA_CALLER lists %s, but the PWA now calls it "
-                         "(%s) — drop the entry.\n" % (name, ", ".join(sorted(calls[name]))))
+        # #237 review: a FAIL, not a WARN. An entry the PWA calls is an allowlist that would hide
+        # the loss of that caller (openTvLink stayed listed after #236 shipped its row).
+        fail("MEMBERS_WITH_NO_PWA_CALLER lists %s, but the PWA calls it (%s): drop the entry, or "
+             "losing that caller goes unnoticed (#158, #237)." % (name, ", ".join(sorted(calls[name]))))
 for name, why in sorted(PWA_CALLS_NOT_DECLARED.items()):
     if name not in calls:
         sys.stderr.write("WARN: PWA_CALLS_NOT_DECLARED lists %s, which no PWA call site names any "
@@ -3848,16 +3848,13 @@ PIOFFVIDEODOWNLOADPY
 # ---------------------------------------------------------------------------
 # #237 Type on TV. TvLinkCheck runs the pure parts against a fake store: the /v1/pair answer
 # (only a 200 with ok true and a 64 lower-case hex token pairs, extra fields ignored), a 401 from a
-# token call drops that TV's Keychain item while 409, 400 and the rest drop and save nothing, a
+# token call drops that TV's Keychain item while 409, 429 (busy), 400 and the rest drop and save nothing, a
 # refused Keychain read is never "not paired" (#189), and the URL is an IP literal the TV's Host
 # check accepts (IPv4, bracketed IPv6 with no zone; a zone, a link-local IPv6 or a name refused).
 # ---------------------------------------------------------------------------
-# Review round 1: the TV page's own 401s. TvLinkPage.watch401 run in JavaScriptCore posts '401'
-# to the tvLink handler for a 401 and nothing for any other status; TvLinkPage.configuration
-# injects it once, at document start, main frame only; and on a real WKWebView the tvLink handler
-# is registered and only the string '401' reaches unpaired (hence AppKit, as ApiSchemeWebViewCheck).
+# TvLinkPage.configuration is compiled in for its one pin: the TV page's store is non-persistent.
 OUT11="$(mktemp -d)/tv-link-check"
-xcrun swiftc -o "$OUT11" -framework WebKit -framework AppKit -framework JavaScriptCore \
+xcrun swiftc -o "$OUT11" \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
   Dobby/TvLink/TvLink.swift Dobby/TvLink/TvLinkSheet.swift Tests/TvLinkCheck.swift
 "$OUT11"

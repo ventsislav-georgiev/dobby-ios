@@ -35,10 +35,11 @@ enum TvLink {
         s.utf8.count == 6 && s.utf8.allSatisfy { (48...57).contains($0) }
     }
 
-    enum Pair: Equatable { case paired(String), wrongCode, closed, refused }
+    enum Pair: Equatable { case paired(String), wrongCode, closed, busy, refused }
 
     /// POST /v1/pair's answer. Only a 200 whose JSON says ok true with a well-formed token pairs;
-    /// 401 is a wrong code, 409 is no live code (the guide is closed), anything else is refused.
+    /// 401 is a wrong code, 409 is no live code (the guide is closed), 429 is the TV's lockout or
+    /// rate limit (a retry within the minute gets 429 again), anything else is refused.
     static func pairAnswer(status: Int, body: Data) -> Pair {
         switch status {
         case 200:
@@ -48,6 +49,7 @@ enum TvLink {
             return .paired(token)
         case 401: return .wrongCode
         case 409: return .closed
+        case 429: return .busy
         default: return .refused
         }
     }
