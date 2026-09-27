@@ -149,13 +149,18 @@ struct TvLinkPage {
 
     func makeCoordinator() -> Coordinator { Coordinator(unpaired: unpaired) }
 
-    fileprivate func makeWebView(_ coordinator: Coordinator) -> WKWebView {
+    /// The page's configuration: nothing persists, and watch401 reports to the tvLink handler.
+    static func configuration(_ coordinator: Coordinator) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         config.userContentController.add(coordinator, name: "tvLink")
         config.userContentController.addUserScript(
             WKUserScript(source: Self.watch401, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        let webView = WKWebView(frame: .zero, configuration: config)
+        return config
+    }
+
+    fileprivate func makeWebView(_ coordinator: Coordinator) -> WKWebView {
+        let webView = WKWebView(frame: .zero, configuration: Self.configuration(coordinator))
         webView.load(URLRequest(url: url))
         return webView
     }

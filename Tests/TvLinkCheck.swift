@@ -1,6 +1,9 @@
+import AppKit
 import Foundation
+import JavaScriptCore
 import Network
 import Security
+import WebKit
 
 /// #237 Type on TV, the pure parts: the pair answer, the Keychain decisions (a 401 drops the item,
 /// a refusal never does, a refused read is not "not paired"), and the URL the TV's Host check
@@ -16,6 +19,9 @@ enum TvLinkCheck {
             ("onlyItemNotFoundIsNotPaired", onlyItemNotFoundIsNotPaired),
             ("urlIsAnIpLiteralTheTvAccepts", urlIsAnIpLiteralTheTvAccepts),
             ("codeIsSixAsciiDigits", codeIsSixAsciiDigits),
+            ("pageWatcherPostsOnlyA401ToTvLink", pageWatcherPostsOnlyA401ToTvLink),
+            ("pageConfigurationInjectsTheWatcherAtDocumentStart", pageConfigurationInjectsTheWatcherAtDocumentStart),
+            ("onlyA401MessageUnpairs", onlyA401MessageUnpairs),
         ]
         let only = Set(CommandLine.arguments.dropFirst())
         for (name, run) in checks where only.isEmpty || only.contains(name) { run() }
@@ -157,5 +163,85 @@ enum TvLinkCheck {
         for bad in ["12345", "1234567", "12345a", "", " 12345", "１２３４５６", "12 456"] {
             check(!TvLink.isCode(bad), "\(bad.debugDescription) is not a code")
         }
+    }
+
+    // MARK: the TV page's own 401s (review round 1)
+
+    /// TvLinkPage.watch401 run in JavaScriptCore against a stub page: the fetch it wraps answers
+    /// with the given status, and every message handler records what reached it by name.
+    static func watched(_ status: Int) -> (posts: [String], passedThrough: Bool) {
+        let ctx = JSContext()!
+        var thrown: [String] = []
+        ctx.exceptionHandler = { _, e in thrown.append(e?.toString() ?? "?") }
+        ctx.evaluateScript("""
+            var window = this, posts = [], passed = false;
+            var handler = function (name) { return { postMessage: function (b) { posts.push(name + ':' + b); } }; };
+            window.webkit = { messageHandlers: new Proxy({}, { get: function (_, name) { return handler(name); } }) };
+            window.fetch = function () { return Promise.resolve({ status: \(status) }); };
+            """)
+        ctx.evaluateScript(TvLinkPage.watch401)
+        ctx.evaluateScript("window.fetch('/v1/search').then(function (r) { passed = r.status === \(status); });")
+        check(thrown.isEmpty, "watch401 threw in a stub page: \(thrown)")
+        let posts = ctx.evaluateScript("posts.join(',')")?.toString() ?? ""
+        return (posts.isEmpty ? [] : posts.components(separatedBy: ","), ctx.evaluateScript("passed")?.toBool() == true)
+    }
+
+    static func pageWatcherPostsOnlyA401ToTvLink() {
+        let seen = watched(401)
+        check(seen.posts == ["tvLink:401"], "a 401 from the page's fetch must post '401' to the tvLink handler once; got \(seen.posts)")
+        check(seen.passedThrough, "the watcher must hand the 401 response on to the page")
+        for status in [200, 400, 403, 404, 409, 429, 500] {
+            let other = watched(status)
+            check(other.posts.isEmpty, "a \(status) from the page's fetch must post nothing; got \(other.posts)")
+            check(other.passedThrough, "the watcher must hand a \(status) response on to the page")
+        }
+    }
+
+    static func pageConfigurationInjectsTheWatcherAtDocumentStart() {
+        let config = TvLinkPage.configuration(TvLinkPage.Coordinator(unpaired: {}))
+        let scripts = config.userContentController.userScripts
+        check(scripts.count == 1 && scripts[0].source == TvLinkPage.watch401, "the page's one user script must be watch401")
+        check(scripts.first?.injectionTime == .atDocumentStart, "watch401 must be injected at document start, before the page's first fetch")
+        check(scripts.first?.isForMainFrameOnly == true, "watch401 must be injected in the main frame only")
+        check(!config.websiteDataStore.isPersistent, "the TV page must not persist anything")
+    }
+
+    /// A real WKWebView on TvLinkPage.configuration: the tvLink handler is registered, and only the
+    /// string "401" reaches unpaired.
+    static func onlyA401MessageUnpairs() {
+        _ = NSApplication.shared
+        final class Count { var n = 0 }
+        let count = Count()
+        let webView = WKWebView(frame: .zero, configuration: TvLinkPage.configuration(TvLinkPage.Coordinator(unpaired: { count.n += 1 })))
+        final class Loaded: NSObject, WKNavigationDelegate {
+            var done = false
+            func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { done = true }
+        }
+        let loaded = Loaded()
+        webView.navigationDelegate = loaded
+        webView.loadHTMLString("<html><body></body></html>", baseURL: nil)
+        let deadline = Date().addingTimeInterval(20)
+        while !loaded.done && Date() < deadline { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.03)) }
+        check(loaded.done, "test setup: the stub page did not load")
+        func post(_ body: String) -> Int {
+            let before = count.n
+            var answered = false
+            webView.evaluateJavaScript("typeof window.webkit.messageHandlers.tvLink === 'object' && (window.webkit.messageHandlers.tvLink.postMessage(\(body)), true)") { value, _ in
+                check(value as? Bool == true, "the tvLink message handler must be registered on the page's configuration")
+                answered = true
+            }
+            // A round trip after the post, so the handler has run before counting.
+            let until = Date().addingTimeInterval(10)
+            while !answered && Date() < until { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.03)) }
+            var flushed = false
+            webView.evaluateJavaScript("1") { _, _ in flushed = true }
+            while !flushed && Date() < until { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.03)) }
+            check(answered && flushed, "test setup: the page did not answer")
+            return count.n - before
+        }
+        for body in ["'403'", "401", "'401 '", "{status: 401}", "'unpaired'", "''"] {
+            check(post(body) == 0, "a tvLink message \(body) must not unpair")
+        }
+        check(post("'401'") == 1, "the tvLink message '401' must unpair once")
     }
 }

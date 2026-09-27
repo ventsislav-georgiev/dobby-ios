@@ -3852,10 +3852,14 @@ PIOFFVIDEODOWNLOADPY
 # refused Keychain read is never "not paired" (#189), and the URL is an IP literal the TV's Host
 # check accepts (IPv4, bracketed IPv6 with no zone; a zone, a link-local IPv6 or a name refused).
 # ---------------------------------------------------------------------------
+# Review round 1: the TV page's own 401s. TvLinkPage.watch401 run in JavaScriptCore posts '401'
+# to the tvLink handler for a 401 and nothing for any other status; TvLinkPage.configuration
+# injects it once, at document start, main frame only; and on a real WKWebView the tvLink handler
+# is registered and only the string '401' reaches unpaired (hence AppKit, as ApiSchemeWebViewCheck).
 OUT11="$(mktemp -d)/tv-link-check"
-xcrun swiftc -o "$OUT11" \
+xcrun swiftc -o "$OUT11" -framework WebKit -framework AppKit -framework JavaScriptCore \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
-  Dobby/TvLink/TvLink.swift Tests/TvLinkCheck.swift
+  Dobby/TvLink/TvLink.swift Dobby/TvLink/TvLinkSheet.swift Tests/TvLinkCheck.swift
 "$OUT11"
 
 # #237, the source guard: nothing in Dobby/TvLink shows or logs the address, port, token or code.
