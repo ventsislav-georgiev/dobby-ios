@@ -96,6 +96,9 @@ reads = {
                                        '    off = strip_js(f.read()).split("\\n")'],
                             ['    with open(path, encoding="utf-8") as f:',
                              'with open(os.path.join(pub, "js", "12-service-worker-offline.js"), encoding="utf-8") as f:']),
+    "SETOFFLINEREFRESHPY": ([SW, JS], ['        src[path] = strip_swift(f.read(), path).split("\\n")',
+                                       '        js = strip_js(f.read()).split("\\n")'],
+                            ['    with open(path, encoding="utf-8") as f:']),
     "PIOFFVIDEODOWNLOADPY": ([SW, JS], ['        files[path] = strip_swift(f.read(), path).split("\\n")',
                                         '        js[n] = strip_js(f.read()).split("\\n")'],
                              ['    with open(path, encoding="utf-8") as f:',
@@ -291,6 +294,80 @@ if 'stored.range(of: "/Offline/")' not in anchor:
 
 print("PASS: OfflineStore.root ends in /Offline and anchorOfflinePath splits on that literal (#125)")
 OFFLINEROOTPY
+
+# #243: OfflineStore's latent defects (#242), against the real class. D1 a bad book payload gets
+# refuseBookDownload's error event, D2 a transfer landing after its cancel leaves no bytes behind
+# while an owned file stays, D3 a failed index.json write gets an error event. The store writes
+# under Documents/Offline, so the check runs in a scratch CFFIXED_USER_HOME and refuses to start
+# without one. D4: the injected _setOffline push re-renders the Offline Books section, run in
+# JavaScriptCore against a stub page with and without the PWA's refreshOfflineBooksSection.
+OUT9="$(mktemp -d)/offline-store-check"
+xcrun swiftc -o "$OUT9" \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Playback/PlayNativePayload.swift \
+  Dobby/Offline/OfflinePathAnchor.swift Dobby/Offline/OfflineStore.swift Tests/OfflineStoreCheck.swift
+CFFIXED_USER_HOME="$(mktemp -d)" "$OUT9"
+
+OUT10="$(mktemp -d)/bridge-injection-check"
+xcrun swiftc -o "$OUT10" -framework WebKit -framework JavaScriptCore \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/BridgeInjection.swift Tests/BridgeInjectionCheck.swift
+"$OUT10"
+
+# #243 D4, the construct itself (the behaviour is BridgeInjectionCheck above): _setOffline assigns
+# the cache first, then calls window.refreshOfflineBooksSection behind a typeof guard, inside the
+# window.Dobby literal, and nothing else in the Swift sources reaches that name. PWA end: the one
+# top-level function refreshOfflineBooksSection() in 12-service-worker-offline.js, defined
+# nowhere else under js/. Ceiling: textual; the PWA half SKIPs without a dobby checkout.
+SETOFFLINE_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
+python3 - <<'SETOFFLINEREFRESHPY'
+import glob
+import os
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+from js_strip import strip_js
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#243)\n" % msg)
+    sys.exit(1)
+
+src = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    with open(path, encoding="utf-8") as f:
+        src[path] = strip_swift(f.read(), path).split("\n")
+inject = src["Dobby/Web/BridgeInjection.swift"]
+MEMBER = [
+    "            _setOffline: function (arr) {",
+    "              this._offline = Array.isArray(arr) ? arr : [];",
+    "              if (typeof window.refreshOfflineBooksSection === 'function') window.refreshOfflineBooksSection();",
+    "            },"]
+lit = [i for i, l in enumerate(inject) if l == "          window.Dobby = {"]
+end = [i for i, l in enumerate(inject) if l == "          };" and lit and i > lit[0]]
+at = [i for i, l in enumerate(inject) if re.match(r"\s*_setOffline\s*:", l)]
+if len(lit) != 1 or not end or len(at) != 1 or not lit[0] < at[0] < end[0] \
+        or inject[at[0]:at[0] + 4] != MEMBER:
+    fail("_setOffline must assign the cache, then call window.refreshOfflineBooksSection behind "
+         "its typeof guard, inside the window.Dobby literal: %r" % (inject[at[0]:at[0] + 4] if at else None))
+reach = [(p, i) for p, ls in src.items() for i, l in enumerate(ls) if "refreshOfflineBooksSection" in l]
+if reach != [("Dobby/Web/BridgeInjection.swift", at[0] + 2)]:
+    fail("refreshOfflineBooksSection must be reached from _setOffline only: %s" % reach)
+
+pub = os.environ.get("SETOFFLINE_PUB", "")
+if not os.path.isfile(os.path.join(pub, "js", "12-service-worker-offline.js")):
+    print("PASS: _setOffline refreshes the Offline Books section behind a typeof guard (#243)")
+    print("SKIP: no dobby checkout at %r; the PWA half of the #243 D4 check needs it" % pub)
+    sys.exit(0)
+defs = []
+for path in sorted(glob.glob(os.path.join(pub, "js", "*.js"))):
+    with open(path, encoding="utf-8") as f:
+        js = strip_js(f.read()).split("\n")
+    defs += [(os.path.basename(path), l) for l in js if re.search(r"\bfunction\s+refreshOfflineBooksSection\b|\brefreshOfflineBooksSection\s*=", l)]
+if defs != [("12-service-worker-offline.js", "function refreshOfflineBooksSection() {")]:
+    fail("the PWA must define refreshOfflineBooksSection once, as a top-level function in "
+         "12-service-worker-offline.js (a window property the wrapper can reach): %s" % defs)
+print("PASS: _setOffline refreshes the Offline Books section behind a typeof guard, and the PWA "
+      "defines that function once at the top level (#243)")
+SETOFFLINEREFRESHPY
 
 # #228: the page marks the offline sidecar to select with the JSON key "default"
 # (dobbyTvNative.playOfflineNative), the key Android reads too. iOS selects only a track whose
@@ -3403,13 +3480,13 @@ exact_body(ss, se, [
     "        guard var e = index[bookId] else { return }",
     "        e.meta = meta",
     "        index[bookId] = e",
-    "        saveIndex()",
+    "        saveIndex(bookId)",
     "        guard let cover else { return }",
     "        downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in",
     "            guard ok, let self, var e = self.index[bookId] else { return }",
     "            e.cover = Self.coverFile",
     "            self.index[bookId] = e",
-    "            self.saveIndex()",
+    "            self.saveIndex(bookId)",
     "        }",
     "    }"], "storeBookExtras")
 if store.count('    static let coverFile = "cover"') != 1:
@@ -3541,19 +3618,25 @@ if store[bs + 1:bs + 5] != ["        #if DEBUG", SEAM, "        #endif", PI] \
          "payload decode: %r" % store[bs + 1:bs + 6])
 if len([l for l in store if re.search(r"\bfunc\s+startBookDownload\s*\(", l)]) != 1:
     fail("OfflineStore must define startBookDownload exactly once")
-rs, re_ = block(store, r"^    private func refuseBookDownload\(_ json: String, _ why: String\) \{$", "refuseBookDownload")
+rs, re_ = block(store, r'^    private func refuseBookDownload\(_ json: String, _ why: String, error: String = "Turn on Use a Pi '
+                  r'server to download this book\."\) \{$', "refuseBookDownload")
 if store[rs + 1:re_ + 1] != [
         '        NSLog("Dobby offline: book download refused (%@)", why)',
-        "        guard let bookId = BookDownloadPayload.decode(json)?.bookId else { return }",
+        "        guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],",
+        '              let bookId = obj["bookId"] as? String, !bookId.isEmpty else { return }',
         '        let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,',
-        '                                "error": "Turn on Use a Pi server to download this book."]',
+        '                                "error": error]',
         "        if let js = try? jsonString(d) { reportProgress?(js) }",
         "    }"]:
     fail("refuseBookDownload no longer reads as pinned: %r" % store[rs + 1:re_ + 1])
 if len([l for l in store if re.search(r"\bfunc\s+refuseBookDownload\s*\(", l)]) != 1:
     fail("OfflineStore must define refuseBookDownload exactly once; a local one shadows it")
-if sorted(calls("refuseBookDownload")) != [(store_path, bs + 2), (store_path, bs + 4)]:
-    fail("refuseBookDownload must be called from startBookDownload's two refusals only: %s" % calls("refuseBookDownload"))
+# #243 D1: the payload decode guard answers with it too, on the line after the guard.
+BAD = '            refuseBookDownload(json, "bad book payload", error: "invalid book request"); return'
+if store[bs + 6] != BAD or store[bs + 7] != "        }":
+    fail("startBookDownload's payload decode guard must answer with refuseBookDownload (#243 D1): %r" % store[bs + 5:bs + 8])
+if sorted(calls("refuseBookDownload")) != [(store_path, bs + 2), (store_path, bs + 4), (store_path, bs + 6)]:
+    fail("refuseBookDownload must be called from startBookDownload's two refusals and its decode guard only: %s" % calls("refuseBookDownload"))
 case = [i for i, l in enumerate(bridge) if l == '        case "downloadNativeBook":']
 if len(case) != 1 or bridge[case[0] + 1] != "            if let json = payload as? String { offline.startBookDownload(json) }" \
         or calls("startBookDownload") != [(bridge_path, case[0] + 1)]:

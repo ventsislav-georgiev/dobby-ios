@@ -107,14 +107,14 @@ final class OfflineStore: NSObject, ObservableObject {
             }
         }
 
-        if p.subsOnly == true { index[p.videoId] = entry; saveIndex(); return }
+        if p.subsOnly == true { index[p.videoId] = entry; saveIndex(p.videoId); return }
 
         guard let urlStr = p.url, let url = URL(string: urlStr) else {
             fail(p.videoId, "no url"); return
         }
         entry.status = "downloading"
         index[p.videoId] = entry
-        saveIndex()
+        saveIndex(p.videoId)
         emit(p.videoId, status: "downloading", bytes: 0, total: 0)
 
         let key = "video\t\(p.videoId)"
@@ -142,7 +142,7 @@ final class OfflineStore: NSObject, ObservableObject {
         #endif
         if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }
         guard let p = BookDownloadPayload.decode(json), !p.bookId.isEmpty, !p.chapters.isEmpty else {
-            NSLog("Dobby offline: bad book payload"); return
+            refuseBookDownload(json, "bad book payload", error: "invalid book request"); return
         }
         let dir = root.appendingPathComponent(p.bookId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -154,7 +154,7 @@ final class OfflineStore: NSObject, ObservableObject {
         index[p.bookId] = Entry(videoId: p.bookId, kind: "book", title: p.title ?? "", path: nil, subs: [],
                                 chapters: files.map { ChapterFile(name: $0.fileName, status: "downloading") },
                                 bytes: 0, total: 0, status: "downloading")
-        saveIndex()
+        saveIndex(p.bookId)
         emitBook(p.bookId)
         if let first = files.first.flatMap({ URL(string: $0.url) }) { fetchBookExtras(p.bookId, dir: dir, server: first) }
 
@@ -170,11 +170,15 @@ final class OfflineStore: NSObject, ObservableObject {
 
     /// #213: an error event the page's handleNativeBookProgress already renders (a toast and
     /// the button re-read). Reports only; the index and the book's folder stay as they were.
-    private func refuseBookDownload(_ json: String, _ why: String) {
+    /// #243 D1: also the answer to a payload startBookDownload cannot use, so the bookId is read
+    /// loosely: a chapter row that fails the typed decode must not silence the event. Ceiling: a
+    /// payload with no bookId string has nothing to address, so it is logged only.
+    private func refuseBookDownload(_ json: String, _ why: String, error: String = "Turn on Use a Pi server to download this book.") {
         NSLog("Dobby offline: book download refused (%@)", why)
-        guard let bookId = BookDownloadPayload.decode(json)?.bookId else { return }
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let bookId = obj["bookId"] as? String, !bookId.isEmpty else { return }
         let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,
-                                "error": "Turn on Use a Pi server to download this book."]
+                                "error": error]
         if let js = try? jsonString(d) { reportProgress?(js) }
     }
 
@@ -226,13 +230,13 @@ final class OfflineStore: NSObject, ObservableObject {
         guard var e = index[bookId] else { return }   // cancelled meanwhile
         e.meta = meta
         index[bookId] = e
-        saveIndex()
+        saveIndex(bookId)
         guard let cover else { return }
         downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in
             guard ok, let self, var e = self.index[bookId] else { return }
             e.cover = Self.coverFile
             self.index[bookId] = e
-            self.saveIndex()
+            self.saveIndex(bookId)
         }
     }
 
@@ -247,7 +251,7 @@ final class OfflineStore: NSObject, ObservableObject {
         }
         try? FileManager.default.removeItem(at: root.appendingPathComponent(id))
         index[id] = nil
-        saveIndex()
+        saveIndex(id)
         emit(id, status: "cancelled", bytes: 0, total: 0)
     }
 
@@ -269,7 +273,7 @@ final class OfflineStore: NSObject, ObservableObject {
         guard var e = index[videoId] else { return }
         e.subs.append(SubEntry(path: path, lang: lang ?? "", label: label ?? ""))
         index[videoId] = e
-        saveIndex()
+        saveIndex(videoId)
     }
 
     private func markChapter(_ bookId: String, _ name: String, _ status: String) {
@@ -279,8 +283,21 @@ final class OfflineStore: NSObject, ObservableObject {
             if chs.allSatisfy({ $0.status == "complete" }) { e.status = "complete" }
             else if chs.contains(where: { $0.status == "error" }) && !chs.contains(where: { $0.status == "downloading" }) { e.status = "error" }
             index[bookId] = e
-            saveIndex()
+            saveIndex(bookId)
             emitBook(bookId)
+        }
+    }
+
+    /// #243 D2: a transfer that completes after its download was cancelled was still moved into
+    /// Offline/<id>, bytes nothing lists and nothing removes. With no entry left the whole folder
+    /// goes, as cancel removes it; a book entry that no longer lists the file loses just that
+    /// file. A file its entry owns (a video's entry, a listed chapter) is never touched.
+    /// Ceiling: the subtitle and cover sidecars (kilobytes, on the default session) are not covered.
+    private func dropUnowned(_ id: String, _ name: String) {
+        let dir = root.appendingPathComponent(id, isDirectory: true)
+        guard let e = index[id] else { try? FileManager.default.removeItem(at: dir); return }
+        if e.kind == "book", e.chapters?.contains(where: { $0.name == name }) != true {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
         }
     }
 
@@ -303,13 +320,14 @@ final class OfflineStore: NSObject, ObservableObject {
 
     private func fail(_ videoId: String, _ error: String) {
         if var e = index[videoId] { e.status = "error"; index[videoId] = e }
-        saveIndex()
+        saveIndex(videoId)
         emit(videoId, status: "error", bytes: 0, total: 0, error: error)
     }
 
-    private func emit(_ id: String, status: String, bytes: Int64, total: Int64, error: String? = nil) {
+    private func emit(_ id: String, status: String, bytes: Int64, total: Int64, error: String? = nil, kind: String? = nil) {
         var d: [String: Any] = ["videoId": id, "status": status, "bytes": bytes, "total": total]
         if let error { d["error"] = error }
+        if let kind { d["kind"] = kind }
         if let js = try? jsonString(d) { reportProgress?(js) }
     }
 
@@ -346,9 +364,19 @@ final class OfflineStore: NSObject, ObservableObject {
         index = raw
     }
 
-    private func saveIndex() {
-        if let data = try? JSONEncoder().encode(index) { try? data.write(to: indexURL) }
+    /// #243 D3: a failed write (a full disk after a big download) used to be silent: the session
+    /// showed the change and the next launch lost it. `.atomic` keeps the previous index.json
+    /// whole when the write fails, and the page gets an error event for `id`, the entry whose
+    /// change triggered this save, after the index push so its handlers read the current cache.
+    /// Ceiling: the in-memory index is not rolled back, so the page keeps showing the unsaved
+    /// state until relaunch; a cancelled entry is already gone, so its error carries no kind.
+    private func saveIndex(_ id: String) {
+        let saved = Result { try JSONEncoder().encode(index).write(to: indexURL, options: .atomic) }
         pushIndex?(indexJSON())
+        if case .failure(let error) = saved {
+            NSLog("Dobby offline: index.json write failed (%@)", error.localizedDescription)
+            emit(id, status: "error", bytes: 0, total: 0, error: "The offline list could not be saved. Free some space and try again.", kind: index[id]?.kind)
+        }
     }
 
     private func subExt(_ mime: String?, _ url: String) -> String {
@@ -398,6 +426,7 @@ extension OfflineStore: URLSessionDownloadDelegate {
             let moved = (try? fm.moveItem(at: location, to: dest)) != nil
             Task { @MainActor in
                 self.tasks[key] = nil
+                if moved { self.dropUnowned(bookId, fileName) }
                 self.markChapter(bookId, fileName, moved ? "complete" : "error")
             }
             return
@@ -438,12 +467,13 @@ extension OfflineStore: URLSessionDownloadDelegate {
 
     private func finishVideo(videoId: String, key: String, path: String?, total: Int64) {
         tasks[key] = nil
+        if let path { dropUnowned(videoId, (path as NSString).lastPathComponent) }
         guard let path, var e = index[videoId] else { fail(videoId, "move failed"); return }
         e.path = path
         e.status = "complete"
         e.total = total
         index[videoId] = e
-        saveIndex()
+        saveIndex(videoId)
         emit(videoId, status: "complete", bytes: total, total: total)
     }
 }
