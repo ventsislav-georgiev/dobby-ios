@@ -4060,10 +4060,25 @@ fin_at = sheet.index("private func finish(_ payload: String?) {")
 if [l.strip() for l in sheet[fin_at:].split("\n")[1:5]] != ["guard !read else { return }", "read = true", "stop()", "found(payload)"]:
     fail248("finish must take only the first read and stop the session before handing it on")
 
+# (10) the view state the host cannot run: a read always leaves the camera, a kept scan clears the
+# note, marks the page keyed and opens it with the key, and the toolbar offers Scan only on an
+# unkeyed page.
+scan_at = sheet.index("@MainActor private func scanned(_ payload: String?) {")
+if [l.strip() for l in sheet[scan_at:].split("\n")[1:2]] != ["scanning = false"]:
+    fail248("scanned must leave the camera first: its first line must be scanning = false")
+kept_at = sheet.index("case .kept(let token, let key):")
+if [l.strip() for l in sheet[kept_at:].split("\n")[1:4]] != ["note = nil", "keyed = true",
+                                                             "page = TvLink.url(at, token: token, key: key)"]:
+    fail248("a kept scan must clear the note, set keyed = true and open the page with the key, in that order")
+if lines.count("} else if page != nil && !keyed {") != 1:
+    fail248("the toolbar must offer Scan QR code only on an unkeyed page: expected one "
+            "'} else if page != nil && !keyed {'")
+
 print("PASS: Dobby/TvLink logs an OSStatus at most through its one Logger, interpolates a value only "
       "inside TvLink.url, and shows only literals, the TV's DNS-SD name and a literal-only note: no view "
       "or log carries the address, port, token or code (#237)")
 print("PASS: the scanned QR payload reaches only TvLink.keep and the settings key only TvLink.url, "
       "the scanner and every scan affordance sit inside #if os(iOS), NSCameraUsageDescription is "
-      "the one fixed sentence, and the capture session starts and stops off main (#248)")
+      "the one fixed sentence, the capture session starts and stops off main, and a kept scan "
+      "leaves the camera, marks the page keyed and hides Scan (#248)")
 TVLINKGUARDPY

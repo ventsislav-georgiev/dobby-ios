@@ -56,12 +56,15 @@ enum TvLink {
         }
     }
 
-    /// The pair answer applied to the store: a token is saved and handed back; a wrong code,
-    /// a closed guide or a refusal leaves the store exactly as it was.
+    /// The pair answer applied to the store: a token is saved and handed back, and (#248) the
+    /// key item goes too, since a code pairing carries no key and one left over from an earlier
+    /// scan (a 401 whose key drop was refused) belongs to a token the TV already forgot; a wrong
+    /// code, a closed guide or a refusal leaves the store exactly as it was.
     static func settle(_ answer: Pair, tv: String, store: TvLinkStore) -> String? {
         guard case .paired(let token) = answer else { return nil }
         let status = store.save(tv, Data(token.utf8))
         if status != errSecSuccess { log.error("tv link token save failed: OSStatus \(status, privacy: .public)") }
+        for status in [store.dropKey(tv)] where status != errSecSuccess && status != errSecItemNotFound { log.error("tv link key drop failed: OSStatus \(status, privacy: .public)") }
         return token
     }
 

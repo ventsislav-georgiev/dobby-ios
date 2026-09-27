@@ -16,6 +16,7 @@ enum TvLinkCheck {
             ("pairAnswerTakesOnlyAWellFormedToken", pairAnswerTakesOnlyAWellFormedToken),
             ("pairRefusalsLeaveTheStoreAlone", pairRefusalsLeaveTheStoreAlone),
             ("aTokenCall401DropsTheTokenAndTheKey", aTokenCall401DropsTheTokenAndTheKey),
+            ("aCodePairingAfterARefusedKeyDropHasNoKey", aCodePairingAfterARefusedKeyDropHasNoKey),
             ("onlyItemNotFoundIsNotPaired", onlyItemNotFoundIsNotPaired),
             ("aSavedTokenOpensWithOrWithoutAKey", aSavedTokenOpensWithOrWithoutAKey),
             ("urlIsAnIpLiteralTheTvAccepts", urlIsAnIpLiteralTheTvAccepts),
@@ -118,7 +119,8 @@ enum TvLinkCheck {
         check(TvLink.settle(.paired(token), tv: "Dobby Fake TV", store: fake.store) == token, "a pairing hands the token back")
         check(fake.saved.count == 1 && fake.saved[0].0 == "Dobby Fake TV" && fake.saved[0].1 == Data(token.utf8) && fake.dropped.isEmpty,
               "a pairing saves the token under the TV's name and drops nothing")
-        check(fake.savedKeys.isEmpty && fake.droppedKeys.isEmpty, "a code pairing has no key to save and drops none")
+        check(fake.savedKeys.isEmpty && fake.droppedKeys == ["Dobby Fake TV"],
+              "a code pairing has no key to save and drops that TV's key item, so no older key rides with the new token")
     }
 
     static func aTokenCall401DropsTheTokenAndTheKey() {
@@ -137,6 +139,44 @@ enum TvLinkCheck {
             check(TvLink.answered(status, tv: "Dobby Fake TV", store: kept.store) && kept.untouched,
                   "a \(status) must keep the token and the key")
         }
+    }
+
+    /// An in-memory Keychain for sequences: one token and one key item per TV name, and a switch
+    /// that makes the key drop refuse (a locked phone) and leave the item in place.
+    final class Keychain {
+        var tokens: [String: Data] = [:]
+        var keys: [String: Data] = [:]
+        var refuseKeyDrop = false
+        func item(_ d: Data?) -> (data: Data?, status: OSStatus) { d.map { ($0, errSecSuccess) } ?? (nil, errSecItemNotFound) }
+        var store: TvLinkStore {
+            TvLinkStore(read: { self.item(self.tokens[$0]) },
+                        save: { self.tokens[$0] = $1; return errSecSuccess },
+                        drop: { self.tokens.removeValue(forKey: $0) == nil ? errSecItemNotFound : errSecSuccess },
+                        readKey: { self.item(self.keys[$0]) },
+                        saveKey: { self.keys[$0] = $1; return errSecSuccess },
+                        dropKey: {
+                            if self.refuseKeyDrop { return errSecInteractionNotAllowed }
+                            return self.keys.removeValue(forKey: $0) == nil ? errSecItemNotFound : errSecSuccess
+                        })
+        }
+    }
+
+    /// The stuck sequence: a scan keeps token and key, the TV forgets the phone, the probe's 401
+    /// drops the token but the key drop is refused, and a code pairing follows. The new token must
+    /// open without the dead key (search-only, the toolbar offering Scan again), never sealed with it.
+    static func aCodePairingAfterARefusedKeyDropHasNoKey() {
+        let chain = Keychain()
+        let tv = "Dobby Fake TV", fresh = String(repeating: "c", count: 64)
+        check(TvLink.keep(payload, tv: tv, at: v4, store: chain.store) == .kept(token: token, key: key), "the scan keeps both")
+        chain.refuseKeyDrop = true
+        check(!TvLink.answered(401, tv: tv, store: chain.store), "the 401 asks for a new code")
+        check(chain.tokens[tv] == nil && chain.keys[tv] != nil, "the refused key drop leaves the old key behind")
+        check(TvLink.saved(chain.store.read(tv), key: chain.store.readKey(tv)) == .none, "the orphan key alone is not a pairing")
+        chain.refuseKeyDrop = false
+        check(TvLink.settle(.paired(fresh), tv: tv, store: chain.store) == fresh, "the code pairing hands the new token back")
+        check(TvLink.saved(chain.store.read(tv), key: chain.store.readKey(tv)) == .token(fresh, key: nil),
+              "after a code pairing the saved token must read key: nil, never the old key")
+        check(TvLink.url(v4, token: fresh, key: nil)?.fragment == fresh, "the page opens search-only with the new token")
     }
 
     static let noKey: (data: Data?, status: OSStatus) = (nil, errSecItemNotFound)
