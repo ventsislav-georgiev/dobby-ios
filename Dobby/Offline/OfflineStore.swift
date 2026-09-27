@@ -88,7 +88,7 @@ final class OfflineStore: NSObject, ObservableObject {
         if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }
         #endif
         if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }
-        let dir = root.appendingPathComponent(p.videoId, isDirectory: true)
+        guard let dir = contained(p.videoId) else { NSLog("Dobby offline: bad download payload"); return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         var entry = index[p.videoId] ?? Entry(videoId: p.videoId, kind: "video", title: p.title ?? "", path: nil, subs: [], chapters: nil, bytes: 0, total: 0, status: "preparing")
@@ -141,10 +141,9 @@ final class OfflineStore: NSObject, ObservableObject {
         if ServerAddresses.noServerSeamActive() { refuseBookDownload(json, "DOBBY_NO_SERVER seam"); return }
         #endif
         if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }
-        guard let p = BookDownloadPayload.decode(json), !p.bookId.isEmpty, !p.chapters.isEmpty else {
+        guard let p = BookDownloadPayload.decode(json), !p.bookId.isEmpty, !p.chapters.isEmpty, let dir = contained(p.bookId), p.chapters.allSatisfy({ contained(p.bookId, $0.fileName) != nil }) else {
             refuseBookDownload(json, "bad book payload", error: "invalid book request"); return
         }
-        let dir = root.appendingPathComponent(p.bookId, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         // Dedup chapter files (multiple chapters can share one file).
@@ -222,7 +221,7 @@ final class OfflineStore: NSObject, ObservableObject {
         if ServerAddresses.noServerSeamActive() { NSLog("Dobby offline: book backfill skipped (DOBBY_NO_SERVER seam)"); return }
         #endif
         for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {
-            fetchBookExtras(id, dir: root.appendingPathComponent(id, isDirectory: true), server: server)
+            if let dir = contained(id) { fetchBookExtras(id, dir: dir, server: server) }
         }
     }
 
@@ -245,13 +244,17 @@ final class OfflineStore: NSObject, ObservableObject {
     static let coverFile = "cover"
     private static let pathSegment = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
+    /// #243: the kind is read before the entry goes, so a failed save's error event still
+    /// reaches the page's book handler. An id outside Offline (".", "..") is refused whole.
     func cancel(_ id: String) {
+        guard let dir = contained(id) else { NSLog("Dobby offline: cancel refused, id outside Offline"); return }
+        let kind = index[id]?.kind
         for (key, t) in tasks where key.hasSuffix("\t\(id)") || key.contains("\t\(id)\t") {
             t.cancel(); tasks[key] = nil
         }
-        try? FileManager.default.removeItem(at: root.appendingPathComponent(id))
+        try? FileManager.default.removeItem(at: dir)
         index[id] = nil
-        saveIndex(id)
+        saveIndex(id, kind: kind)
         emit(id, status: "cancelled", bytes: 0, total: 0)
     }
 
@@ -293,12 +296,28 @@ final class OfflineStore: NSObject, ObservableObject {
     /// goes, as cancel removes it; a book entry that no longer lists the file loses just that
     /// file. A file its entry owns (a video's entry, a listed chapter) is never touched.
     /// Ceiling: the subtitle and cover sidecars (kilobytes, on the default session) are not covered.
+    /// If index.json no longer decodes, loadIndex starts empty, so a late transfer removes that
+    /// book's whole folder: orphan cleanup of a folder nothing lists any more, not listed data lost.
     private func dropUnowned(_ id: String, _ name: String) {
-        let dir = root.appendingPathComponent(id, isDirectory: true)
+        guard let dir = contained(id), let file = contained(id, name) else { return }
         guard let e = index[id] else { try? FileManager.default.removeItem(at: dir); return }
         if e.kind == "book", e.chapters?.contains(where: { $0.name == name }) != true {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(name))
+            try? FileManager.default.removeItem(at: file)
         }
+    }
+
+    /// #243: every id-built path under Offline that is created, removed or moved comes from here.
+    /// Offline/<id>, or Offline/<id>/<name> when a name is given, only while it stays inside its
+    /// parent after standardizing; nil for ".", "..", "../x" or "a/../..", which resolve to
+    /// Offline itself or above it (a late transfer keyed "." removed Offline and index.json).
+    nonisolated private func contained(_ id: String, _ name: String? = nil) -> URL? {
+        func under(_ base: URL, _ component: String) -> URL? {
+            let url = base.appendingPathComponent(component).standardizedFileURL
+            return url.path.hasPrefix(base.standardizedFileURL.path + "/") ? url : nil
+        }
+        guard let dir = under(root, id) else { return nil }
+        guard let name else { return dir }
+        return under(dir, name)
     }
 
     /// Called once the background session has reported which tasks survived the
@@ -369,13 +388,14 @@ final class OfflineStore: NSObject, ObservableObject {
     /// whole when the write fails, and the page gets an error event for `id`, the entry whose
     /// change triggered this save, after the index push so its handlers read the current cache.
     /// Ceiling: the in-memory index is not rolled back, so the page keeps showing the unsaved
-    /// state until relaunch; a cancelled entry is already gone, so its error carries no kind.
-    private func saveIndex(_ id: String) {
+    /// state until relaunch.
+    /// `kind` is for a caller that already removed the entry (cancel); the default reads it.
+    private func saveIndex(_ id: String, kind: String? = nil) {
         let saved = Result { try JSONEncoder().encode(index).write(to: indexURL, options: .atomic) }
         pushIndex?(indexJSON())
         if case .failure(let error) = saved {
             NSLog("Dobby offline: index.json write failed (%@)", error.localizedDescription)
-            emit(id, status: "error", bytes: 0, total: 0, error: "The offline list could not be saved. Free some space and try again.", kind: index[id]?.kind)
+            emit(id, status: "error", bytes: 0, total: 0, error: "The offline list could not be saved. Free some space and try again.", kind: kind ?? index[id]?.kind)
         }
     }
 
@@ -414,16 +434,16 @@ extension OfflineStore: URLSessionDownloadDelegate {
         guard let key = downloadTask.taskDescription else { return }
         let parts = key.split(separator: "\t").map(String.init)
         let fm = FileManager.default
-        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let total = downloadTask.countOfBytesExpectedToReceive
 
         if parts.first == "book", parts.count >= 3 {
             let bookId = parts[1], fileName = parts[2]
-            let dir = docs.appendingPathComponent("Offline/\(bookId)", isDirectory: true)
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            let dest = dir.appendingPathComponent(fileName)
-            try? fm.removeItem(at: dest)
-            let moved = (try? fm.moveItem(at: location, to: dest)) != nil
+            var moved = false
+            if let dir = contained(bookId), let dest = contained(bookId, fileName) {
+                try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                try? fm.removeItem(at: dest)
+                moved = (try? fm.moveItem(at: location, to: dest)) != nil
+            }
             Task { @MainActor in
                 self.tasks[key] = nil
                 if moved { self.dropUnowned(bookId, fileName) }
@@ -435,14 +455,15 @@ extension OfflineStore: URLSessionDownloadDelegate {
         // Video single-file
         guard parts.count >= 2 else { return }
         let videoId = parts[1]
-        let dir = docs.appendingPathComponent("Offline/\(videoId)", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let ext = (downloadTask.response?.suggestedFilename as NSString?)?.pathExtension ?? ""
-        let dest = dir.appendingPathComponent(ext.isEmpty ? "video.mp4" : "video.\(ext)")
-        try? fm.removeItem(at: dest)
-        let moved = (try? fm.moveItem(at: location, to: dest)) != nil
-        Task { @MainActor in
-            self.finishVideo(videoId: videoId, key: key, path: moved ? dest.path : nil, total: total)
+        var path: String?
+        if let dir = contained(videoId), let dest = contained(videoId, ext.isEmpty ? "video.mp4" : "video.\(ext)") {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? fm.removeItem(at: dest)
+            if (try? fm.moveItem(at: location, to: dest)) != nil { path = dest.path }
+        }
+        Task { @MainActor [path] in
+            self.finishVideo(videoId: videoId, key: key, path: path, total: total)
         }
     }
 

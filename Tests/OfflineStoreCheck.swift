@@ -20,6 +20,9 @@ enum OfflineStoreCheck {
             ("ownedChapterIsKeptUnlistedOneDropped", ownedChapterIsKeptUnlistedOneDropped),
             ("lateVideoAfterCancelIsDroppedOwnedOneKept", lateVideoAfterCancelIsDroppedOwnedOneKept),
             ("failedIndexWriteGetsAnErrorEvent", failedIndexWriteGetsAnErrorEvent),
+            ("bookCancelWithAFailedIndexWriteGetsABookErrorEvent", bookCancelWithAFailedIndexWriteGetsABookErrorEvent),
+            ("idsOutsideOfflineAreRefused", idsOutsideOfflineAreRefused),
+            ("nestedBookIdStillWorks", nestedBookIdStillWorks),
         ]
         // Names on the command line run just those (one process per check counts failures by name).
         let only = Set(CommandLine.arguments.dropFirst())
@@ -68,13 +71,33 @@ enum OfflineStoreCheck {
     /// The background session's completion, delivered by hand: a temp file standing in for the
     /// transfer and a never-resumed task carrying the key startBookDownload/startDownload set.
     @MainActor static func finish(_ s: OfflineStore, key: String) {
+        let tmp = deliver(s, key: key)
+        check(!FileManager.default.fileExists(atPath: tmp.path), "test setup: the delegate did not move the transfer")
+    }
+
+    /// The same delivery with no expectation about the move; returns the transfer's temp file.
+    @MainActor static func deliver(_ s: OfflineStore, key: String) -> URL {
         let tmp = docs.deletingLastPathComponent().appendingPathComponent("transfer-\(UUID().uuidString)")
         try! Data("fake audio bytes".utf8).write(to: tmp)
         let task = URLSession(configuration: .ephemeral).downloadTask(with: URL(string: "http://127.0.0.1:9/fake")!)
         task.taskDescription = key
         s.urlSession(URLSession.shared, downloadTask: task, didFinishDownloadingTo: tmp)
-        check(!FileManager.default.fileExists(atPath: tmp.path), "test setup: the delegate did not move the transfer")
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))   // the delegate hops to the main actor
+        return tmp
+    }
+
+    /// Every path under the scratch home, so a check can prove nothing was created or removed.
+    static func tree() -> Set<String> {
+        let home = docs.deletingLastPathComponent().path
+        return Set((FileManager.default.enumerator(atPath: home)?.allObjects as? [String] ?? [])
+            .filter { !$0.hasPrefix("transfer-") })
+    }
+
+    /// A book payload with chapter URLs that do not parse, so a start never reaches URLSession.
+    static func bookPayload(_ id: String, file: String = "01.mp3") -> String {
+        let data = try! JSONSerialization.data(withJSONObject: ["bookId": id, "title": "Fake Book",
+                                                                "chapters": [["fileName": file, "url": ""]]])
+        return String(data: data, encoding: .utf8)!
     }
 
     static func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path) }
@@ -82,6 +105,11 @@ enum OfflineStoreCheck {
     @MainActor static func entry(_ s: OfflineStore, _ id: String) -> [String: Any]? {
         let arr = (try? JSONSerialization.jsonObject(with: Data(s.indexJSON().utf8))) as? [[String: Any]] ?? []
         return arr.first { $0["videoId"] as? String == id }
+    }
+
+    /// The index as parsed JSON: indexJSON's key order is not stable from one call to the next.
+    @MainActor static func parsed(_ s: OfflineStore) -> NSArray {
+        (try? JSONSerialization.jsonObject(with: Data(s.indexJSON().utf8))) as? NSArray ?? []
     }
 
     static func errors(_ ev: Events, _ id: String) -> [[String: Any]] {
@@ -153,10 +181,86 @@ enum OfflineStoreCheck {
         try! FileManager.default.removeItem(at: indexURL)
         try! FileManager.default.createDirectory(at: indexURL, withIntermediateDirectories: true)
         try! Data("x".utf8).write(to: indexURL.appendingPathComponent("blocker"))
+        var pushed: [String] = []
+        s.pushIndex = { pushed.append($0) }
         finish(s, key: "book\tfake-book-4\t01.mp3")
         let e = errors(ev, "fake-book-4")
         check(e.count == 1 && e[0]["kind"] as? String == "book",
               "D3: a failed index.json write must report one book error event for fake-book-4, got \(ev.all)")
+        // The page's cache still follows memory for the rest of the session.
+        check(pushed.count == 1 && pushed[0].contains("\"status\":\"complete\""),
+              "D3: a failed index.json write must still push the index to the page, got \(pushed)")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// #243 review: cancel cleared the entry before its save, so a failed write's error event had
+    /// no kind and the page sent a book's to the video handler.
+    @MainActor static func bookCancelWithAFailedIndexWriteGetsABookErrorEvent() {
+        let (s, ev) = store(seed: bookSeed("fake-book-11", chapters: ["01.mp3"]))
+        let indexURL = root.appendingPathComponent("index.json")
+        try! FileManager.default.removeItem(at: indexURL)
+        try! FileManager.default.createDirectory(at: indexURL, withIntermediateDirectories: true)
+        try! Data("x".utf8).write(to: indexURL.appendingPathComponent("blocker"))
+        s.cancel("fake-book-11")
+        let e = errors(ev, "fake-book-11")
+        check(e.count == 1 && e[0]["kind"] as? String == "book",
+              "a book cancel whose index write fails must report a book error event, got \(ev.all)")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// #243 review: an id that resolves to Offline itself or above it. A late transfer keyed "."
+    /// removed Offline, index.json and every book; ".." is Documents; the page reaches cancel
+    /// directly through cancelNativeOfflineDownload. Start, late transfer and cancel all refuse,
+    /// and nothing under the scratch home is created or removed.
+    @MainActor static func idsOutsideOfflineAreRefused() {
+        let (s, ev) = store(seed: bookSeed("fake-book-10", chapters: ["01.mp3"]))
+        try! FileManager.default.createDirectory(at: root.appendingPathComponent("fake-book-10"), withIntermediateDirectories: true)
+        try! Data("kept".utf8).write(to: root.appendingPathComponent("fake-book-10/01.mp3"))
+        try! Data("kept".utf8).write(to: docs.appendingPathComponent("outside.txt"))
+        let before = tree(), listed = parsed(s)
+        for id in [".", "..", "../x", "a/../..", "../Offline-evil"] {
+            s.startBookDownload(bookPayload(id))
+            let e = errors(ev, id)
+            check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == "invalid book request",
+                  "a book start with the id \(id.debugDescription) must be refused with its error event, got \(ev.all)")
+            s.startDownload("{\"videoId\":\"\(id)\",\"subsOnly\":true}")
+            for key in ["book\t\(id)\t01.mp3", "video\t\(id)"] {
+                let tmp = deliver(s, key: key)
+                check(FileManager.default.fileExists(atPath: tmp.path), "a late transfer keyed \(key.debugDescription) must not be moved")
+                try? FileManager.default.removeItem(at: tmp)
+            }
+            s.cancel(id)
+            check(!ev.all.contains { $0["videoId"] as? String == id && $0["status"] as? String == "cancelled" },
+                  "cancel(\(id.debugDescription)) must do nothing, got \(ev.all)")
+            check(tree() == before, "the id \(id.debugDescription) touched a path: \(tree().symmetricDifference(before).sorted())")
+            check(parsed(s) == listed, "the id \(id.debugDescription) changed the index: \(s.indexJSON())")
+        }
+        s.startBookDownload(bookPayload("fake-book-12", file: "../fake-book-10/01.mp3"))
+        check(errors(ev, "fake-book-12").count == 1 && !exists("fake-book-12"),
+              "a chapter file name outside its book folder must refuse the start, got \(ev.all)")
+        check(tree() == before && parsed(s) == listed, "a refused chapter file name touched a path or the index")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// The containment must not refuse a real book id, which is an author and a title.
+    @MainActor static func nestedBookIdStillWorks() {
+        let id = "Fake Author/Fake Title"
+        let (s, ev) = store()
+        s.startBookDownload(bookPayload(id))
+        check(exists(id) && entry(s, id) != nil && errors(ev, id).allSatisfy { $0["error"] as? String != "invalid book request" },
+              "a nested book id must start: \(ev.all)")
+        s.cancel(id)
+        check(!exists(id) && entry(s, id) == nil && ev.all.contains { $0["videoId"] as? String == id && $0["status"] as? String == "cancelled" },
+              "a nested book id must cancel: \(ev.all)")
+        finish(s, key: "book\t\(id)\t01.mp3")
+        check(!exists(id), "a late chapter after a nested book's cancel must be dropped")
+
+        let (s2, _) = store(seed: bookSeed(id, chapters: ["01.mp3"]))
+        finish(s2, key: "book\t\(id)\t01.mp3")
+        finish(s2, key: "book\t\(id)\t99.mp3")
+        check(exists("\(id)/01.mp3") && !exists("\(id)/99.mp3"),
+              "a nested book keeps its listed chapter and drops an unlisted one")
+        check(entry(s2, id)?["status"] as? String == "complete", "a nested book's chapter must complete: \(s2.indexJSON())")
         try? FileManager.default.removeItem(at: root)
     }
 }

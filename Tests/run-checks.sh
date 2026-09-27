@@ -99,6 +99,8 @@ reads = {
     "SETOFFLINEREFRESHPY": ([SW, JS], ['        src[path] = strip_swift(f.read(), path).split("\\n")',
                                        '        js = strip_js(f.read()).split("\\n")'],
                             ['    with open(path, encoding="utf-8") as f:']),
+    "OFFLINEINDEXATOMICPY": ([SW], ['    lines = strip_swift(f.read(), path).split("\\n")'],
+                             ['with open(path, encoding="utf-8") as f:']),
     "PIOFFVIDEODOWNLOADPY": ([SW, JS], ['        files[path] = strip_swift(f.read(), path).split("\\n")',
                                         '        js[n] = strip_js(f.read()).split("\\n")'],
                              ['    with open(path, encoding="utf-8") as f:',
@@ -299,8 +301,11 @@ OFFLINEROOTPY
 # refuseBookDownload's error event, D2 a transfer landing after its cancel leaves no bytes behind
 # while an owned file stays, D3 a failed index.json write gets an error event. The store writes
 # under Documents/Offline, so the check runs in a scratch CFFIXED_USER_HOME and refuses to start
-# without one. D4: the injected _setOffline push re-renders the Offline Books section, run in
-# JavaScriptCore against a stub page with and without the PWA's refreshOfflineBooksSection.
+# without one. D4: the injected _setOffline push re-renders the Offline Books section when the
+# finished set changes, run in JavaScriptCore against a stub page with and without the PWA's
+# refreshOfflineBooksSection. Round 2 review: every id-built path stays inside Offline (".", "..",
+# "../x" refused at start, late transfer and cancel), a nested author/title id still works, and a
+# failed save still pushes the index and, on a book cancel, carries the book kind.
 OUT9="$(mktemp -d)/offline-store-check"
 xcrun swiftc -o "$OUT9" \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Playback/PlayNativePayload.swift \
@@ -312,8 +317,9 @@ xcrun swiftc -o "$OUT10" -framework WebKit -framework JavaScriptCore \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/BridgeInjection.swift Tests/BridgeInjectionCheck.swift
 "$OUT10"
 
-# #243 D4, the construct itself (the behaviour is BridgeInjectionCheck above): _setOffline assigns
-# the cache first, then calls window.refreshOfflineBooksSection behind a typeof guard, inside the
+# #243 D4, the construct itself (the behaviour is BridgeInjectionCheck above): _setOffline keys the
+# finished set (complete entries by id, cover and meta, sorted), assigns the cache, then calls
+# window.refreshOfflineBooksSection only when that key changed, behind a typeof guard, inside the
 # window.Dobby literal, and nothing else in the Swift sources reaches that name. PWA end: the one
 # top-level function refreshOfflineBooksSection() in 12-service-worker-offline.js, defined
 # nowhere else under js/. Ceiling: textual; the PWA half SKIPs without a dobby checkout.
@@ -338,23 +344,28 @@ for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
 inject = src["Dobby/Web/BridgeInjection.swift"]
 MEMBER = [
     "            _setOffline: function (arr) {",
+    "              var done = function (a) { return a.filter(function (e) { return e && e.status === 'complete'; })"
+    ".map(function (e) { return [e.id, e.cover || '', e.meta || ''].join('\\\\t'); }).sort().join('\\\\n'); };",
+    "              var before = done(this._offline);",
     "              this._offline = Array.isArray(arr) ? arr : [];",
-    "              if (typeof window.refreshOfflineBooksSection === 'function') window.refreshOfflineBooksSection();",
+    "              if (done(this._offline) !== before && typeof window.refreshOfflineBooksSection === 'function') "
+    "window.refreshOfflineBooksSection();",
     "            },"]
 lit = [i for i, l in enumerate(inject) if l == "          window.Dobby = {"]
 end = [i for i, l in enumerate(inject) if l == "          };" and lit and i > lit[0]]
 at = [i for i, l in enumerate(inject) if re.match(r"\s*_setOffline\s*:", l)]
 if len(lit) != 1 or not end or len(at) != 1 or not lit[0] < at[0] < end[0] \
-        or inject[at[0]:at[0] + 4] != MEMBER:
-    fail("_setOffline must assign the cache, then call window.refreshOfflineBooksSection behind "
-         "its typeof guard, inside the window.Dobby literal: %r" % (inject[at[0]:at[0] + 4] if at else None))
+        or inject[at[0]:at[0] + len(MEMBER)] != MEMBER:
+    fail("_setOffline must key the finished set, assign the cache, then call "
+         "window.refreshOfflineBooksSection only when that set changed and behind its typeof guard, "
+         "inside the window.Dobby literal: %r" % (inject[at[0]:at[0] + len(MEMBER)] if at else None))
 reach = [(p, i) for p, ls in src.items() for i, l in enumerate(ls) if "refreshOfflineBooksSection" in l]
-if reach != [("Dobby/Web/BridgeInjection.swift", at[0] + 2)]:
+if reach != [("Dobby/Web/BridgeInjection.swift", at[0] + 4)]:
     fail("refreshOfflineBooksSection must be reached from _setOffline only: %s" % reach)
 
 pub = os.environ.get("SETOFFLINE_PUB", "")
 if not os.path.isfile(os.path.join(pub, "js", "12-service-worker-offline.js")):
-    print("PASS: _setOffline refreshes the Offline Books section behind a typeof guard (#243)")
+    print("PASS: _setOffline refreshes the Offline Books section when the finished set changes, behind a typeof guard (#243)")
     print("SKIP: no dobby checkout at %r; the PWA half of the #243 D4 check needs it" % pub)
     sys.exit(0)
 defs = []
@@ -365,9 +376,31 @@ for path in sorted(glob.glob(os.path.join(pub, "js", "*.js"))):
 if defs != [("12-service-worker-offline.js", "function refreshOfflineBooksSection() {")]:
     fail("the PWA must define refreshOfflineBooksSection once, as a top-level function in "
          "12-service-worker-offline.js (a window property the wrapper can reach): %s" % defs)
-print("PASS: _setOffline refreshes the Offline Books section behind a typeof guard, and the PWA "
+print("PASS: _setOffline refreshes the Offline Books section when the finished set changes, behind "
+      "a typeof guard, and the PWA "
       "defines that function once at the top level (#243)")
 SETOFFLINEREFRESHPY
+
+# #243 review: saveIndex writes index.json with options: .atomic, its first line, and nothing else
+# writes that file. The atomic write is the truncation guard: a partial plain write on a full disk
+# leaves an index.json that no longer decodes, and the next launch starts with no entries at all.
+# A real ENOSPC cannot be staged cheaply, so this one is textual.
+python3 - <<'OFFLINEINDEXATOMICPY'
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+path = "Dobby/Offline/OfflineStore.swift"
+with open(path, encoding="utf-8") as f:
+    lines = strip_swift(f.read(), path).split("\n")
+WRITE = "        let saved = Result { try JSONEncoder().encode(index).write(to: indexURL, options: .atomic) }"
+head = [i for i, l in enumerate(lines) if l == "    private func saveIndex(_ id: String, kind: String? = nil) {"]
+if len(head) != 1 or lines[head[0] + 1] != WRITE or [l for l in lines if "indexURL" in l and "write(" in l] != [WRITE]:
+    sys.stderr.write("FAIL: saveIndex must write index.json with options: .atomic on its first line, "
+                     "the one write of that file (#243)\n")
+    sys.exit(1)
+print("PASS: saveIndex writes index.json with options: .atomic, the only write of that file (#243)")
+OFFLINEINDEXATOMICPY
 
 # #228: the page marks the offline sidecar to select with the JSON key "default"
 # (dobbyTvNative.playOfflineNative), the key Android reads too. iOS selects only a track whose
@@ -3497,7 +3530,7 @@ exact_body(ks, ke, [
     '        if ServerAddresses.noServerSeamActive() { NSLog("Dobby offline: book backfill skipped (DOBBY_NO_SERVER seam)"); return }',
     "        #endif",
     '        for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {',
-    "            fetchBookExtras(id, dir: root.appendingPathComponent(id, isDirectory: true), server: server)",
+    "            if let dir = contained(id) { fetchBookExtras(id, dir: dir, server: server) }",
     "        }",
     "    }"], "backfillBookExtras")
 walk = ks + 4
@@ -3743,7 +3776,7 @@ opening = [
     '        if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }',
     "        #endif",
     "        if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }",
-    "        let dir = root.appendingPathComponent(p.videoId, isDirectory: true)"]
+    '        guard let dir = contained(p.videoId) else { NSLog("Dobby offline: bad download payload"); return }']
 if [l for _, l in live[:9]] != opening:
     fail("startDownload must open with the payload decode, the Pi-off reason (setting, then the "
          "DEBUG seam) and the Pi video URL refusal, before the folder: %r" % [l for _, l in live[:9]])

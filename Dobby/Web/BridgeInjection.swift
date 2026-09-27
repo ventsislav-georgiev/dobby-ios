@@ -65,11 +65,15 @@ enum BridgeInjection {
             setNowPlaying: function (json) { post('setNowPlaying', json); },
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.
             // #243: a tab or Offline Books pass that ran before this push read an empty cache,
-            // so the push re-renders; an older PWA without the function is skipped.
+            // so the push re-renders; an older PWA without the function is skipped. Only when the
+            // finished set (complete entries by id, cover and meta, the #210 backfill) changes:
+            // every saveIndex pushes, and each re-render shuts an open Offline Books group.
             _offline: [],
             _setOffline: function (arr) {
+              var done = function (a) { return a.filter(function (e) { return e && e.status === 'complete'; }).map(function (e) { return [e.id, e.cover || '', e.meta || ''].join('\\t'); }).sort().join('\\n'); };
+              var before = done(this._offline);
               this._offline = Array.isArray(arr) ? arr : [];
-              if (typeof window.refreshOfflineBooksSection === 'function') window.refreshOfflineBooksSection();
+              if (done(this._offline) !== before && typeof window.refreshOfflineBooksSection === 'function') window.refreshOfflineBooksSection();
             },
             downloadNativeOffline: function (json) { post('downloadNativeOffline', json); },
             downloadNativeBook: function (json) { post('downloadNativeBook', json); },
