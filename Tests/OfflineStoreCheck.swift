@@ -131,6 +131,14 @@ enum OfflineStoreCheck {
             check(!exists(id), "D1: a bad book payload must not create the book's folder")
         }
         check(s.indexJSON() == "[]", "D1: a bad book payload must not write an index entry")
+        // #243 r3: every chapter must be contained, not just one.
+        s.startBookDownload("{\"bookId\":\"fake-book-1c\",\"title\":\"Fake Book\",\"chapters\":[{\"fileName\":\"01.mp3\",\"url\":\"\"},{\"fileName\":\"../fake-book-10/01.mp3\",\"url\":\"\"}]}")
+        let e2 = errors(ev, "fake-book-1c")
+        check(e2.count == 1 && e2[0]["kind"] as? String == "book" && e2[0]["error"] as? String == "invalid book request",
+              "a book start with one escaping chapter must be refused, got \(ev.all)")
+        check(!ev.all.contains { $0["videoId"] as? String == "fake-book-1c" && $0["status"] as? String == "downloading" },
+              "a book start with one escaping chapter must not report downloading")
+        check(!exists("fake-book-1c"), "a book start with one escaping chapter must not create the folder")
     }
 
     /// D2, orphan side: cancel removed the entry and the folder, then the chapter's transfer
@@ -218,7 +226,7 @@ enum OfflineStoreCheck {
         try! Data("kept".utf8).write(to: root.appendingPathComponent("fake-book-10/01.mp3"))
         try! Data("kept".utf8).write(to: docs.appendingPathComponent("outside.txt"))
         let before = tree(), listed = parsed(s)
-        for id in [".", "..", "../x", "a/../..", "../Offline-evil"] {
+        for id in [".", "..", "../x", "a/../..", "../Offline-evil", "x/../fake-book-10", "fake-book-10/."] {
             s.startBookDownload(bookPayload(id))
             let e = errors(ev, id)
             check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == "invalid book request",
