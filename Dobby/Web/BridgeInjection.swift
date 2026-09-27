@@ -16,6 +16,14 @@ enum BridgeInjection {
     static let edgeBack = false
     #endif
 
+    /// #245: the WKAppBoundDomains list the iOS Server addresses guard keeps entries on
+    /// (ServerAddresses.AppBound), as a JS literal, so the PWA's Settings row can say that the
+    /// other entries are ignored on this device. `null` where the guard is off (macOS): no note.
+    static func appBoundDomainsJS(_ rule: ServerAddresses.AppBound = .current) -> String {
+        guard rule.enforced, let data = try? JSONSerialization.data(withJSONObject: rule.domains) else { return "null" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
     /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
     /// the Pi setting, so a reload reads the new value rather than the launch one.
     static func userScript() -> WKUserScript {
@@ -48,6 +56,9 @@ enum BridgeInjection {
             // the PWA's own flick handler leaves touches that start at the edge alone.
             edgeBack: \(edgeBack ? "true" : "false"),
             setServerAddresses: function (json) { post('setServerAddresses', json); },
+            // #245: iOS only, the domains setServerAddresses keeps (https on one of them); every
+            // other entry is dropped on this device. null off iOS, where every entry is kept.
+            appBoundDomains: \(appBoundDomainsJS()),
             // #181 "Use a Pi server". The PWA shows its settings row only when BOTH of
             // these are functions; piEnabled() must answer synchronously.
             _piEnabled: \(piEnabled ? "true" : "false"),

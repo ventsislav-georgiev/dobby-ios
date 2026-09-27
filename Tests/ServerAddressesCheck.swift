@@ -20,6 +20,9 @@ enum ServerAddressesCheck {
         piEnabledRule()
         piEnabledPersistence()
         piOriginRule()
+        appBoundRule()
+        appBoundStoreAndCandidates()
+        appBoundPlatformPin()
         print("ServerAddressesCheck: all checks passed")
     }
 
@@ -144,5 +147,86 @@ enum ServerAddressesCheck {
               "any value other than exactly \"1\" leaves the seam off")
         check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "true"]) == false,
               "no truthy-string coercion — exact match only")
+    }
+
+    /// #245: the domains the app ships, read off Dobby/Info.plist (Bundle.main has none here).
+    static func shippedDomains() -> [String] {
+        guard let data = FileManager.default.contents(atPath: "Dobby/Info.plist"),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let domains = plist["WKAppBoundDomains"] as? [String], !domains.isEmpty
+        else { check(false, "#245 test setup: Dobby/Info.plist carries WKAppBoundDomains"); return [] }
+        return domains
+    }
+
+    static let iOSDevice = ServerAddresses.AppBound(enforced: true, loopback: false, domains: shippedDomains())
+    static let iOSSimulator = ServerAddresses.AppBound(enforced: true, loopback: true, domains: shippedDomains())
+    static let unenforced = ServerAddresses.AppBound(enforced: false, loopback: false, domains: shippedDomains())
+
+    /// The addresses the iOS guard must drop: an IP literal, a LAN name, a non-Tailscale https
+    /// name, http to the app-bound name, a look-alike that only starts with it, and loopback.
+    static var refused: [URL] {
+        let host = AppConfig.serverURL.host!
+        return ["http://192.0.2.10:8080", "http://box.home.arpa:8080", "https://dobby.example.com",
+                "http://\(host)", "https://\(host).example.com", "http://127.0.0.1:8080"].map { URL(string: $0)! }
+    }
+
+    static func appBoundRule() {
+        check(iOSDevice.keeps(AppConfig.serverURL), "#245 appBoundRule: iOS keeps the baked https app-bound name")
+        check(iOSDevice.keeps(URL(string: "https://" + AppConfig.serverURL.host!.uppercased())!),
+              "#245 appBoundRule: iOS keeps the app-bound name in any case")
+        for url in refused {
+            check(!iOSDevice.keeps(url), "#245 appBoundRule: an iOS device drops \(url.absoluteString)")
+        }
+        check(iOSSimulator.keeps(URL(string: "http://127.0.0.1:8080")!) && iOSSimulator.keeps(URL(string: "http://localhost:8080")!),
+              "#245 appBoundRule: the iOS simulator keeps loopback, where a dev server on the Mac lives")
+        check(!iOSSimulator.keeps(URL(string: "http://192.0.2.10:8080")!), "#245 appBoundRule: the simulator still drops an IP literal")
+        for url in refused {
+            check(unenforced.keeps(url), "#245 appBoundRule: macOS keeps \(url.absoluteString)")
+        }
+    }
+
+    static func appBoundStoreAndCandidates() {
+        let suite = "dobby.check.appBound.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let good = AppConfig.serverURL
+        let push = "[\"192.0.2.10:8080\", \"https://dobby.example.com\", \"http://box.home.arpa:8080\", \"\(good.absoluteString)\"]"
+
+        ServerAddresses.store(json: push, defaults, rule: iOSDevice)
+        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: iOS stores only the app-bound entry of a mixed push")
+        ServerAddresses.store(json: "[\"192.0.2.10:8080\", \"https://dobby.example.com\"]", defaults, rule: iOSDevice)
+        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: a push with nothing usable never erases the stored list")
+        ServerAddresses.store(refused, defaults, rule: iOSDevice)
+        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: the native editor path drops the same entries")
+
+        ServerAddresses.store(json: push, defaults, rule: unenforced)
+        check(ServerAddresses.stored(defaults).count == 4, "#245 storeFilter: macOS stores every entry of the push")
+
+        // A last known-good and a list written before the guard: skipped on iOS, not cleared.
+        defaults.set("http://192.0.2.10:8080", forKey: "dobby.serverAddresses.lastGood")
+        check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [good],
+              "#245 candidatesSkip: iOS never probes a non-app-bound lastGood or legacy entry, only the app-bound one")
+        check(defaults.string(forKey: "dobby.serverAddresses.lastGood") == "http://192.0.2.10:8080"
+              && ServerAddresses.piEnabled(defaults),
+              "#245 candidatesSkip: the stored lastGood is kept, so an unanswered device stays Pi-enabled")
+        check(ServerAddresses.candidates(defaults, rule: unenforced).map(\.absoluteString)
+              == ["http://192.0.2.10:8080", "https://dobby.example.com", "http://box.home.arpa:8080", good.absoluteString],
+              "#245 candidatesSkip: macOS keeps the order lastGood, list, default with every entry")
+        defaults.set(good.absoluteString, forKey: "dobby.serverAddresses.lastGood")
+        check(ServerAddresses.candidates(defaults, rule: iOSDevice).first == good,
+              "#245 candidatesSkip: an app-bound lastGood still goes first on iOS")
+    }
+
+    /// The platform switch itself: this check runs on macOS, where the guard must be off, and
+    /// the iOS arm is textual (no iOS runtime here). Both arms pinned.
+    static func appBoundPlatformPin() {
+        check(!ServerAddresses.AppBound.current.enforced, "#245 platformPin: the guard is off on macOS")
+        check(!ServerAddresses.AppBound.current.loopback, "#245 platformPin: loopback is a simulator-only allowance")
+        let src = (try? String(contentsOfFile: "Dobby/ServerAddresses.swift", encoding: .utf8)) ?? ""
+        for arm in ["        #if os(iOS)\n        static let enforcedHere = true\n        #else\n        static let enforcedHere = false\n        #endif\n",
+                    "        #if targetEnvironment(simulator)\n        static let loopbackHere = true\n        #else\n        static let loopbackHere = false\n        #endif\n",
+                    "        static let current = AppBound(enforced: enforcedHere, loopback: loopbackHere,\n"] {
+            check(src.components(separatedBy: arm).count == 2, "#245 platformPin: ServerAddresses.swift carries \(arm.debugDescription) exactly once")
+        }
     }
 }

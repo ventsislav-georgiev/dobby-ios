@@ -40,34 +40,89 @@ enum ServerAddresses {
     /// its `CONNECT_TIMEOUT_MS` here since URLSession has no separate connect timeout.
     private static let shortTimeout: TimeInterval = 1.5
 
+    /// #245: which addresses this platform can use. On iOS WebKit enforces WKAppBoundDomains
+    /// (Info.plist): on any other origin it ignores the injected bridge, refuses message handler
+    /// posts and never commits the Pi-less shell, so an address off that list is a blank or
+    /// bridge-less app. iOS therefore keeps only https on an app-bound host (http to that name
+    /// is refused by App Transport Security anyway). Loopback is exempt from the WebKit rule but
+    /// no Pi lives on a phone's loopback, so it is kept on the simulator only, where a dev
+    /// server on the Mac does. macOS does not enforce the list and keeps every address, as
+    /// Android does for the same shared list.
+    struct AppBound {
+        let enforced: Bool
+        let loopback: Bool
+        let domains: [String]
+
+        #if os(iOS)
+        static let enforcedHere = true
+        #else
+        static let enforcedHere = false
+        #endif
+        #if targetEnvironment(simulator)
+        static let loopbackHere = true
+        #else
+        static let loopbackHere = false
+        #endif
+        static let current = AppBound(enforced: enforcedHere, loopback: loopbackHere,
+                                      domains: Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String] ?? [])
+
+        /// True when `url`'s host is covered by `domains` (the entry matches the host or a
+        /// suffix of it). LAN IPs never are: WKAppBoundDomains only takes domains.
+        func covers(_ url: URL) -> Bool {
+            guard let host = url.host?.lowercased() else { return false }
+            return domains.contains { domain in
+                let d = domain.lowercased()
+                return host == d || host.hasSuffix("." + d)
+            }
+        }
+
+        func keeps(_ url: URL) -> Bool {
+            guard enforced else { return true }
+            // ponytail: the three spellings a dev server is typed as; any other 127/8 host is dropped.
+            if loopback, ["localhost", "127.0.0.1", "::1"].contains(url.host?.lowercased() ?? "") { return true }
+            return url.scheme == "https" && covers(url)
+        }
+    }
+
     /// Probe order: last known-good, then the configured list, then the baked default.
-    static func candidates() -> [URL] {
+    /// #245: on iOS an entry the platform cannot use is skipped here, not cleared: a last
+    /// known-good stored before the guard stays on disk (it is also what `piEnabled` reads for
+    /// an unanswered device), it just is never probed first on an origin WebKit would cripple.
+    static func candidates(_ defaults: UserDefaults = .standard, rule: AppBound = .current) -> [URL] {
         var out: [URL] = []
-        append(&out, UserDefaults.standard.string(forKey: lastGoodKey))
-        for stored in stored() { append(&out, stored.absoluteString) }
+        append(&out, defaults.string(forKey: lastGoodKey))
+        for stored in stored(defaults) { append(&out, stored.absoluteString) }
         append(&out, AppConfig.serverURL.absoluteString)
-        return out
+        return out.filter(rule.keeps)
     }
 
     /// The configured list alone, in the order the user set — what the editor shows.
-    static func stored() -> [URL] {
+    static func stored(_ defaults: UserDefaults = .standard) -> [URL] {
         var out: [URL] = []
-        for raw in UserDefaults.standard.stringArray(forKey: listKey) ?? [] { append(&out, raw) }
+        for raw in defaults.stringArray(forKey: listKey) ?? [] { append(&out, raw) }
         return out
     }
 
     /// Accepts the JS bridge payload (a JSON string array). Ignores anything unusable.
-    static func store(json: String) {
+    static func store(json: String, _ defaults: UserDefaults = .standard, rule: AppBound = .current) {
         guard let data = json.data(using: .utf8),
               let raw = try? JSONSerialization.jsonObject(with: data) as? [String] else { return }
         var parsed: [URL] = []
         for entry in raw { append(&parsed, entry) }
-        guard !parsed.isEmpty else { return } // never let a bad push erase the way back in
-        store(parsed)
+        store(parsed, defaults, rule: rule)
     }
 
-    static func store(_ addresses: [URL]) {
-        UserDefaults.standard.set(addresses.map(\.absoluteString), forKey: listKey)
+    /// #245: the trust boundary. Both editors (the PWA over the bridge, the native one on the
+    /// unreachable screen) land here, so this is where an address the platform cannot use is
+    /// dropped. The PWA list is shared with Android, where a LAN address is wanted, so the
+    /// drop is silent and per device. Counts only in the log: this repo never logs an address.
+    static func store(_ addresses: [URL], _ defaults: UserDefaults = .standard, rule: AppBound = .current) {
+        let kept = addresses.filter(rule.keeps)
+        if kept.count != addresses.count {
+            logger.log("kept \(kept.count, privacy: .public) of \(addresses.count, privacy: .public) server addresses, the rest are not app-bound")
+        }
+        guard !kept.isEmpty else { return } // never let a bad push erase the way back in
+        defaults.set(kept.map(\.absoluteString), forKey: listKey)
     }
 
     /// #181: whether this device uses a Pi at all — Android's `ServerAddresses.piEnabled`

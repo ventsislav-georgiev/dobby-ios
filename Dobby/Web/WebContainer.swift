@@ -17,14 +17,9 @@ struct WebContainer {
 
     /// True when `url`'s host is covered by WKAppBoundDomains (the entry matches the
     /// host or a suffix of it). LAN IPs never are — that list only takes domains.
+    /// #245: the one predicate, shared with the iOS Server addresses guard.
     static func isAppBound(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased(),
-              let domains = Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String]
-        else { return false }
-        return domains.contains { domain in
-            let d = domain.lowercased()
-            return host == d || host.hasSuffix("." + d)
-        }
+        ServerAddresses.AppBound.current.covers(url)
     }
 
     fileprivate func makeWebView(_ coordinator: WebBridge) -> WKWebView {

@@ -13,6 +13,7 @@ enum BridgeInjectionCheck {
             ("setOfflineRefreshesTheOfflineBooksSection", setOfflineRefreshesTheOfflineBooksSection),
             ("setOfflineSkipsAPageWithoutTheRefresh", setOfflineSkipsAPageWithoutTheRefresh),
             ("setOfflineRefreshesOnlyWhenTheDoneSetChanges", setOfflineRefreshesOnlyWhenTheDoneSetChanges),
+            ("appBoundDomainsReachThePageOnIOSOnly", appBoundDomainsReachThePageOnIOSOnly),
         ]
         let only = Set(CommandLine.arguments.dropFirst())
         for (name, run) in checks where only.isEmpty || only.contains(name) { run() }
@@ -99,5 +100,19 @@ enum BridgeInjectionCheck {
         check(ctx.evaluateScript("window.Dobby.getNativeOffline('fake-book-6')")?.toString()
                 == "{\"id\":\"fake-book-6\",\"videoId\":\"fake-book-6\",\"status\":\"complete\"}",
               "D4: _setOffline must store the pushed index on an older page too")
+    }
+
+    /// #245: the PWA's Server addresses note is gated on window.Dobby.appBoundDomains being an
+    /// array. The iOS rule hands the page the domain list; off iOS (this host is macOS) it is null.
+    static func appBoundDomainsReachThePageOnIOSOnly() {
+        let (ctx, thrown) = page("")
+        check(ctx.evaluateScript("window.Dobby.appBoundDomains === null")?.toBool() == true,
+              "#245: off iOS the injected appBoundDomains must be null, so the PWA shows no note")
+        let iOS = ServerAddresses.AppBound(enforced: true, loopback: false, domains: ["example.com"])
+        ctx.evaluateScript("var d = \(BridgeInjection.appBoundDomainsJS(iOS));")
+        check(thrown.all.isEmpty && ctx.evaluateScript("Array.isArray(d) && d.length === 1 && d[0] === 'example.com'")?.toBool() == true,
+              "#245: on iOS appBoundDomains is the guard's domain list as a JS array \(thrown.all)")
+        check(BridgeInjection.appBoundDomainsJS(ServerAddresses.AppBound(enforced: false, loopback: false, domains: ["example.com"])) == "null",
+              "#245: an unenforced rule injects null")
     }
 }
