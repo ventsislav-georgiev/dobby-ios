@@ -1404,31 +1404,45 @@ if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
 
   # #326: the copied shell carries no font file at all. App Store Connect rejects an
-  # embedded Apple font (ITMS-91182) from 2027-10-01, and copy-app-shell.sh skips them by
-  # name. Fails closed on ANY font, not just Apple's: if the PWA ever precaches another
-  # one, this goes red and someone decides whether iOS carries it. A test, not a build
-  # step, so a TestFlight build never breaks on it.
-  python3 - <<'SHELLNOFONTPY'
-import os
-import sys
+  # embedded Apple font (ITMS-91182) from 2027-10-01; copy-app-shell.sh skips them by
+  # name. This backstop fails on ANY font, not just Apple's, so locally a new font in the
+  # PWA's APP_SHELL goes red and someone decides whether iOS carries it. TestFlight does
+  # not run this file: it builds from PWA main, so there the name skip is the only thing
+  # that keeps an Apple font out of the upload, and its "Verify the app shell was
+  # bundled" step only WARNS, naming each font, through the same scripts/list-font-files.sh.
+  #
+  # Fonts iOS is allowed to carry, relative to Dobby/Shell. Empty by decision (#326): add
+  # one only after checking it is not Apple-provided and iOS really needs it.
+  SHELL_FONTS_ALLOWED=()
+  if [ ! -s Dobby/Shell/index.html ]; then
+    echo "FAIL: no copied shell to inspect for fonts (#326)" >&2; exit 1
+  fi
+  SHELL_FONTS="$(./scripts/list-font-files.sh Dobby/Shell)"
+  SHELL_FONTS_EXTRA=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case " ${SHELL_FONTS_ALLOWED[*]-} " in *" $f "*) ;; *) SHELL_FONTS_EXTRA="$SHELL_FONTS_EXTRA $f" ;; esac
+  done <<< "$SHELL_FONTS"
+  if [ -n "$SHELL_FONTS_EXTRA" ]; then
+    echo "FAIL: Dobby/Shell carries font file(s)$SHELL_FONTS_EXTRA; an Apple font is ITMS-91182, any other needs a decision and a SHELL_FONTS_ALLOWED entry (#326)" >&2
+    exit 1
+  fi
+  echo "PASS: the copied Dobby/Shell holds no font file, so the upload embeds no Apple font (ITMS-91182, #326)"
 
-# Fonts iOS is allowed to carry, as paths relative to Dobby/Shell. Empty by decision
-# (#326): add one only after checking it is not Apple-provided and iOS really needs it.
-ALLOWED = set()
-FONT_EXTS = (".woff", ".woff2", ".ttf", ".otf", ".ttc")
-shell = "Dobby/Shell"
-if not os.path.isfile(os.path.join(shell, "index.html")):
-    sys.stderr.write("FAIL: no copied shell to inspect for fonts (#326)\n")
-    sys.exit(1)
-fonts = sorted(os.path.relpath(os.path.join(d, n), shell) for d, _, names in os.walk(shell)
-               for n in names if n.lower().endswith(FONT_EXTS))
-extra = [f for f in fonts if f not in ALLOWED]
-if extra:
-    sys.stderr.write("FAIL: Dobby/Shell carries font file(s) %s; an Apple font is ITMS-91182, any other "
-                     "needs a decision and an ALLOWED entry (#326)\n" % ", ".join(extra))
-    sys.exit(1)
-print("PASS: the copied Dobby/Shell holds no font file, so the upload embeds no Apple font (ITMS-91182, #326)")
-SHELLNOFONTPY
+  # The scan itself, on a fixture shell: one font of every extension, an upper-case one
+  # and a nested one, beside non-fonts. It must list exactly those six, or the backstop
+  # above (and the TestFlight warning) would be quiet on a shell that is not clean.
+  FONTFIX="$(mktemp -d)"
+  mkdir -p "$FONTFIX/static/fonts/deep" "$FONTFIX/js"
+  : > "$FONTFIX/index.html"; : > "$FONTFIX/js/woff.js"; : > "$FONTFIX/static/fonts/README.txt"
+  FONTFIX_WANT="static/fonts/a.woff static/fonts/b.woff2 static/fonts/c.ttf static/fonts/d.otf static/fonts/deep/F.OTF static/fonts/e.ttc"
+  for f in $FONTFIX_WANT; do : > "$FONTFIX/$f"; done
+  FONTFIX_GOT="$(./scripts/list-font-files.sh "$FONTFIX" | tr '\n' ' ' | sed 's/ $//')"
+  if [ "$FONTFIX_GOT" != "$FONTFIX_WANT" ]; then
+    echo "FAIL: scripts/list-font-files.sh listed '$FONTFIX_GOT' on a fixture shell holding '$FONTFIX_WANT' (#326)" >&2
+    exit 1
+  fi
+  echo "PASS: scripts/list-font-files.sh names every .woff/.woff2/.ttf/.otf/.ttc, upper-case and nested included, and nothing else (#326)"
 
   OUT7="$(mktemp -d)/bundled-shell-check"
   xcrun swiftc -o "$OUT7" \
@@ -1842,7 +1856,8 @@ SHELLWIPEPY
 # a non-Apple font (Inter), a non-font whose name also starts with "sf" and the usual
 # entries: the copy must drop the two Apple fonts, name each in its log, and keep
 # everything else. Inter pins the other side: the skip is by name, never every font, so
-# a non-Apple font reaches Dobby/Shell and SHELLNOFONTPY turns it into a decision.
+# a non-Apple font reaches Dobby/Shell, where the zero-font backstop above turns it into
+# a decision locally (TestFlight only warns on it).
 python3 - <<'SHELLFONTSKIPPY'
 import os
 import subprocess
@@ -1856,7 +1871,9 @@ def fail(msg):
 repo = os.getcwd()
 pub = tempfile.mkdtemp(prefix="dobby-326-public-")
 keep = ["/", "/styles.css", "/manifest.json", "/static/sf-symbols.svg", "/static/fonts/Inter.woff2"] + ["/js/%02d.js" % i for i in range(8)]
-fonts = ["/static/fonts/sf-pro-var-wght400-800-opsz-latin-cyrillic-subset.woff2", "/static/fonts/NewYork.ttf"]
+fonts = ["/static/fonts/sf-pro-var-wght400-800-opsz-latin-cyrillic-subset.woff2", "/static/fonts/NewYork.ttf",
+         "/static/fonts/SFMono-Regular.otf", "/static/fonts/SFCompact.TTC", "/static/fonts/SFNS.woff",
+         "/static/fonts/New_York-Italic.otf", "/static/fonts/new-york.woff2"]
 for path in keep + fonts:
     target = os.path.join(pub, "index.html" if path == "/" else path[1:])
     os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -1889,6 +1906,41 @@ SHELLFONTSKIPPY
 if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
 fi
+
+# #326: the TestFlight half of the font guard. That workflow builds from PWA main and never
+# runs this file, so its "Verify the app shell was bundled" step scans the WHOLE archived
+# app with the same scripts/list-font-files.sh and warns per font, never failing the upload.
+# Pinned as text, scoped to that step: the scan call on the archived app, the per-font
+# ::warning:: naming ITMS-91182, and no exit or ::error:: anywhere in the font half.
+python3 - <<'TFFONTWARNPY'
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#326)\n" % msg)
+    sys.exit(1)
+
+wf = open(".github/workflows/testflight.yml").read()
+start = wf.find("      - name: Verify the app shell was bundled\n")
+if start < 0:
+    fail("testflight.yml has no 'Verify the app shell was bundled' step")
+end = wf.find("\n      - name: ", start + 1)
+step = wf[start:end if end > 0 else len(wf)]
+app_line = '          app="build/Dobby.xcarchive/Products/Applications/Dobby.app"\n'
+scan_line = ('          fonts=$(scripts/list-font-files.sh "$app") || '
+             '{ echo "::warning::font scan of $app failed (#326)"; fonts=""; }\n')
+for needle in (app_line, scan_line):
+    if step.count(needle) != 1:
+        fail("the Verify step must run the shared font scan on the whole archived app: missing %r" % needle.strip())
+tail = step[step.index(app_line):]
+if tail.count('echo "::warning::Dobby.app/$font is a bundled font;') != 1 or "ITMS-91182" not in tail:
+    fail("the Verify step must warn once per font path, naming ITMS-91182")
+if "exit" in tail or "::error::" in tail:
+    fail("the font half of the Verify step must only warn: a font never fails the TestFlight upload")
+if step.index(app_line) < step.index("pwa-commit.txt"):
+    fail("the font scan must come after the shell and pwa-commit checks, whose failures stay fatal")
+print("PASS: testflight.yml's Verify step runs scripts/list-font-files.sh on the whole archived Dobby.app and "
+      "warns per font naming ITMS-91182, never failing the upload (#326)")
+TFFONTWARNPY
 
 # 2. ContentView: the screen a never-paired device actually lands on must say
 #    whether THIS build can cold-start Pi-less at all, driven by the same

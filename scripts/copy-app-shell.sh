@@ -72,8 +72,10 @@ for line in text[open_at:close_at].splitlines():
 # The PWA precaches an SF Pro subset for its Apple TV theme because Android has no
 # system SF. iOS needs no copy: SF Pro IS the system font there, and the theme's
 # font-family stack falls through to -apple-system, which is the same face. Matched by
-# file name (SF Pro / Compact / Mono, New York), font files only. Tests/run-checks.sh
-# holds the copied shell to zero font files, so a new font in APP_SHELL is a decision.
+# file name (SF Pro / Compact / Mono, New York), font files only. This skip is the ONLY
+# thing that keeps an Apple font out of a TestFlight upload: that workflow builds from PWA
+# main and does not run the tests, it only warns, per font file, on the archived app.
+# Locally, Tests/run-checks.sh fails on any font in the copied shell (scripts/list-font-files.sh).
 FONT_EXTS = (".woff", ".woff2", ".ttf", ".otf", ".ttc")
 APPLE_FONT = re.compile(r"^(sf|new[-_ ]?york)", re.IGNORECASE)
 seen, shell = set(), []

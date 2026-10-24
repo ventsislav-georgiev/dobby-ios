@@ -256,6 +256,18 @@ jobs:
             exit 1
           fi
           echo "bundled PWA commit $bundled_sha, shell stamp: $(grep -o 'app-version[^<]*' "$shell_html" | head -1)"
+          # #326: App Store Connect rejects an embedded Apple font (ITMS-91182) from
+          # 2027-10-01. copy-app-shell.sh's name skip is what keeps one out of this
+          # PWA-driven build; this only WARNS, one line per font file anywhere in the app
+          # (package resources included), and never fails the upload for it. Prints font
+          # paths inside Dobby.app only. Same scan Tests/run-checks.sh fails on locally.
+          app="build/Dobby.xcarchive/Products/Applications/Dobby.app"
+          fonts=$(scripts/list-font-files.sh "$app") || { echo "::warning::font scan of $app failed (#326)"; fonts=""; }
+          while IFS= read -r font; do
+            if [ -n "$font" ]; then
+              echo "::warning::Dobby.app/$font is a bundled font; if it is Apple-provided, App Store Connect rejects the upload (ITMS-91182, #326)"
+            fi
+          done <<< "$fonts"
 
       - name: Export .ipa
         run: |
