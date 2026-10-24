@@ -1910,10 +1910,14 @@ fi
 # #326: the TestFlight half of the font guard. That workflow builds from PWA main and never
 # runs this file, so its "Verify the app shell was bundled" step scans the WHOLE archived
 # app with the same scripts/list-font-files.sh and warns per font, never failing the upload.
-# Pinned as text, scoped to that step: the scan call on the archived app, the per-font
-# ::warning:: naming ITMS-91182, and no exit or ::error:: anywhere in the font half.
+# Pinned scoped to that step: the shared scan call on the archived app as text, then the
+# font half itself RUN on fixture archives (fonts, clean, missing), so the loop is proven
+# to warn per font, stay quiet on a clean app and never fail the upload.
 python3 - <<'TFFONTWARNPY'
+import os
+import subprocess
 import sys
+import tempfile
 
 def fail(msg):
     sys.stderr.write("FAIL: %s (#326)\n" % msg)
@@ -1931,15 +1935,46 @@ scan_line = ('          fonts=$(scripts/list-font-files.sh "$app") || '
 for needle in (app_line, scan_line):
     if step.count(needle) != 1:
         fail("the Verify step must run the shared font scan on the whole archived app: missing %r" % needle.strip())
-tail = step[step.index(app_line):]
-if tail.count('echo "::warning::Dobby.app/$font is a bundled font;') != 1 or "ITMS-91182" not in tail:
-    fail("the Verify step must warn once per font path, naming ITMS-91182")
-if "exit" in tail or "::error::" in tail:
-    fail("the font half of the Verify step must only warn: a font never fails the TestFlight upload")
 if step.index(app_line) < step.index("pwa-commit.txt"):
     fail("the font scan must come after the shell and pwa-commit checks, whose failures stay fatal")
-print("PASS: testflight.yml's Verify step runs scripts/list-font-files.sh on the whole archived Dobby.app and "
-      "warns per font naming ITMS-91182, never failing the upload (#326)")
+tail = step[step.index(app_line):]
+# Text the runs below cannot rule out: a conditional exit or ::error:: on some other input.
+if "exit" in tail or "::error::" in tail:
+    fail("the font half of the Verify step must only warn: a font never fails the TestFlight upload")
+
+# Run the font half the way Actions runs a step (bash -eo pipefail, cwd = dobby-ios),
+# against the REAL shared scan, on three fixture archives.
+lines = tail.rstrip("\n").split("\n")
+if any(l and not l.startswith(" " * 10) for l in lines):
+    fail("the font half of the Verify step is not a 10-space-indented run: block")
+body = "\n".join(l[10:] for l in lines) + "\n"
+scan = os.path.abspath("scripts/list-font-files.sh")
+warn = "::warning::Dobby.app/%s is a bundled font; if it is Apple-provided, App Store Connect rejects the upload (ITMS-91182, #326)"
+
+def run(files):
+    cwd = tempfile.mkdtemp(prefix="dobby-326-tf-")
+    os.makedirs(os.path.join(cwd, "scripts"))
+    os.symlink(scan, os.path.join(cwd, "scripts/list-font-files.sh"))
+    app = os.path.join(cwd, "build/Dobby.xcarchive/Products/Applications/Dobby.app")
+    for f in files:
+        os.makedirs(os.path.dirname(os.path.join(app, f)), exist_ok=True)
+        open(os.path.join(app, f), "w").close()
+    r = subprocess.run(["/bin/bash", "-eo", "pipefail", "-c", body], cwd=cwd, capture_output=True, text=True)
+    return r.returncode, r.stdout.splitlines()
+
+non_fonts = ["Shell/index.html", "Shell/js/woff.js", "Info.plist"]
+fonts = ["Frameworks/Pkg.bundle/deep/Icons.TTF", "Shell/static/fonts/sf-pro.woff2"]
+got = run(non_fonts + fonts)
+if got != (0, [warn % f for f in fonts]):
+    fail("an archive holding %s must give exactly one warning per font and rc 0, got %r" % (fonts, got))
+got = run(non_fonts)
+if got != (0, []):
+    fail("an archive with no font must print nothing and rc 0, got %r" % (got,))
+got = run([])   # no files, so no app dir at all
+if got != (0, ["::warning::font scan of build/Dobby.xcarchive/Products/Applications/Dobby.app failed (#326)"]):
+    fail("a missing app dir must give exactly the one scan-failed warning and rc 0, got %r" % (got,))
+print("PASS: testflight.yml's Verify step, run under bash -eo pipefail, warns once per font anywhere in the "
+      "archived Dobby.app naming ITMS-91182, says nothing on a clean app, and never fails the upload (#326)")
 TFFONTWARNPY
 
 # 2. ContentView: the screen a never-paired device actually lands on must say
