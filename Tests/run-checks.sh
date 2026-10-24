@@ -1839,8 +1839,10 @@ SHELLWIPEPY
 
 # #326: the Apple-font skip itself, on a fabricated Public dir, so it holds whatever the
 # real sw.js lists today. The fixture's APP_SHELL names an SF Pro woff2, a New York ttf,
-# a non-font whose name also starts with "sf" and the usual entries: the copy must drop
-# both fonts, name each in its log, and keep everything else.
+# a non-Apple font (Inter), a non-font whose name also starts with "sf" and the usual
+# entries: the copy must drop the two Apple fonts, name each in its log, and keep
+# everything else. Inter pins the other side: the skip is by name, never every font, so
+# a non-Apple font reaches Dobby/Shell and SHELLNOFONTPY turns it into a decision.
 python3 - <<'SHELLFONTSKIPPY'
 import os
 import subprocess
@@ -1853,7 +1855,7 @@ def fail(msg):
 
 repo = os.getcwd()
 pub = tempfile.mkdtemp(prefix="dobby-326-public-")
-keep = ["/", "/styles.css", "/manifest.json", "/static/sf-symbols.svg"] + ["/js/%02d.js" % i for i in range(8)]
+keep = ["/", "/styles.css", "/manifest.json", "/static/sf-symbols.svg", "/static/fonts/Inter.woff2"] + ["/js/%02d.js" % i for i in range(8)]
 fonts = ["/static/fonts/sf-pro-var-wght400-800-opsz-latin-cyrillic-subset.woff2", "/static/fonts/NewYork.ttf"]
 for path in keep + fonts:
     target = os.path.join(pub, "index.html" if path == "/" else path[1:])
@@ -1875,8 +1877,10 @@ for path in fonts:
 for path in keep:
     if not os.path.isfile(os.path.join(shell, "index.html" if path == "/" else path[1:])):
         fail("copy-app-shell.sh dropped %s, which is not an Apple font" % path)
+    if ("skipping Apple font %s " % path) in result.stdout:
+        fail("copy-app-shell.sh logged %s as a skipped Apple font" % path)
 print("PASS: copy-app-shell.sh skips SF Pro and New York font files by name, logs each, and keeps every "
-      "other APP_SHELL entry, an sf-named non-font included (#326)")
+      "other APP_SHELL entry, a non-Apple font and an sf-named non-font included (#326)")
 SHELLFONTSKIPPY
 
 # This check's own fixture must not be the reason a human re-running checks locally
