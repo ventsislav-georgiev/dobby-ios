@@ -1417,12 +1417,18 @@ if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   if [ ! -s Dobby/Shell/index.html ]; then
     echo "FAIL: no copied shell to inspect for fonts (#326)" >&2; exit 1
   fi
-  SHELL_FONTS="$(./scripts/list-font-files.sh Dobby/Shell)"
-  SHELL_FONTS_EXTRA=""
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    case " ${SHELL_FONTS_ALLOWED[*]-} " in *" $f "*) ;; *) SHELL_FONTS_EXTRA="$SHELL_FONTS_EXTRA $f" ;; esac
-  done <<< "$SHELL_FONTS"
+  # The fonts under $1 that SHELL_FONTS_ALLOWED does not list, each after one space. Run on
+  # the copied shell below and on the fixture shell after it, so the decision is pinned too.
+  shell_fonts_extra() {
+    local f fonts extra=""
+    fonts="$(./scripts/list-font-files.sh "$1")" || return 1
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case " ${SHELL_FONTS_ALLOWED[*]-} " in *" $f "*) ;; *) extra="$extra $f" ;; esac
+    done <<< "$fonts"
+    printf '%s' "$extra"
+  }
+  SHELL_FONTS_EXTRA="$(shell_fonts_extra Dobby/Shell)"
   if [ -n "$SHELL_FONTS_EXTRA" ]; then
     echo "FAIL: Dobby/Shell carries font file(s)$SHELL_FONTS_EXTRA; an Apple font is ITMS-91182, any other needs a decision and a SHELL_FONTS_ALLOWED entry (#326)" >&2
     exit 1
@@ -1435,14 +1441,15 @@ if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   FONTFIX="$(mktemp -d)"
   mkdir -p "$FONTFIX/static/fonts/deep" "$FONTFIX/js"
   : > "$FONTFIX/index.html"; : > "$FONTFIX/js/woff.js"; : > "$FONTFIX/static/fonts/README.txt"
-  FONTFIX_WANT="static/fonts/a.woff static/fonts/b.woff2 static/fonts/c.ttf static/fonts/d.otf static/fonts/deep/F.OTF static/fonts/e.ttc"
+  FONTFIX_WANT="static/fonts/G.WOFF static/fonts/H.WOFF2 static/fonts/I.TTC static/fonts/a.woff static/fonts/b.woff2 static/fonts/c.ttf static/fonts/d.otf static/fonts/deep/F.OTF static/fonts/e.ttc"
   for f in $FONTFIX_WANT; do : > "$FONTFIX/$f"; done
-  FONTFIX_GOT="$(./scripts/list-font-files.sh "$FONTFIX" | tr '\n' ' ' | sed 's/ $//')"
+  FONTFIX_GOT="$(shell_fonts_extra "$FONTFIX")"
+  FONTFIX_GOT="${FONTFIX_GOT# }"
   if [ "$FONTFIX_GOT" != "$FONTFIX_WANT" ]; then
-    echo "FAIL: scripts/list-font-files.sh listed '$FONTFIX_GOT' on a fixture shell holding '$FONTFIX_WANT' (#326)" >&2
+    echo "FAIL: the backstop (scripts/list-font-files.sh and SHELL_FONTS_ALLOWED) flagged '$FONTFIX_GOT' on a fixture shell holding '$FONTFIX_WANT' (#326)" >&2
     exit 1
   fi
-  echo "PASS: scripts/list-font-files.sh names every .woff/.woff2/.ttf/.otf/.ttc, upper-case and nested included, and nothing else (#326)"
+  echo "PASS: the backstop (scripts/list-font-files.sh and SHELL_FONTS_ALLOWED) flags every .woff/.woff2/.ttf/.otf/.ttc, upper-case and nested included, and nothing else (#326)"
 
   OUT7="$(mktemp -d)/bundled-shell-check"
   xcrun swiftc -o "$OUT7" \
