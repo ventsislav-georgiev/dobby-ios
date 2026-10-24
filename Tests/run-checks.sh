@@ -1403,6 +1403,33 @@ DOBBY_PUBLIC_DIR="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}"
 if [ -d "$DOBBY_PUBLIC_DIR" ]; then
   DOBBY_PUBLIC_DIR="$DOBBY_PUBLIC_DIR" ./scripts/copy-app-shell.sh
 
+  # #326: the copied shell carries no font file at all. App Store Connect rejects an
+  # embedded Apple font (ITMS-91182) from 2027-10-01, and copy-app-shell.sh skips them by
+  # name. Fails closed on ANY font, not just Apple's: if the PWA ever precaches another
+  # one, this goes red and someone decides whether iOS carries it. A test, not a build
+  # step, so a TestFlight build never breaks on it.
+  python3 - <<'SHELLNOFONTPY'
+import os
+import sys
+
+# Fonts iOS is allowed to carry, as paths relative to Dobby/Shell. Empty by decision
+# (#326): add one only after checking it is not Apple-provided and iOS really needs it.
+ALLOWED = set()
+FONT_EXTS = (".woff", ".woff2", ".ttf", ".otf", ".ttc")
+shell = "Dobby/Shell"
+if not os.path.isfile(os.path.join(shell, "index.html")):
+    sys.stderr.write("FAIL: no copied shell to inspect for fonts (#326)\n")
+    sys.exit(1)
+fonts = sorted(os.path.relpath(os.path.join(d, n), shell) for d, _, names in os.walk(shell)
+               for n in names if n.lower().endswith(FONT_EXTS))
+extra = [f for f in fonts if f not in ALLOWED]
+if extra:
+    sys.stderr.write("FAIL: Dobby/Shell carries font file(s) %s; an Apple font is ITMS-91182, any other "
+                     "needs a decision and an ALLOWED entry (#326)\n" % ", ".join(extra))
+    sys.exit(1)
+print("PASS: the copied Dobby/Shell holds no font file, so the upload embeds no Apple font (ITMS-91182, #326)")
+SHELLNOFONTPY
+
   OUT7="$(mktemp -d)/bundled-shell-check"
   xcrun swiftc -o "$OUT7" \
     Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift Tests/BundledShellCheck.swift
@@ -1809,6 +1836,48 @@ if not os.path.isfile(os.path.join(shell_dir, ".gitkeep")):
 
 print("PASS: copy-app-shell.sh wipes a stale Dobby/Shell when the sibling checkout is gone, instead of shipping stale content (#155)")
 SHELLWIPEPY
+
+# #326: the Apple-font skip itself, on a fabricated Public dir, so it holds whatever the
+# real sw.js lists today. The fixture's APP_SHELL names an SF Pro woff2, a New York ttf,
+# a non-font whose name also starts with "sf" and the usual entries: the copy must drop
+# both fonts, name each in its log, and keep everything else.
+python3 - <<'SHELLFONTSKIPPY'
+import os
+import subprocess
+import sys
+import tempfile
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#326)\n" % msg)
+    sys.exit(1)
+
+repo = os.getcwd()
+pub = tempfile.mkdtemp(prefix="dobby-326-public-")
+keep = ["/", "/styles.css", "/manifest.json", "/static/sf-symbols.svg"] + ["/js/%02d.js" % i for i in range(8)]
+fonts = ["/static/fonts/sf-pro-var-wght400-800-opsz-latin-cyrillic-subset.woff2", "/static/fonts/NewYork.ttf"]
+for path in keep + fonts:
+    target = os.path.join(pub, "index.html" if path == "/" else path[1:])
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    open(target, "w").write(path)
+with open(os.path.join(pub, "sw.js"), "w") as f:
+    f.write("const APP_SHELL = [\n" + "".join("  '%s',\n" % p for p in keep[:2] + fonts + keep[2:]) + "];\n")
+
+env = dict(os.environ, DOBBY_PUBLIC_DIR=pub)
+result = subprocess.run(["./scripts/copy-app-shell.sh"], cwd=repo, env=env, capture_output=True, text=True)
+if result.returncode != 0:
+    fail("copy-app-shell.sh failed on the fixture: %s" % result.stderr.strip())
+shell = os.path.join(repo, "Dobby/Shell")
+for path in fonts:
+    if os.path.exists(os.path.join(shell, path[1:])):
+        fail("copy-app-shell.sh copied the Apple font %s into Dobby/Shell" % path)
+    if result.stdout.count("skipping Apple font %s " % path) != 1:
+        fail("copy-app-shell.sh must log one line naming the skipped font %s" % path)
+for path in keep:
+    if not os.path.isfile(os.path.join(shell, "index.html" if path == "/" else path[1:])):
+        fail("copy-app-shell.sh dropped %s, which is not an Apple font" % path)
+print("PASS: copy-app-shell.sh skips SF Pro and New York font files by name, logs each, and keeps every "
+      "other APP_SHELL entry, an sf-named non-font included (#326)")
+SHELLFONTSKIPPY
 
 # This check's own fixture must not be the reason a human re-running checks locally
 # right after sees an empty Dobby/Shell — put the real one back, same guard as the

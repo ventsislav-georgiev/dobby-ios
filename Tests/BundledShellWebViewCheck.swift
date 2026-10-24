@@ -172,8 +172,50 @@ enum BundledShellWebViewCheck {
             print("sw register:  NOT MEASURED — navigator.serviceWorker is unavailable in this host")
         }
 
+        // #326: the shell no longer carries the SF Pro subset (ITMS-91182), but the PWA's
+        // styles.css still names it in an @font-face. That request must fail AT ONCE: a
+        // font request left hanging can hold text invisible while the browser waits.
+        // First the handler directly, with a recording task: the 404 and the finish both
+        // land before start(...) returns, on the main thread WebKit calls it on.
+        let missingFont = URL(string: "\(OfflineSchemeHandler.scheme)://\(BundledShell.host)"
+                              + "/static/fonts/sf-pro-var-wght400-800-opsz-latin-cyrillic-subset.woff2")!
+        let task = RecordingTask(URLRequest(url: missingFont))
+        OfflineSchemeHandler(shellRoot: shellRoot).webView(webView, start: task)
+        print("missing font: status \(task.status.map(String.init) ?? "none"), finished \(task.finished), "
+              + "on main \(task.onMain)")
+        check(task.status == 404 && task.finished && task.onMain && task.bytes == 0,
+              "a shell path that is not in the bundle is answered 404 and finished before start returns, on main (#326)")
+
+        // Then through WebKit, the way styles.css asks for it: the FontFace load rejects
+        // promptly instead of waiting on a request nobody answers.
+        let fontLoad = evaluate(webView, """
+          const t0 = performance.now();
+          try { await new FontFace('Missing', 'url(\(missingFont.absoluteString))').load(); return 'loaded'; }
+          catch (e) { return 'rejected ' + e.name + ' in ' + Math.round(performance.now() - t0) + ' ms'; }
+        """, timeout: 10)
+        print("font load:    \(fontLoad)")
+        let ms = fontLoad.hasPrefix("rejected ") ? Int(fontLoad.split(separator: " ").dropLast().last ?? "") : nil
+        check(ms.map { $0 < 2000 } == true, "a FontFace for the missing font rejects within 2 s, it does not hang (#326)")
+
         try? FileManager.default.removeItem(at: shellRoot)
         print(failures == 0 ? "BundledShellWebViewCheck: all good" : "BundledShellWebViewCheck: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
+}
+
+/// Records what OfflineSchemeHandler does with one task, and whether it did it on main.
+private final class RecordingTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    var status: Int?
+    var bytes = 0
+    var finished = false
+    var onMain = true
+    init(_ request: URLRequest) { self.request = request }
+    func didReceive(_ response: URLResponse) {
+        onMain = onMain && Thread.isMainThread
+        status = (response as? HTTPURLResponse)?.statusCode
+    }
+    func didReceive(_ data: Data) { onMain = onMain && Thread.isMainThread; bytes += data.count }
+    func didFinish() { onMain = onMain && Thread.isMainThread; finished = true }
+    func didFailWithError(_ error: Error) { onMain = onMain && Thread.isMainThread; finished = true }
 }

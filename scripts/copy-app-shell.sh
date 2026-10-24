@@ -64,13 +64,28 @@ for line in text[open_at:close_at].splitlines():
     # go before the string literals are read, not after.
     code = re.sub(r"//.*", "", line)
     paths += re.findall(r"['\"]([^'\"]*)['\"]", code)
-# library-metadata.json is the one APP_SHELL entry the wrapper must not carry: it is a
+# library-metadata.json is an APP_SHELL entry the wrapper must not carry: it is a
 # snapshot of the Pi's library, and a stale bundled copy would be worse than none.
+#
+# Apple's own fonts are the other: App Store Connect flags an embedded SF Pro as
+# ITMS-91182 (Disallowed font), and uploads carrying one are rejected from 2027-10-01.
+# The PWA precaches an SF Pro subset for its Apple TV theme because Android has no
+# system SF. iOS needs no copy: SF Pro IS the system font there, and the theme's
+# font-family stack falls through to -apple-system, which is the same face. Matched by
+# file name (SF Pro / Compact / Mono, New York), font files only. Tests/run-checks.sh
+# holds the copied shell to zero font files, so a new font in APP_SHELL is a decision.
+FONT_EXTS = (".woff", ".woff2", ".ttf", ".otf", ".ttc")
+APPLE_FONT = re.compile(r"^(sf|new[-_ ]?york)", re.IGNORECASE)
 seen, shell = set(), []
 for p in paths:
-    if p.startswith("/") and p != "/library-metadata.json" and p not in seen:
-        seen.add(p)
-        shell.append(p)
+    if not p.startswith("/") or p == "/library-metadata.json" or p in seen:
+        continue
+    seen.add(p)
+    name = os.path.basename(p)
+    if name.lower().endswith(FONT_EXTS) and APPLE_FONT.match(name):
+        print(f"copy-app-shell: skipping Apple font {p} (ITMS-91182; iOS has it as the system font)")
+        continue
+    shell.append(p)
 if len(shell) < 10:
     sys.exit(f"copy-app-shell: APP_SHELL parsed as only {len(shell)} entries from {sw_js}; refusing to ship a half-empty shell.")
 
