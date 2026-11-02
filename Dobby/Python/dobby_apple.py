@@ -1,6 +1,7 @@
 """Apple glue for the shared a4k tree (#482). Copied into the bundle next to it by
-scripts/copy-python.sh; PythonRuntime.swift calls the three functions below with one
-JSON string each and gets one JSON string back, so Swift never builds Python objects.
+scripts/copy-python.sh; PythonRuntime.swift calls the functions below (search, search_partial,
+subs, download) with one JSON string each and gets one JSON string back, so Swift never builds
+Python objects.
 
 The a4k tree itself is Android's, unchanged. The one place it reaches for the platform
 is RAR (a4k_bg_services/_archive.py `from java import jclass`), so this module installs
@@ -124,22 +125,37 @@ def _install_java_shim():
 _install_java_shim()
 
 
-def info(_params_json):
-    """Version line for the logs, and the imports a first search would pay, paid up front."""
-    import ssl
-    import a4k_search  # noqa: F401
-    import a4k_subs  # noqa: F401
-    import bs4  # noqa: F401
-    import requests  # noqa: F401
-    return json.dumps({"version": sys.version.split()[0], "openssl": ssl.OPENSSL_VERSION})
+# The running (or last finished) full search's sink: what search_partial reads while search waits.
+# Android keeps the same slot in Java (FullSearchLane.current); one search at a time.
+_current = None
 
 
 def search(params_json):
+    """One full search, live (#483). The scrape runs on its own thread pushing into a fresh sink that
+    search_partial reads meanwhile; this call waits params["wait"] seconds for it (the GIL is free while
+    it waits) and cancels an overrun, so the caller answers from whatever finished, as Android does."""
+    import threading
     import a4k_search
+    global _current
+    a4k_search.cancel()  # the previous search stops pushing into its own sink
     sink = _Sink()
-    total = a4k_search.run_search(params_json, sink)
-    return json.dumps({"providers": total, "progress": sink.last_progress,
-                       "rows": [r[:5] for r in sink.rows]})  # hash, title, seeds, size, provider
+    _current = sink
+    worker = threading.Thread(target=a4k_search.run_search, args=(params_json, sink), daemon=True)
+    worker.start()
+    worker.join(float(json.loads(params_json).get("wait") or 60))
+    timed_out = worker.is_alive()
+    if timed_out:
+        a4k_search.cancel()
+    return json.dumps({"timedOut": timed_out, "progress": sink.last_progress,
+                       "rows": [r[:5] for r in list(sink.rows)]})  # hash, title, seeds, size, provider
+
+
+def search_partial(_params_json):
+    """The current search's progress and rows so far; exists false before the first search."""
+    sink = _current
+    if sink is None:
+        return json.dumps({"exists": False})
+    return json.dumps({"exists": True, "progress": sink.last_progress, "rows": [r[:5] for r in list(sink.rows)]})
 
 
 def subs(params_json):
@@ -172,4 +188,31 @@ if __name__ == "__main__":
     assert not os.path.exists(os.path.join(tmp, "out", "escape.srt")), "an archive name escaped dest"
     assert not os.path.exists(os.path.join(dest, "big.srt")), "an entry over the cap was kept"
     assert open(os.path.join(dest, "escape.srt")).read() == "outside"
+
+    # #483: search is live. Rows reach search_partial while search waits, and an overrun is cancelled.
+    import threading
+    import time
+    gate, cancelled, res = threading.Event(), [], {}
+    fake = types.ModuleType("a4k_search")
+
+    def _fake_run(_params, sink):
+        sink.progress(False, 0, 2)
+        sink.add("h1", "t", 1, 2.5, "p")
+        sink.progress(False, 1, 2)
+        gate.wait(5)
+
+    fake.run_search, fake.cancel = _fake_run, lambda: cancelled.append(1)
+    sys.modules["a4k_search"] = fake
+    assert json.loads(search_partial("{}")) == {"exists": False}
+    th = threading.Thread(target=lambda: res.update(json.loads(search(json.dumps({"wait": 1})))))
+    th.start()
+    for _ in range(200):
+        snap = json.loads(search_partial("{}"))
+        if snap.get("rows"):
+            break
+        time.sleep(0.01)
+    assert snap == {"exists": True, "progress": [False, 1, 2], "rows": [["h1", "t", "1", "2.5", "p"]]}, snap
+    th.join()
+    gate.set()
+    assert res["timedOut"] is True and res["rows"] == snap["rows"] and len(cancelled) == 2, (res, cancelled)
     print("dobby_apple self-check: OK", written)

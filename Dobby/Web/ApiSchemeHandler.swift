@@ -102,9 +102,29 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             switch url.host?.lowercased() {
             case "settings": self.serveSettings(task, id, url, method, origin, body)
             case "proxy": self.serveProxy(task, id, url, method, origin)
+            // #483: a full search holds its request for up to a minute while /partial polls every 2 s,
+            // so the a4k lanes get a concurrent queue of their own instead of this serial one.
+            case "streaming", "subtitles": Self.a4kQueue.async { self.serveA4k(task, id, url, method, origin, body) }
             default: self.fail(task, id, 404, "Unknown dobby-api route", origin)
             }
         }
+    }
+
+    /// #483: the a4k lanes (A4kLane.answer), installed by WebContainer. A hook rather than a call so
+    /// this file still compiles on its own in Tests/run-checks.sh. Blocking; never called on main.
+    static var a4kLane: ((_ url: URL, _ method: String, _ body: Data?)
+                         -> (status: Int, contentType: String, body: Data, cacheControl: String))?
+    private static let a4kQueue = DispatchQueue(label: "com.solarflare.dobby.a4k", qos: .userInitiated,
+                                                attributes: .concurrent)
+
+    /// Exact-origin ACAO (`secret: true`): these lanes spend the Premiumize key and the subtitle
+    /// credentials. The answer goes out through `respond`, so on the main thread (#169).
+    private func serveA4k(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
+                          _ url: URL, _ method: String, _ origin: String?, _ body: Data?) {
+        guard let lane = Self.a4kLane else { fail(task, id, 404, "Unknown dobby-api route", origin); return }
+        let answer = lane(url, method, body)
+        respond(task, id, status: answer.status, contentType: answer.contentType, body: answer.body,
+                origin: origin, secret: true, extra: ["Cache-Control": answer.cacheControl])
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {

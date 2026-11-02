@@ -24,6 +24,22 @@ enum BridgeInjection {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// #483: `window.Dobby.a4k`, the PWA's switch for the on-device a4k lanes (`apiUrlFor`, #484).
+    /// WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes it
+    /// back through `withdrawA4k` if the interpreter then fails to start, so it stays true only
+    /// while `PythonRuntime.shared` is non-nil, without the main thread ever starting Python.
+    static var a4k = false
+
+    /// #483: the interpreter would not start. The page's live flag and every later injection go false.
+    static func withdrawA4k(from webView: WKWebView?) {
+        a4k = false
+        guard let webView else { return }
+        let ucc = webView.configuration.userContentController
+        ucc.removeAllUserScripts()
+        ucc.addUserScript(userScript())
+        webView.evaluateJavaScript("if (window.Dobby) window.Dobby.a4k = false;")
+    }
+
     /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
     /// the Pi setting, so a reload reads the new value rather than the launch one.
     static func userScript() -> WKUserScript {
@@ -49,6 +65,8 @@ enum BridgeInjection {
             platform: 'native',
             version: '0.1',
             canPlayNative: \(canPlayNative ? "true" : "false"),
+            // #483: this build answers the a4k routes itself (dobby-api://streaming, ://subtitles).
+            a4k: \(a4k ? "true" : "false"),
             // Audio is routed to a car head unit. Pushed by the wrapper on every
             // route change (and once after 'ready'); read it, don't set it.
             isCarAudio: false,
