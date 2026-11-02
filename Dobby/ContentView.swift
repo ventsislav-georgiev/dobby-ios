@@ -74,6 +74,13 @@ struct ContentView: View {
         }
         serverURL = await ServerAddresses.resolve()
         resolving = false
+        // #479: the Pi is on but nothing answered — Android's `resolveAndLoad` outcome two,
+        // the bundled shell, not a blocking screen. Addresses are edited in the web app's
+        // Settings from there; the unreachable screen is left to a build with no shell.
+        if serverURL == nil, BundledShell.root != nil {
+            continueOffline()
+            return
+        }
         #if DEBUG
         // #116 device round 3 test seam: DOBBY_AUTO_OFFLINE=1 performs the same
         // action as tapping "Continue offline" below, for a headless run.

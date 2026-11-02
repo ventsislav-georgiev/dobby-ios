@@ -3062,6 +3062,15 @@ skip = body(resolve[gate_at:], "if !ServerAddresses.piEnabled() {", "the Pi-off 
 for needle in ["if BundledShell.root != nil { continueOffline() }", "return"]:
     if needle not in skip:
         fail("the Pi-off start-up branch must `%s`" % needle)
+# #479: the Pi is on and nothing answered: the bundled shell, as Android's resolveAndLoad does,
+# not the blocking "Can't reach Dobby" screen. After the probe, before the DEBUG seam.
+fallback = "if serverURL == nil, BundledShell.root != nil {"
+fb_at = resolve.find(fallback)
+if not (probe_at < fb_at < resolve.find("#if DEBUG")):
+    fail("ContentView.resolve() must fall back to the bundled shell after a failed probe, before the DEBUG seam (#479)")
+fb = body(resolve[fb_at:], fallback, "the Pi-on fallback")
+if not (0 <= fb.find("continueOffline()") < fb.find("return")):
+    fail("the Pi-on fallback must continueOffline() and return (#479)")
 calls = sum(read(os.path.join(d, f)).count("ServerAddresses.resolve()")
             for d, _, fs in os.walk("Dobby") for f in fs if f.endswith(".swift"))
 if calls != 1:
