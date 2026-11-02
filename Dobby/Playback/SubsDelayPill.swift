@@ -10,7 +10,14 @@ extension PlayerControls {
     func openSubsDelay() { syncSubsDelay(); subsDelayOpen = true; forceShow() }
 
     /// Called on every change of `subsDelay`: write the delay for the current position.
+    /// `subsDelay.applied = d` below fires subsDelay's didSet, which calls back in here; with
+    /// fps on, offset(at:) reads the live clock, so each re-entry gets a new d and never stops.
+    private static var applyingSubsDelay = false
+
     func applySubsDelay() {
+        guard !Self.applyingSubsDelay else { return }
+        Self.applyingSubsDelay = true
+        defer { Self.applyingSubsDelay = false }
         guard let player = playback?.player else { return }
         let d = subsDelay.offset(at: player.playerLayer?.player.currentPlaybackTime ?? 0)
         guard d != subsDelay.applied else { return }
