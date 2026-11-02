@@ -490,7 +490,8 @@ if "scrub.end()" not in src:
 if "scrubValue" in src or "@State private var scrubbing" in src:
     sys.stderr.write("FAIL: PlayerView still carries the pre-#115 loose scrub state\n")
     sys.exit(1)
-if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:" not in src:
+# #467: the Slider became Android's thin band; the band and its label draw `current`.
+if "scrubber(current: current, total: total)" not in src or "let current = scrub.displayed(live:" not in src:
     sys.stderr.write("FAIL: PlayerView Slider does not read the scrub for its displayed value (#115)\n")
     sys.exit(1)
 # #131 changed the release branch from `else {` to `else if scrub.isScrubbing {`: the
@@ -501,7 +502,9 @@ if "Binding(get: { current }" not in src or "let current = scrub.displayed(live:
 # the replacement is strictly stronger: one literal now pins the release branch, the
 # exactly-once guard AND the seek together, so a mutant deleting the guard goes red here
 # instead of silently double-seeking.
-if "if editing { scrub.begin(at: current) }" not in src or "else if scrub.isScrubbing { playback.seek(to: scrub.end()) }" not in src:
+# #467: the band's drag seeds once, on its first change, and commits in onEnded.
+seed = "if !scrub.isScrubbing {\n                    controls.scrubbing = true; scrub.begin(at: current)"
+if seed not in src or "if scrub.isScrubbing { playback.seek(to: scrub.end()) }" not in src:
     sys.stderr.write("FAIL: PlayerView Slider seeds/seeks in the wrong branch (#115)\n")
     sys.exit(1)
 
@@ -509,9 +512,9 @@ if "if editing { scrub.begin(at: current) }" not in src or "else if scrub.isScru
 # and the seed check still passed, since both needles just had to appear
 # somewhere in the file). Pin the seek to actually sit in the else of the
 # editing-toggle, after the seed.
-i = src.index("if editing { scrub.begin(at: current) }")
+i = src.index(seed)
 j = src.index("playback.seek(to: scrub.end())")
-if not (i < j and "else if scrub.isScrubbing {" in src[i:j]):
+if not (i < j and "}.onEnded {" in src[i:j]):
     sys.stderr.write("FAIL: PlayerView Slider seeks outside the release branch (#115)\n")
     sys.exit(1)
 
@@ -3235,7 +3238,7 @@ if pv[drag[-1] + 1].strip() != "})":
     fail("PlayerView's edge drag must close right after its back action")
 if not one(pv, "var body: some View {", "PlayerView") < one(
         pv, ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
-        "PlayerView") < one(pv, "private var tapRegions: some View {", "PlayerView"):
+        "PlayerView") < one(pv, "private var pictureClicks: some View {", "PlayerView"):   # #467: iOS taps moved to ControlBar.swift
     fail("the player's edge drag must be a modifier of PlayerView.body")
 # Reviewer K1: moved onto subtitleOverlay inside the ZStack (allowsHitTesting(false)) the drag was
 # still in body, iOS-only and consecutive, but dead. It has to sit on body's root chain: depth 1.

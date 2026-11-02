@@ -13,6 +13,9 @@ enum ScrubStateCheck {
         knobStartsAtTheLivePosition()
         releaseReportsWhereTheDragEnded()
         releaseCommitsOnlyOnce()
+        targetsClampShortOfTheEnd()
+        burstEscalatesInsideTheWindow()
+        jumpIsTwentyPercent()
         print("ScrubStateCheck: all checks passed")
     }
 
@@ -86,5 +89,47 @@ enum ScrubStateCheck {
         check(!t.isScrubbing, "a touch with no begin() is not a live scrub")
         t.update(to: 42)
         check(!t.isScrubbing, "a value arriving without begin() still is not a live scrub")
+    }
+
+    /// #467: every seek stops 200 ms short of the end (Android) and never goes below zero;
+    /// the band maps a press to that fraction of the duration.
+    static func targetsClampShortOfTheEnd() {
+        check(ScrubState.clamp(-5, duration: 100) == 0, "a seek before the start lands on 0")
+        check(ScrubState.clamp(500, duration: 100) == 99.8, "a seek past the end lands 200 ms short of it")
+        check(ScrubState.clamp(500, duration: 0) == 500, "an unknown duration clamps only at 0")
+        check(ScrubState.target(x: 50, width: 200, duration: 100) == 25, "a quarter of the band is a quarter of the film")
+        check(ScrubState.target(x: 250, width: 200, duration: 100) == 99.8, "a drag past the band's end lands 200 ms short of the end")
+        check(ScrubState.target(x: 10, width: 0, duration: 100) == nil, "no width, no target")
+    }
+
+    /// #467: Android triggerSeekBurst. 15 s, then 30 s, then 45 s inside 900 ms, each from the
+    /// previous target; a gap or a turn starts over at 15 s.
+    static func burstEscalatesInsideTheWindow() {
+        var b = SeekBurst()
+        var r = b.press(1, unit: 15, now: 10, live: 100, duration: 1000)
+        check(r.count == 1 && r.target == 115, "the first press steps 15 s")
+        r = b.press(1, unit: 15, now: 10.5, live: 100, duration: 1000)
+        check(r.count == 2 && r.target == 145, "a second press inside 900 ms steps 30 s from the last target, not the stale live position")
+        r = b.press(1, unit: 15, now: 11.3, live: 100, duration: 1000)
+        check(r.count == 3 && r.target == 190, "the window runs from the last press, so a third press steps 45 s")
+        r = b.press(1, unit: 15, now: 12.3, live: 190, duration: 1000)
+        check(r.count == 1 && r.target == 205, "after the window the burst starts over at 15 s from the live position")
+        r = b.press(-1, unit: 15, now: 12.5, live: 190, duration: 1000)
+        check(r.count == 1 && r.target == 190, "a turn starts over at 15 s, from the target still in flight")
+        r = b.press(-1, unit: 15, now: 12.6, live: 190, duration: 1000)
+        check(r.count == 2 && r.target == 160, "the turned burst escalates too")
+        r = b.press(1, unit: 15, now: 20, live: 995, duration: 1000)
+        check(r.target == 999.8, "a burst never seeks past 200 ms before the end")
+    }
+
+    /// #467: up/down jump 20 % of the duration, 40 % on the next press inside the window.
+    static func jumpIsTwentyPercent() {
+        var b = SeekBurst()
+        var r = b.press(1, unit: 200, now: 0, live: 100, duration: 1000)
+        check(r.count == 1 && r.target == 300, "the first jump is 20 %")
+        r = b.press(1, unit: 200, now: 0.4, live: 100, duration: 1000)
+        check(r.count == 2 && r.target == 700, "the second jump inside the window is 40 %")
+        r = b.press(-1, unit: 200, now: 5, live: 50, duration: 1000)
+        check(r.target == 0, "a jump back past the start lands on 0")
     }
 }

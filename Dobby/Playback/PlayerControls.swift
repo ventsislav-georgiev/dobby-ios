@@ -289,7 +289,7 @@ final class PlayerControls: ObservableObject {
         case .right: seekKey(1)
         case .up: jumpKey(1)
         case .down: jumpKey(-1)
-        case .ret: okPress(); armReturnHold()
+        case .ret: okPress(); controlBarOpenedByKey(); armReturnHold()   // ControlBar.swift (E2)
         case .escape:
             if isFullscreen { toggleFullscreen() } else { playback?.stop() }
         case .char("?"): toggleShortcuts()
