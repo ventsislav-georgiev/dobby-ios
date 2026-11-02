@@ -16,6 +16,14 @@ struct PlayNativePayload: Decodable {
     let allowBookmarks: Bool?
     let subs: [SubtitleTrack]?
 
+    // OSD (#466, Android parity). All optional: an older page sends none of them.
+    let skin: String?               // "appletv" or anything else (Simple); see OsdTint.forSkin
+    let description: String?        // pause info card plot
+    let subtitle: String?           // pause info card meta line, "S1 · E5 · 2024 · ★ 8.4"
+    let thumb: String?              // pause info card still (absolute URL), else poster
+    let video: VideoMeta?           // the page's video descriptor; per-title memory key
+    let serverUrl: String?          // the page's API origin
+
     // SmartTube / YouTube variants
     let playbackKind: String?       // "smarttube"
     let qualityMode: String?        // "ytdlpAdaptive", ...
@@ -35,6 +43,34 @@ struct PlayNativePayload: Decodable {
         let videoUrl: String?
         let videoMimeType: String?
         let isDefault: Bool?
+    }
+
+    /// The page sends its whole video meta object here, whose field types vary (season may be a
+    /// number or a string, the object may be absent or not an object at all). Decoding it never
+    /// throws, so an odd `video` can never cost the whole payload (and with it playback).
+    struct VideoMeta: Decodable {
+        let imdbId: String?
+        let type: String?
+        let season: String?
+        let episode: String?
+
+        private struct Key: CodingKey {
+            var stringValue: String
+            var intValue: Int? { nil }
+            init(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
+        }
+
+        init(from decoder: Decoder) {
+            let c = try? decoder.container(keyedBy: Key.self)
+            func str(_ k: String) -> String? {
+                guard let c else { return nil }
+                if let s = try? c.decode(String.self, forKey: Key(stringValue: k)) { return s }
+                if let i = try? c.decode(Int.self, forKey: Key(stringValue: k)) { return String(i) }
+                return nil
+            }
+            imdbId = str("imdbId"); type = str("type"); season = str("season"); episode = str("episode")
+        }
     }
 
     var startSeconds: Double { Double(startMs ?? 0) / 1000.0 }

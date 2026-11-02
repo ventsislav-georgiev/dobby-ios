@@ -4,105 +4,82 @@ import KSPlayer
 import AppKit
 #endif
 
-/// Subtitle render style, mirrors the web app's default/large/contrast options.
-enum SubtitleStyle: String, CaseIterable, Identifiable {
-    case standard, large, contrast
-    var id: String { rawValue }
-    var label: String {
-        switch self {
-        case .standard: return "Default"
-        case .large: return "Large"
-        case .contrast: return "High Contrast"
-        }
-    }
+// The OSD contract (which file each entry owns, the key router, layers, toast, focus) is
+// OSD-CONTRACT.md (repo root). This file is the state and the router; components live in
+// their own files as `extension PlayerControls` / `extension PlayerView`.
+
+/// A key as the OSD router sees it, decoupled from NSEvent. Letters and punctuation are the
+/// US-layout key at that position (PlayerView maps key codes), so a Cyrillic layout still
+/// reaches "s" for subtitles. Command/Control chords never arrive here.
+enum OSDKey: Equatable {
+    case left, right, up, down, ret, escape, space
+    case char(Character)
 }
 
-/// One row in an OSD side menu. `action` performs the selection.
-struct OSDItem: Identifiable {
-    let id: String
-    let label: String
-    let detail: String?
-    let selected: Bool
-    let enabled: Bool
-    let action: () -> Void
-    init(id: String, label: String, detail: String? = nil, selected: Bool, enabled: Bool = true, action: @escaping () -> Void) {
-        self.id = id; self.label = label; self.detail = detail
-        self.selected = selected; self.enabled = enabled; self.action = action
-    }
-}
-
-/// OSD visibility + menu state + the bridge to KSPlayer for each control.
+/// OSD visibility, the layer stack, the key router and the state each component keeps.
 /// Lives for the duration of one player overlay (a @StateObject in PlayerView).
 @MainActor
 final class PlayerControls: ObservableObject {
-    enum Menu: String, Identifiable, CaseIterable {
-        case subtitles, audio, quality, speed, aspect
+    /// The centred track sheets. Each case's rows and keys come from its component file
+    /// (`sheetContent(_:)` / `sheetHandleKey(_:_:)` below dispatch to them).
+    enum Sheet: String, Identifiable, CaseIterable {
+        case subtitles, audio, quality, speed, aspect, style
         var id: String { rawValue }
-        var title: String {
-            switch self {
-            case .subtitles: return "Subtitles"
-            case .audio: return "Audio"
-            case .quality: return "Quality"
-            case .speed: return "Speed"
-            case .aspect: return "Aspect"
-            }
-        }
-        var icon: String {
-            switch self {
-            case .subtitles: return "captions.bubble"
-            case .audio: return "waveform"
-            case .quality: return "slider.horizontal.3"
-            case .speed: return "speedometer"
-            case .aspect: return "aspectratio"
-            }
-        }
     }
 
     weak var playback: PlaybackCoordinator?
 
-    @Published var visible = true
-    @Published var menu: Menu?
+    // MARK: Layers, in key priority (Android dispatchKey): delay pill > sheet > shortcuts > more > bar
+
+    @Published var subsDelayOpen = false { didSet { layersChanged() } }
+    @Published var sheet: Sheet? { didSet { layersChanged() } }
+    @Published var shortcutsOpen = false { didSet { layersChanged() } }
+    @Published var moreOpen = false { didSet { layersChanged() } }
+    /// The control bar.
+    @Published var visible = true { didSet { layersChanged() } }
+
+    /// Keyboard focus in the open sheet; hover moves the same index (OSDSheetView.onFocus).
     @Published var focusIndex = 0
     @Published var toast: String?
-    @Published var subtitleStyle: SubtitleStyle = .standard {
-        didSet { UserDefaults.standard.set(subtitleStyle.rawValue, forKey: Self.styleKey) }
-    }
 
-    // Loading / playback state surfaced for the spinner + auto-hide.
+    // Loading / playback state surfaced for the loaders and the auto-hide.
     @Published var buffering = false
     @Published var loaded = false
     @Published var showInfo = false
 
-    // Aspect: Fit/Fill via KSPlayer gravity; Zoom/Stretch via a SwiftUI scaleEffect.
-    @Published var isFill = false
-    @Published var zoom: Double = 1.0
-    @Published var stretch: Double = 1.0
+    // MARK: Component state, one struct per owning file (add fields there, not here)
 
-    @Published var subtitleScale: Double = UserDefaults.standard.object(forKey: "dobby.subScale") as? Double ?? 1.0 {
-        didSet { UserDefaults.standard.set(subtitleScale, forKey: "dobby.subScale") }
+    @Published var bar = ControlBarState()                   // ControlBar.swift (E2)
+    @Published var transport = TransportState()              // PlayerControls+Transport.swift (E2)
+    @Published var subtitleSheet = SubtitleSheetState()      // SubtitleSheet.swift (E3)
+    @Published var subStyle = SubtitleStyleSettings.load() { // StyleSheet.swift (E5)
+        didSet { subStyle.save() }
     }
-    @Published var subtitlePosition: Double = UserDefaults.standard.object(forKey: "dobby.subPos") as? Double ?? 40 {
-        didSet { UserDefaults.standard.set(subtitlePosition, forKey: "dobby.subPos") }
+    @Published var subsDelay = SubsDelayModel() {            // SubsDelayModel.swift (E6)
+        didSet { applySubsDelay() }                          // SubsDelayPill.swift
     }
-    @Published var subtitleDelay: Double = 0 {
-        didSet { playback?.player.subtitleModel.subtitleDelay = subtitleDelay }
-    }
+    @Published var aspect = AspectModel()                    // AspectModel.swift (E7)
+    @Published var more = MoreMenuState()                    // MoreMenu.swift (E9)
 
-    private static let styleKey = "dobby.subtitleStyle"
+    /// Every route the OSD reads its colours from: the payload's skin.
+    var tint: OsdTint { .forSkin(playback?.request?.skin) }
+
     // #129: true while the Slider is tracking a drag; blocks auto-hide re-arm mid-scrub.
     var scrubbing = false
     private var hideTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
-    private let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+    private var returnHoldTask: Task<Void, Never>?
+    private var lastState: KSPlayerState?
 
     #if os(macOS)
     weak var window: NSWindow?
-    var isFullscreen: Bool { window?.styleMask.contains(.fullScreen) ?? false }
     #endif
-
-    init() {
-        if let s = UserDefaults.standard.string(forKey: Self.styleKey),
-           let v = SubtitleStyle(rawValue: s) { subtitleStyle = v }
+    var isFullscreen: Bool {
+        #if os(macOS)
+        window?.styleMask.contains(.fullScreen) ?? false
+        #else
+        false
+        #endif
     }
 
     #if os(macOS)
@@ -116,21 +93,34 @@ final class PlayerControls: ObservableObject {
 
     var isPlaying: Bool { playback?.player.playerLayer?.state.isPlaying ?? false }
 
-    // MARK: Player state → spinner + auto-hide
+    // MARK: Player state → loaders + auto-hide
 
-    /// Driven from KSPlayer's onStateChanged. `.buffering`/`.preparing` mean loading
-    /// (spinner); first `.readyToPlay`/`.bufferFinished` marks the new video loaded and
-    /// applies the chosen aspect; any playing state (re)arms the idle auto-hide — the
-    /// readyToPlay→bufferFinished gap is why the OSD used to get stuck visible.
+    /// Driven from KSPlayer's onStateChanged. `.buffering`/`.preparing` mean loading;
+    /// first `.readyToPlay`/`.bufferFinished` marks the new video loaded and applies the
+    /// aspect. Android updatePlayPauseUi (:3529-3546): pausing never summons the bar but
+    /// stops its auto-hide; resuming hides a bar that was up at once (the 5 s timeout is
+    /// for bars summoned while playing). A rebuffer never moves `.paused` to playing, so
+    /// only a real resume counts.
     func syncState(_ s: KSPlayerState) {
         buffering = (s == .buffering || s == .preparing || s == .initialized)
         if s == .readyToPlay || s == .bufferFinished, !loaded { loaded = true; applyAspect() }
-        if s.isPlaying { scheduleHide() }
+        if s == .paused { hideTask?.cancel() }
+        if s.isPlaying, lastState == .paused, visible, !anyLayerOpen, !scrubbing {
+            hideTask?.cancel(); visible = false
+        } else if s.isPlaying {
+            scheduleHide()
+        }
+        lastState = s
     }
+
+    /// Called from KSPlayer's onPlay (about 10 Hz) with the playback position.
+    func playbackTick(current: TimeInterval) { subsDelayTick(current: current) }
 
     // MARK: Visibility
 
-    /// Reveal the OSD; auto-hide after idle only while playing (paused = sticky).
+    var anyLayerOpen: Bool { subsDelayOpen || sheet != nil || shortcutsOpen || moreOpen }
+
+    /// Reveal the bar; auto-hide after idle only while playing (paused = sticky).
     func wake() {
         visible = true
         scheduleHide()
@@ -138,9 +128,9 @@ final class PlayerControls: ObservableObject {
 
     func scheduleHide() {
         hideTask?.cancel()
-        guard menu == nil, !showInfo, isPlaying, !scrubbing else { return }   // keep visible if a menu/info is open, paused, or scrubbing (#129)
+        guard !anyLayerOpen, !showInfo, isPlaying, !scrubbing else { return }   // keep visible if a layer/info is open, paused, or scrubbing (#129)
         hideTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_000_000_000)   // Android CONTROL_BAR_AUTO_HIDE_MS
             guard !Task.isCancelled else { return }
             self?.visible = false
         }
@@ -148,211 +138,197 @@ final class PlayerControls: ObservableObject {
 
     func forceShow() { hideTask?.cancel(); visible = true }
 
-    /// Dismiss the OSD (and any open menu) immediately — first tap on the video.
+    /// Dismiss the OSD and every open layer immediately — first tap on the video.
     /// A tap landing outside the control bar during a drag would otherwise tear the Slider
     /// out from under the finger, and because `scrubbing` is cleared only by the Slider's release branch,
     /// a hide mid-drag could also strand the flag set for the life of the view.
-    func hide() { guard !scrubbing else { return }; hideTask?.cancel(); menu = nil; visible = false }
+    func hide() { guard !scrubbing else { return }; hideTask?.cancel(); closeAllLayers(); visible = false }
 
-    // MARK: Toast (web showVideoOsd equivalent)
+    /// The bar and every layer closed: Android resumeIfPausedByOk's trigger (MoreMenu.swift).
+    private func layersChanged() {
+        if !visible, !anyLayerOpen { onBarePicture() }
+    }
+
+    // MARK: Toast (web showVideoOsd equivalent, Android showOsd)
 
     func flash(_ msg: String) {
         toast = msg
         toastTask?.cancel()
         toastTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            try? await Task.sleep(nanoseconds: 1_400_000_000)   // Android OSD_HIDE_MS
             guard !Task.isCancelled else { return }
             self?.toast = nil
         }
     }
 
-    // MARK: Transport
+    // MARK: Layers: open / close
 
-    func togglePlay() {
-        playback?.togglePlayPause()
-        forceShow()
-        // After resuming, restart the idle hide.
-        if isPlaying { scheduleHide() }
-    }
-
-    func seekBy(_ delta: TimeInterval) {
-        guard let p = playback else { return }
-        let cur = TimeInterval(p.player.timemodel.currentTime)
-        let total = TimeInterval(p.player.timemodel.totalTime)
-        let t = min(max(0, cur + delta), max(0, total))
-        p.seek(to: t)
-        flash(delta >= 0 ? "⏩ +\(Int(delta))s" : "⏪ \(Int(delta))s")
-        wake()
-    }
-
-    func jump(fraction: Double) {
-        guard let p = playback else { return }
-        let total = TimeInterval(p.player.timemodel.totalTime)
-        seekBy(total * fraction)
-    }
-
-    // MARK: Aspect / Info
-
-    func applyAspect() { playback?.player.isScaleAspectFill = isFill }
-
-    func setAspect(fill: Bool, zoom z: Double, stretch s: Double) {
-        isFill = fill; zoom = z; stretch = s
-        applyAspect()
+    func openSheet(_ s: Sheet) {
+        sheet = s
+        focusIndex = sheetContent(s).rows.firstIndex { $0.selected } ?? 0
         forceShow()
     }
+
+    func toggleSheet(_ s: Sheet) { if sheet == s { closeSheet() } else { openSheet(s) } }
+
+    func closeSheet() { sheet = nil; scheduleHide() }
+
+    /// Hold Return or "?": the bar this press opened goes down first (so a Pause-on-OK pause
+    /// is undone, as on Android), then the card shows over the picture.
+    func toggleShortcuts() {
+        if shortcutsOpen { shortcutsOpen = false; scheduleHide(); return }
+        hide()
+        shortcutsOpen = true
+    }
+
+    /// Esc / the iOS edge swipe: close the topmost layer. False when none was open.
+    @discardableResult
+    func closeTopLayer() -> Bool {
+        if subsDelayOpen { subsDelayOpen = false }
+        else if sheet != nil { sheet = nil }
+        else if shortcutsOpen { shortcutsOpen = false }
+        else if moreOpen { moreOpen = false }
+        else { return false }
+        scheduleHide()
+        return true
+    }
+
+    private func closeAllLayers() { subsDelayOpen = false; sheet = nil; shortcutsOpen = false; moreOpen = false }
+
+    // MARK: Sheet dispatch (one case per component file)
+
+    func sheetContent(_ s: Sheet) -> OSDSheetContent {
+        switch s {
+        case .subtitles: return subtitleSheetContent()   // SubtitleSheet.swift (E3)
+        case .audio: return audioSheetContent()          // AudioSheet.swift (E4)
+        case .quality: return qualitySheetContent()      // QualitySheet.swift (E4)
+        case .speed: return speedSheetContent()          // MoreMenu.swift (E9)
+        case .aspect: return aspectSheetContent()        // AspectSheet.swift (E7)
+        case .style: return styleSheetContent()          // StyleSheet.swift (E5)
+        }
+    }
+
+    private func sheetHandleKey(_ s: Sheet, _ key: OSDKey) -> Bool {
+        switch s {
+        case .subtitles: return subtitleSheetHandleKey(key)
+        case .audio: return audioSheetHandleKey(key)
+        case .quality: return qualitySheetHandleKey(key)
+        case .speed: return speedSheetHandleKey(key)
+        case .aspect: return aspectSheetHandleKey(key)
+        case .style: return styleSheetHandleKey(key)
+        }
+    }
+
+    /// Row `idx` of the open sheet picked (Return or a click). Disabled rows do nothing.
+    func pickRow(_ idx: Int) {
+        guard let s = sheet else { return }
+        let rows = sheetContent(s).rows
+        guard rows.indices.contains(idx), rows[idx].enabled else { return }
+        focusIndex = idx
+        rows[idx].action()
+    }
+
+    /// The generic sheet keys, after the component's own handler declined: up/down move the
+    /// focus (wrapping), left/right adjust an arrow row or switch tabs, else left closes and
+    /// right picks (the pre-#466 side menu's keys), Return picks.
+    private func sheetNavigate(_ key: OSDKey) -> Bool {
+        guard let s = sheet else { return false }
+        let content = sheetContent(s)
+        let n = max(1, content.rows.count)
+        let focused = content.rows.indices.contains(focusIndex) ? content.rows[focusIndex] : nil
+        switch key {
+        case .up: focusIndex = (focusIndex - 1 + n) % n
+        case .down: focusIndex = (focusIndex + 1) % n
+        case .left, .right:
+            let d = key == .left ? -1 : 1
+            if let adjust = focused?.adjust, focused?.enabled == true { adjust(d) }
+            else if !content.tabs.isEmpty, let select = content.selectTab {
+                select((content.activeTab + d + content.tabs.count) % content.tabs.count)
+            } else if d < 0 { closeSheet() }
+            else { pickRow(focusIndex) }
+        case .ret: pickRow(focusIndex)
+        default: return false
+        }
+        return true
+    }
+
+    // MARK: Key router
+
+    /// keyDown from PlayerView's NSEvent monitor. True = handled (the event is swallowed).
+    /// Return repeats are swallowed: the press that is still down already acted (Android #452).
+    func keyDown(_ key: OSDKey, isRepeat: Bool) -> Bool {
+        if key == .ret, isRepeat { return true }
+        return route(key)
+    }
+
+    /// keyUp: only Return matters, it ends a hold that has not fired yet.
+    func keyUp(_ key: OSDKey) -> Bool {
+        guard key == .ret else { return false }
+        returnHoldTask?.cancel(); returnHoldTask = nil
+        return true
+    }
+
+    /// Top layer first. Each open layer's handler sees the key before the ones below it; a key
+    /// it returns false for falls through, ending at the bare picture (so Space, f and the
+    /// sheet letters keep working with a layer open, as before #466). Esc closes the top
+    /// layer when its handler did not take it.
+    func route(_ key: OSDKey) -> Bool {
+        if subsDelayOpen, subsDelayHandleKey(key) { return true }       // SubsDelayPill.swift (E6)
+        if let s = sheet, sheetHandleKey(s, key) || sheetNavigate(key) { return true }
+        if shortcutsOpen, shortcutsHandleKey(key) { return true }        // ShortcutsOverlay.swift (E9)
+        if moreOpen, moreMenuHandleKey(key) { return true }              // MoreMenu.swift (E9)
+        if key == .escape, closeTopLayer() { return true }
+        if visible, controlBarHandleKey(key) { return true }             // ControlBar.swift (E2)
+        return barePictureKey(key)
+    }
+
+    private func barePictureKey(_ key: OSDKey) -> Bool {
+        switch key {
+        case .space: togglePlay()                                        // Transport (E2)
+        case .left: seekKey(-1)
+        case .right: seekKey(1)
+        case .up: jumpKey(1)
+        case .down: jumpKey(-1)
+        case .ret: okPress(); armReturnHold()
+        case .escape:
+            if isFullscreen { toggleFullscreen() } else { playback?.stop() }
+        case .char("?"): toggleShortcuts()
+        case .char(","), .char("."), .char("/"): return subsDelayGlobalKey(key)   // SubsDelayPill.swift (E6)
+        case .char("b"): bookmark()
+        case .char("s"): toggleSheet(.subtitles)
+        case .char("a"): toggleSheet(.audio)
+        case .char("d"): toggleSheet(.speed)
+        case .char("q"): if !(playback?.qualityOptions.isEmpty ?? true) { toggleSheet(.quality) }
+        case .char("w"): toggleSheet(.aspect)
+        case .char("f"): toggleFullscreen()
+        case .char("i"): toggleInfo()
+        default: return false
+        }
+        return true
+    }
+
+    /// OK on the picture (Return on the bare picture or bar, a click on the picture): show or
+    /// hide the bar, Android handleSelectPress. Pause on OK (MoreMenu.swift) pauses first.
+    func okPress() {
+        if visible { hide() } else { pauseOnOkIfEnabled(); wake() }
+    }
+
+    /// Android SELECT_HOLD_MS: a Return held 550 ms opens the shortcuts card.
+    private func armReturnHold() {
+        returnHoldTask?.cancel()
+        returnHoldTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 550_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.returnHoldTask = nil
+            if !self.shortcutsOpen { self.toggleShortcuts() }
+        }
+    }
+
+    // MARK: Info (Mac extra)
 
     func toggleInfo() {
         showInfo.toggle()
         if showInfo { forceShow() } else { scheduleHide() }
-    }
-
-    // MARK: Menus
-
-    func toggleMenu(_ m: Menu) {
-        if menu == m { menu = nil } else { menu = m; focusIndex = selectedIndex(in: m) }
-        forceShow()
-    }
-
-    func closeMenu() { menu = nil; scheduleHide() }
-
-    /// Rows for the active menu, computed live from KSPlayer state.
-    func items(for m: Menu) -> [OSDItem] {
-        guard let p = playback else { return [] }
-        switch m {
-        case .subtitles:
-            var rows: [OSDItem] = [OSDItem(
-                id: "off",
-                label: "Off",
-                selected: p.player.subtitleModel.selectedSubtitleInfo == nil,
-                action: { [weak self] in
-                    p.player.subtitleModel.selectedSubtitleInfo = nil
-                    self?.flash("Subtitles off")
-                })]
-            for info in p.player.subtitleModel.subtitleInfos {
-                let sel = p.player.subtitleModel.selectedSubtitleInfo?.subtitleID == info.subtitleID
-                // Sideloaded subs (URLSubtitleInfo) carry a source-prefixed label from
-                // the web layer (Stremio -, Addic7ed -); mark in-container tracks so
-                // the two are distinguishable in the list.
-                let name = info is URLSubtitleInfo ? info.name : "Embedded - \(info.name)"
-                rows.append(OSDItem(id: info.subtitleID, label: name, selected: sel, action: { [weak self] in
-                    p.player.subtitleModel.selectedSubtitleInfo = info
-                    self?.flash("Subtitles: \(name)")
-                }))
-            }
-            // Online catalog (web-pushed a4k/Stremio/etc. results): pick-to-download.
-            // Already-attached ids are hidden — they show as regular rows above.
-            for entry in p.subtitleCatalog where !p.attachedCatalogIds.contains(entry.id) {
-                let name = entry.displayName
-                rows.append(OSDItem(id: "cat-\(entry.id)", label: "⬇ \(name)", detail: entry.lang,
-                                    selected: false, action: { [weak self] in
-                    p.requestCatalogSubtitle(id: entry.id)
-                    self?.flash("Loading: \(name)")
-                }))
-            }
-            // Style sub-section appended as toggle rows.
-            for style in SubtitleStyle.allCases {
-                rows.append(OSDItem(id: "style-\(style.rawValue)", label: "Style: \(style.label)",
-                                    selected: subtitleStyle == style, action: { [weak self] in
-                    self?.subtitleStyle = style
-                    self?.flash("Subtitle style: \(style.label)")
-                }))
-            }
-            // Size.
-            for (label, scale) in [("Small", 0.75), ("Normal", 1.0), ("Large", 1.4), ("Huge", 1.8)] {
-                rows.append(OSDItem(id: "size-\(scale)", label: "Size: \(label)",
-                                    selected: abs(subtitleScale - scale) < 0.01, action: { [weak self] in
-                    self?.subtitleScale = scale; self?.flash("Subtitle size: \(label)") }))
-            }
-            // Vertical position (extra points above the bottom).
-            for (label, off) in [("Lower", 0.0), ("Default", 40.0), ("Higher", 120.0), ("Top", 280.0)] {
-                rows.append(OSDItem(id: "pos-\(off)", label: "Position: \(label)",
-                                    selected: abs(subtitlePosition - off) < 0.5, action: { [weak self] in
-                    self?.subtitlePosition = off; self?.flash("Subtitle position: \(label)") }))
-            }
-            // Delay alignment.
-            for d in [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
-                let lbl = d == 0 ? "Delay: 0s" : String(format: "Delay: %+.1fs", d)
-                rows.append(OSDItem(id: "delay-\(d)", label: lbl,
-                                    selected: abs(subtitleDelay - d) < 0.01, action: { [weak self] in
-                    self?.subtitleDelay = d; self?.flash(lbl) }))
-            }
-            return rows
-        case .audio:
-            let tracks = p.player.playerLayer?.player.tracks(mediaType: .audio) ?? []
-            if tracks.isEmpty { return [OSDItem(id: "none", label: "No audio tracks", selected: false, enabled: false, action: {})] }
-            return tracks.enumerated().map { idx, t in
-                OSDItem(id: "a\(idx)", label: t.name, detail: t.languageCode, selected: t.isEnabled, action: { [weak self] in
-                    p.player.playerLayer?.player.select(track: t)
-                    self?.flash("Audio: \(t.name)")
-                })
-            }
-        case .quality:
-            let options = p.qualityOptions
-            guard !options.isEmpty else {
-                // HLS lane: AVPlayer's ABR picks renditions itself.
-                return [OSDItem(id: "auto", label: "Auto (adaptive)", selected: true, enabled: false, action: {})]
-            }
-            return options.enumerated().map { idx, opt in
-                let label = opt.label ?? opt.height.map { "\($0)p" } ?? "Option \(idx + 1)"
-                return OSDItem(
-                    id: "q\(idx)",
-                    label: label,
-                    selected: opt.videoUrl != nil && opt.videoUrl == p.currentVideoUrl,
-                    action: { [weak self] in
-                        p.selectQuality(opt)
-                        self?.flash("Quality: \(label)")
-                    })
-            }
-        case .speed:
-            return speeds.map { s in
-                OSDItem(id: "s\(s)", label: s == 1.0 ? "Normal" : "\(trimRate(s))×",
-                        selected: abs(p.player.playbackRate - s) < 0.01, action: { [weak self] in
-                    p.player.playbackRate = s
-                    self?.flash("Speed: \(s == 1.0 ? "Normal" : "\(self?.trimRate(s) ?? "")×")")
-                })
-            }
-        case .aspect:
-            let plain = !isFill && zoom == 1 && stretch == 1
-            var rows: [OSDItem] = [
-                OSDItem(id: "fit", label: "Fit", selected: plain, action: { [weak self] in
-                    self?.setAspect(fill: false, zoom: 1, stretch: 1); self?.flash("Aspect: Fit") }),
-                OSDItem(id: "fill", label: "Fill (crop)", selected: isFill, action: { [weak self] in
-                    self?.setAspect(fill: true, zoom: 1, stretch: 1); self?.flash("Aspect: Fill") }),
-            ]
-            for pct in [5, 10, 15, 20] {
-                let z = 1 + Double(pct) / 100
-                rows.append(OSDItem(id: "zoom\(pct)", label: "Zoom +\(pct)%",
-                                    selected: !isFill && abs(zoom - z) < 0.001 && stretch == 1, action: { [weak self] in
-                    self?.setAspect(fill: false, zoom: z, stretch: 1); self?.flash("Zoom +\(pct)%") }))
-            }
-            for pct in [5, 10, 15, 20] {
-                let s = 1 + Double(pct) / 100
-                rows.append(OSDItem(id: "stretch\(pct)", label: "Stretch +\(pct)%",
-                                    selected: !isFill && abs(stretch - s) < 0.001 && zoom == 1, action: { [weak self] in
-                    self?.setAspect(fill: false, zoom: 1, stretch: s); self?.flash("Stretch +\(pct)%") }))
-            }
-            return rows
-        }
-    }
-
-    private func selectedIndex(in m: Menu) -> Int {
-        items(for: m).firstIndex { $0.selected } ?? 0
-    }
-
-    private func trimRate(_ s: Float) -> String {
-        let str = String(format: "%.2f", s)
-        return str.replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
-    }
-
-    // MARK: Keyboard nav within the active menu
-
-    func navUp() { guard let m = menu else { return }; let n = items(for: m).count; focusIndex = (focusIndex - 1 + n) % max(1, n) }
-    func navDown() { guard let m = menu else { return }; let n = items(for: m).count; focusIndex = (focusIndex + 1) % max(1, n) }
-    func activateFocused() {
-        guard let m = menu else { return }
-        let rows = items(for: m)
-        guard rows.indices.contains(focusIndex), rows[focusIndex].enabled else { return }
-        rows[focusIndex].action()
     }
 
     // MARK: Fullscreen
