@@ -279,7 +279,7 @@ final class PlayerControls: ObservableObject {
         if shortcutsOpen, shortcutsHandleKey(key) { return true }        // ShortcutsOverlay.swift (E9)
         if moreOpen, moreMenuHandleKey(key) { return true }              // MoreMenu.swift (E9)
         if key == .escape, closeTopLayer() { return true }
-        if visible, controlBarHandleKey(key) { return true }             // ControlBar.swift (E2)
+        if visible, loaded, controlBarHandleKey(key) { return true }             // ControlBar.swift (E2)
         return barePictureKey(key)
     }
 

@@ -6,12 +6,10 @@ import Foundation
 // Tests/TrackPreferenceCheck.swift.
 enum TrackPreference {
     /// Track tag to a two-letter code: "en-US" / "eng" / "ger" -> "en" / "en" / "de".
-    /// nil for empty and "und". Matroska tags are ISO 639-2/B, which Foundation does not map.
+    /// nil for empty and "und". The shared table maps ISO 639-2/B (Matroska), Foundation the rest.
     static func normalize(_ raw: String?) -> String? {
-        let code = (raw ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-        if code.isEmpty || code == "und" { return nil }
-        let t = bibliographic[code] ?? code
-        return Locale.Language(identifier: t).languageCode?.identifier(.alpha2) ?? t
+        guard let code = LanguageCodes.normalize(raw) else { return nil }
+        return Locale.Language(identifier: code).languageCode?.identifier(.alpha2) ?? code
     }
 
     /// Android languagePriority: the comma list in order, then the device language, then "en".
@@ -33,10 +31,4 @@ enum TrackPreference {
         return nil
     }
 
-    private static let bibliographic = [
-        "alb": "sqi", "arm": "hye", "baq": "eus", "bur": "mya", "chi": "zho", "cze": "ces",
-        "dut": "nld", "fre": "fra", "geo": "kat", "ger": "deu", "gre": "ell", "ice": "isl",
-        "mac": "mkd", "mao": "mri", "may": "msa", "per": "fas", "rum": "ron", "slo": "slk",
-        "tib": "bod", "wel": "cym",
-    ]
 }

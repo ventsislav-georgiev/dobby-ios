@@ -43,6 +43,15 @@ struct AspectModel: Equatable {
 
     var videoAspect: Double { videoWidth > 0 && videoHeight > 0 ? videoWidth / videoHeight : 0 }
 
+    /// #477 letterbox sampler session (Android letterboxSampler*): `token` names the running
+    /// sampler (0 = never started), `applied` the percent it put on screen (Android
+    /// letterboxAppliedIndex; nil = not yet), the bars are the minimum across accepted samples.
+    var lbToken = 0
+    var lbDone = false
+    var lbRounds = 0, lbAccepted = 0
+    var lbMinTop = Int.max, lbMinBottom = Int.max
+    var lbApplied: Int?
+
     // MARK: Transform (Android applyAspectAdjust: scaleX = stretchH x zoom, scaleY = stretchV x zoom)
 
     /// Scale about the centre and the vertical offset in points, for a video view of w x h.
@@ -166,9 +175,72 @@ struct AspectModel: Equatable {
             return .none
         }
         guard autoNeed > 0 else { return .runStartPaths }
-        stretchV = Self.pickStretch(videoAspect: autoNeed, screenAspect: 1, level: autoLevel)
+        let p = Self.pickStretch(videoAspect: autoNeed, screenAspect: 1, level: autoLevel)
+        // The sampler owns the fill unless the metadata pass or a restored row applied it.
+        if lbApplied != nil || !autoApplied {
+            if lbApplied == nil && p == 100 { return .none }   // measured, no fill: a fresh play applies nothing
+            lbApplied = p                                     // later samples correct down from here
+        }
+        stretchV = p
         stretchFromAuto = true; autoApplied = true
         return .remember
+    }
+
+    // MARK: Letterbox sampler (#477, Android startLetterboxSamplerIfNeeded / onLetterboxSampleResult)
+
+    /// Starts the sampler session once per playback; false when it must not run: already started,
+    /// a manual knob, Off, or the metadata pass / a restored row already filled the screen.
+    mutating func startLetterbox(token: Int) -> Bool {
+        guard lbToken == 0, !userAdjusted, autoLevel != 0, !(lbApplied == nil && autoApplied) else { return false }
+        lbToken = token
+        return true
+    }
+
+    enum LetterboxOutcome: Equatable {
+        case none
+        case applied(Int, fills: Double)   // first fill: remember an auto row, toast
+        case corrected(Int)                // a later sample proved the bars smaller: remember, toast
+        case noFill                        // finished, frames seen, no bars worth a stretch: remember 100
+    }
+
+    /// Android onLetterboxSampleResult + finishLetterboxRoundOrGiveUp: fold one sample (nil = an
+    /// unreliable or unavailable frame) into the minimum bars, pick from the bar-corrected aspect,
+    /// apply on the first sample with bars, then only ever correct downward. At Off it keeps
+    /// measuring (autoNeed) but applies and remembers nothing (#275).
+    mutating func foldLetterbox(_ bars: (top: Int, bottom: Int)?, screenAspect: Double) -> LetterboxOutcome {
+        guard !lbDone else { return .none }
+        if userAdjusted || (lbApplied == nil && autoApplied) { lbDone = true; return .none }
+        lbRounds += 1
+        var out = LetterboxOutcome.none
+        if let bars {
+            lbAccepted += 1
+            lbMinTop = min(lbMinTop, bars.top); lbMinBottom = min(lbMinBottom, bars.bottom)
+            let barRows = lbMinTop + lbMinBottom
+            var target = 100, effective = 0.0
+            if barRows >= Letterbox.minBarRows, videoAspect > 0, screenAspect > 0 {
+                effective = videoAspect * Double(Letterbox.sampleH) / Double(Letterbox.sampleH - barRows)
+                target = Self.pickStretch(videoAspect: effective, screenAspect: screenAspect, level: autoLevel)
+                autoNeed = effective / screenAspect
+            } else if barRows < Letterbox.minBarRows, videoAspect > 0 {
+                autoNeed = 1
+            }
+            if autoLevel != 0 {
+                if lbApplied == nil {
+                    if target != 100 {
+                        lbApplied = target; stretchV = target; stretchFromAuto = true; autoApplied = true
+                        out = .applied(target, fills: effective)
+                    }
+                } else if let applied = lbApplied, target < applied {
+                    lbApplied = target; stretchV = target; stretchFromAuto = true
+                    out = .corrected(target)
+                }
+            }
+        }
+        if lbAccepted >= Letterbox.maxAccepted || lbRounds >= Letterbox.maxRounds {
+            lbDone = true
+            if lbApplied == nil && lbAccepted >= 1 && autoLevel != 0 { out = .noFill }
+        }
+        return out
     }
 
     // MARK: Per-title memory restore
@@ -189,6 +261,46 @@ struct AspectModel: Equatable {
             autoNeed = row.n ?? Double(p) / 100
         }
         return (knob, p)
+    }
+}
+
+/// Android LetterboxDetector and the sampler's constants: a 128 x 216 downscale of the frame,
+/// one luma (max of R, G, B) per sample.
+enum Letterbox {
+    static let sampleW = 128, sampleH = 216
+    static let minBarRows = 12          // thinner bar estimates are ignored (5.5 % of the height)
+    static let barMaxLuma = 28, contentMinLuma = 60
+    static let maxRounds = 20, maxAccepted = 5
+    /// Dirty encoder rows at the bar edge that belong to the bar; more is a dark scene fading out.
+    static let maxBoundaryRows = 2
+
+    /// Bars at the top and bottom in rows, nil when the frame cannot say: too dark overall, the
+    /// picture fades into a bar, the bars are lopsided (diff over a quarter) or cover half the frame.
+    static func detectBars(_ luma: [UInt8], width: Int, height: Int) -> (top: Int, bottom: Int)? {
+        guard width > 0, height > 0, luma.count >= width * height else { return nil }
+        let rowMax = (0..<height).map { y in Int(luma[y * width..<(y + 1) * width].max() ?? 0) }
+        var top = 0
+        while top < height && rowMax[top] <= barMaxLuma { top += 1 }
+        var bottom = 0
+        while bottom < height && rowMax[height - 1 - bottom] <= barMaxLuma { bottom += 1 }
+        guard top < height - bottom, rowMax[top..<(height - bottom)].contains(where: { $0 >= contentMinLuma }) else { return nil }
+        if top == 0 && bottom == 0 { return (0, 0) }
+
+        func absorb(_ run: Int, fromTop: Bool) -> Int? {
+            var grown = run
+            for _ in 0...maxBoundaryRows {
+                let y = fromTop ? grown : height - 1 - grown
+                guard y >= 0, y < height else { return nil }
+                if rowMax[y] >= contentMinLuma { return grown }
+                grown += 1
+            }
+            return nil
+        }
+        guard let t = absorb(top, fromTop: true), let b = absorb(bottom, fromTop: false) else { return nil }
+        let big = max(t, b)
+        if big > 0 && abs(t - b) > big / 4 { return nil }
+        if t + b >= height / 2 { return nil }
+        return (t, b)
     }
 }
 

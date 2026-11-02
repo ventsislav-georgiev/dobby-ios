@@ -13,11 +13,12 @@ import sys
 
 def strip_js(js):
     js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
-    return "\n".join(re.sub(r"//.*", "", l) for l in js.splitlines())
+    # (?<!\\): a regex literal ending in an escaped slash (/Dobby\//) is not a comment start.
+    return "\n".join(re.sub(r"(?<!\\)//.*", "", l) for l in js.splitlines())
 
 
-_PROBE = "a: 1,\n/*\nb: 2,\n*/\nc: 3, // d: 4\n/* e */ f: 5,\n"
-_WANT = "a: 1,\n\nc: 3, \n f: 5,"
+_PROBE = "a: 1,\n/*\nb: 2,\n*/\nc: 3, // d: 4\n/* e */ f: 5,\ng = /x\\//.test(h); // i\n"
+_WANT = "a: 1,\n\nc: 3, \n f: 5,\ng = /x\\//.test(h); "
 if strip_js(_PROBE) != _WANT:
     sys.stderr.write("FAIL: the JS comment stripper is broken: %r (#194 js_strip)\n" % strip_js(_PROBE))
     sys.exit(1)

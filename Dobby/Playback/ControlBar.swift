@@ -88,7 +88,7 @@ extension PlayerView {
     /// raises Android's "Loading m:ss" toast on a rebuffer after the first frame.
     var controlBarLayer: some View {
         ZStack {
-            if controls.visible {
+            if controls.visible && controls.loaded {
                 VStack { Spacer(); controlBar }.transition(.opacity)
             } else if controls.transport.pillShown {
                 VStack { Spacer(); seekPill }.transition(.opacity).allowsHitTesting(false)

@@ -279,7 +279,7 @@ xcrun swiftc -o "$OUT5" \
 # entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
 for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference A4kRouting; do
   OUTP="$(mktemp -d)/$PURE-check"
-  xcrun swiftc -o "$OUTP" "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
+  xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
 done
 
@@ -2518,6 +2518,8 @@ PWA_CALLS_NOT_DECLARED = {
                            "installed before #158 would silently lose book removal. Drop the "
                            "else-branch there and this entry together once every installed "
                            "build carries removeNativeOffline.",
+    "a4k": "#484: the PWA reads window.Dobby.a4k (a flag, not a call) to send the a4k lanes to "
+           "dobby-api://. #483 declares it in BridgeInjection.swift; drop this entry with it.",
 }
 
 def read(path):
@@ -3516,7 +3518,7 @@ for l in body[1:g]:
         fail("playStreamUrl: %r runs before the #200 guard" % l.strip())
 if depth != 0:
     fail("the #200 guard is nested inside a block of playStreamUrl; it must sit at its top level")
-for reader in ["dobbyTvNative.tryDispatch(url", "modal.classList.add('active');", "  if (isOfflineVideoUrl(url)) {"]:
+for reader in ["dobbyTvNative.tryDispatch(url", "showWindow(modal, 'player');", "  if (isOfflineVideoUrl(url)) {"]:
     hits = [i for i, l in enumerate(body) if reader in l]
     if not hits or hits[0] < g:
         fail("playStreamUrl: %r must come after the #200 guard (found at %s, guard at %d)" % (reader, hits, g))
