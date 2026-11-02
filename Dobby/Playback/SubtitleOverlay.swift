@@ -7,10 +7,12 @@ import KSPlayer
 extension PlayerView {
     /// Always in the tree (PlayerView places it above the picture, below the OSD).
     var subtitleOverlay: some View {
-        SubtitleOverlayView(parts: subtitles.parts, style: controls.subStyle,
-                            barVisible: controls.visible,
-                            canvas: playback.player.playerLayer?.player.naturalSize ?? .zero)
-            .animation(.easeInOut(duration: 0.18), value: controls.visible)
+        // While the bar shows, a cue sits above it (the pre-#470 120 pt, more for a two-row bar),
+        // and above the pause cards when they show (#496: their 80 % panel let a cue show through).
+        let minLift: CGFloat = !controls.visible ? 0 : pauseCardsShown ? pauseCardsCover + 8 : max(120, barCover + 6)
+        return SubtitleOverlayView(parts: subtitles.parts, style: controls.subStyle, minLift: minLift,
+                                   canvas: playback.player.playerLayer?.player.naturalSize ?? .zero)
+            .animation(.easeInOut(duration: 0.18), value: minLift)
             .allowsHitTesting(false)
     }
 }
@@ -22,7 +24,8 @@ extension PlayerView {
 struct SubtitleOverlayView: View {
     let parts: [SubtitlePart]
     let style: SubtitleStyleSettings
-    let barVisible: Bool
+    /// The least lift for text cues: clear of the bar and the pause cards while they show.
+    let minLift: CGFloat
     /// The video's natural size, the image cues' canvas (.zero = unknown).
     let canvas: CGSize
 
@@ -47,8 +50,7 @@ struct SubtitleOverlayView: View {
                 // Android sizes from the height of a landscape screen; a portrait phone's
                 // equivalent is its width, or a 5 % cue would fill the screen.
                 let size = min(h, geo.size.width) * style.sizeFraction
-                // While the bar shows, never under it (the pre-#470 overlay's 120 pt lift).
-                let lift = max(h * style.positionFraction, barVisible ? 120 : 0)
+                let lift = max(h * style.positionFraction, minLift)
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
                     VStack(spacing: size * 0.15) {

@@ -50,6 +50,7 @@ struct PlayNativePayload: Decodable {
     /// throws, so an odd `video` can never cost the whole payload (and with it playback).
     struct VideoMeta: Decodable {
         let imdbId: String?
+        let title: String?              // the film's name (pause card, #496)
         let type: String?
         let season: String?
         let episode: String?
@@ -69,7 +70,7 @@ struct PlayNativePayload: Decodable {
                 if let i = try? c.decode(Int.self, forKey: Key(stringValue: k)) { return String(i) }
                 return nil
             }
-            imdbId = str("imdbId"); type = str("type"); season = str("season"); episode = str("episode")
+            imdbId = str("imdbId"); title = str("title"); type = str("type"); season = str("season"); episode = str("episode")
         }
     }
 

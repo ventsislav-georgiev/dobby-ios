@@ -89,7 +89,11 @@ extension PlayerView {
     var controlBarLayer: some View {
         ZStack {
             if controls.visible && controls.loaded {
-                VStack { Spacer(); controlBar }.transition(.opacity)
+                VStack {
+                    Spacer()
+                    controlBar.onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in barCover = h }
+                }
+                .transition(.opacity)
             } else if controls.transport.pillShown {
                 VStack { Spacer(); seekPill }.transition(.opacity).allowsHitTesting(false)
             }
@@ -182,24 +186,30 @@ extension PlayerView {
         }
     }
 
-    /// The tiles, scrolled sideways when they do not fit (iPhone portrait, a narrow window);
-    /// the lit tile scrolls into view (Android scrollFocusedControlIntoView).
+    /// The tiles in one row where they fit; else two rows of equal tiles (iPhone portrait, a
+    /// narrow window), so every tile stays on screen (#496: a sideways scroll hid the tail).
     private var tileRow: some View {
-        let row = HStack(spacing: 4) { ForEach(controls.barTiles, id: \.self) { tile($0) } }
+        let tiles = controls.barTiles
+        let half = (tiles.count + 1) / 2
         return ViewThatFits(in: .horizontal) {
-            row
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) { row }
-                    .onChange(of: controls.bar.focus) { f in withAnimation { proxy.scrollTo(f) } }
+            HStack(spacing: 4) { ForEach(tiles, id: \.self) { tile($0) } }
+            VStack(spacing: 4) {
+                ForEach([Array(tiles[..<half]), Array(tiles[half...])], id: \.self) { line in
+                    HStack(spacing: 4) {
+                        ForEach(line, id: \.self) { tile($0, fill: true) }
+                        // The short row keeps the long row's tile width.
+                        ForEach(line.count..<half, id: \.self) { _ in Color.clear.frame(maxWidth: .infinity, maxHeight: 0) }
+                    }
+                }
             }
         }
     }
 
     /// A tile button; the pointer lights the tile it is on (macOS).
-    private func tile(_ t: BarTile) -> some View {
+    private func tile(_ t: BarTile, fill: Bool = false) -> some View {
         Button { controls.pressTile(t) } label: {
             BarTileFace(glyph: t == .play && isPlaying ? BarTile.pauseGlyph : t.glyph, caption: t.caption,
-                        lit: controls.bar.lit && controls.bar.focus == t, tint: controls.tint)
+                        lit: controls.bar.lit && controls.bar.focus == t, tint: controls.tint, fill: fill)
         }
         .buttonStyle(.plain)
         #if os(macOS)
@@ -381,6 +391,8 @@ struct BarTileFace: View {
     let caption: String
     let lit: Bool
     let tint: OsdTint
+    /// Two-row bar (#496): share the row's width equally instead of the 80 pt minimum.
+    var fill = false
 
     var body: some View {
         VStack(spacing: 2) {
@@ -390,10 +402,11 @@ struct BarTileFace: View {
             Text(caption)
                 .font(.system(size: 10))
                 .foregroundStyle(lit ? tint.onAccent.opacity(0.9) : tint.text(0xCC))
+                .minimumScaleFactor(fill ? 0.75 : 1)
         }
         .lineLimit(1)
         .padding(.horizontal, 5).padding(.vertical, 4)
-        .frame(minWidth: 80)
+        .frame(minWidth: fill ? 44 : 80, maxWidth: fill ? .infinity : nil)
         .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(lit ? tint.accent : tint.row))
         .contentShape(Rectangle())
     }
