@@ -244,21 +244,33 @@ final class OfflineStore: NSObject, ObservableObject {
     static let coverFile = "cover"
     private static let pathSegment = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
+    /// #502: cancelling a replacement download (a video whose entry already has its finished file,
+    /// the only place `path` is set) stops the transfer and keeps that earlier copy: folder, entry,
+    /// status complete. The transfer's partial lives in the session's temp file, not in the folder.
+    func cancel(_ id: String) { remove(id, keepFinished: true) }
+
+    func delete(_ id: String) { remove(id, keepFinished: false) }
+
     /// #243: the kind is read before the entry goes, so a failed save's error event still
     /// reaches the page's book handler. An id outside Offline (".", "..") is refused whole.
-    func cancel(_ id: String) {
+    private func remove(_ id: String, keepFinished: Bool) {
         guard let dir = contained(id) else { NSLog("Dobby offline: cancel refused, id outside Offline"); return }
         let kind = index[id]?.kind
         for (key, t) in tasks where key.hasSuffix("\t\(id)") || key.contains("\t\(id)\t") {
             t.cancel(); tasks[key] = nil
         }
-        try? FileManager.default.removeItem(at: dir)
-        index[id] = nil
-        saveIndex(id, kind: kind)
+        if keepFinished, var e = index[id], kind == "video", let path = e.path,
+           FileManager.default.fileExists(atPath: anchored(path)) {
+            e.status = "complete"
+            index[id] = e
+            saveIndex(id)
+        } else {
+            try? FileManager.default.removeItem(at: dir)
+            index[id] = nil
+            saveIndex(id, kind: kind)
+        }
         emit(id, status: "cancelled", bytes: 0, total: 0)
     }
-
-    func delete(_ id: String) { cancel(id) }
 
     /// Full index as a JSON string (array form for `listNativeOffline`).
     func indexJSON() -> String {
