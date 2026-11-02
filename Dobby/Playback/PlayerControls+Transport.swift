@@ -17,6 +17,7 @@ struct TransportState {
 extension PlayerControls {
     /// Space, the bar's play tile. Android togglePlay: "Playing" / "Paused".
     func togglePlay() {
+        more.cancelPausedByOk()   // #474: the user chose the play state (Android togglePlay :7200)
         let pausing = isPlaying
         playback?.togglePlayPause()
         flash(pausing ? "Paused" : "Playing")
