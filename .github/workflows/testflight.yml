@@ -275,6 +275,22 @@ jobs:
             fi
           done <<< "$fonts"
 
+      # #485: scripts/copy-python.sh embeds the a4k Python tree from the dobby checkout
+      # above (scripts/python there). It only warns without one, so local builds without
+      # the private repo still work; a TestFlight build must carry it. Prints no paths or
+      # file names from the tree, only counts.
+      - name: Verify the a4k Python tree was bundled
+        run: |
+          app="build/Dobby.xcarchive/Products/Applications/Dobby.app"
+          for f in python/app/a4k_search.py python/app/a4k_subs.py python/app/a4kSubtitles/search.py; do
+            if [ ! -s "$app/$f" ]; then
+              echo "::error::The archive carries no embedded a4k tree (copy-python.sh, #485): check the dobby checkout step." >&2
+              exit 1
+            fi
+          done
+          [ -d "$app/Frameworks/Python.framework" ] || { echo "::error::No Python.framework in the archive (#482)." >&2; exit 1; }
+          echo "a4k tree bundled: $(find "$app/python/app" -name '*.py' | wc -l | tr -d ' ') .py files"
+
       - name: Export .ipa
         run: |
           cat > "$RUNNER_TEMP/export.plist" <<PLIST
