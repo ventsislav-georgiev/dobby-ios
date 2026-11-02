@@ -25,8 +25,8 @@ import os
 enum ServerAddresses {
     private static let listKey = "dobby.serverAddresses"
     private static let lastGoodKey = "dobby.serverAddresses.lastGood"
-    /// #181: the "Use a Pi server" setting. Absent until the user answers it, which is
-    /// the third input to `piEnabled(explicitlySet:explicitValue:hasLastGood:)`.
+    /// #181: the "Use a Pi server" setting. Absent until the user answers it, which reads
+    /// as off since #479 (`piEnabled`).
     private static let piEnabledKey = "dobby.piEnabled"
     private static let logger = Logger(subsystem: "eu.illegible.dobbyios", category: "ServerAddresses")
 
@@ -89,8 +89,8 @@ enum ServerAddresses {
 
     /// Probe order: last known-good, then the configured list, then the baked default.
     /// #245: on iOS an entry the platform cannot use is skipped here, not cleared: a last
-    /// known-good stored before the guard stays on disk (it is also what `piEnabled` reads for
-    /// an unanswered device), it just is never probed first on an origin WebKit would cripple.
+    /// known-good stored before the guard stays on disk (the bundled shell's origin when it is
+    /// app-bound), it just is never probed first on an origin WebKit would cripple.
     static func candidates(_ defaults: UserDefaults = .standard, rule: AppBound = .current) -> [URL] {
         var out: [URL] = []
         append(&out, defaults.string(forKey: lastGoodKey))
@@ -131,22 +131,15 @@ enum ServerAddresses {
         defaults.set(addresses.map(\.absoluteString), forKey: listKey)
     }
 
-    /// #181: whether this device uses a Pi at all — Android's `ServerAddresses.piEnabled`
-    /// (dobby-android/.../ServerAddresses.java:170-187), same rule, same persistence shape.
-    /// An explicit answer always wins, both ways. Until there is one, the Pi counts as
-    /// enabled only when this device has reached one before (a last known-good origin
-    /// exists): a fresh install is Pi-less, a device already paired keeps its Pi, and an
-    /// explicit off is never re-enabled by the origin still sitting in `lastGoodKey`.
+    /// #181: whether this device uses a Pi at all. #479: only an explicit "on" in Settings
+    /// turns it on. Android also turns it on for a box that once reached a Pi (a last
+    /// known-good origin exists); the Apple apps no longer do, because the owner retired the
+    /// Pi and a phone that paired once kept probing it and landed on "Can't reach Dobby"
+    /// at every launch. `lastGoodKey` and the address list are untouched either way: the
+    /// bundled shell still comes up on that origin (its localStorage and IndexedDB), and
+    /// turning the Pi on finds it where it was.
     static func piEnabled(_ defaults: UserDefaults = .standard) -> Bool {
-        piEnabled(explicitlySet: defaults.object(forKey: piEnabledKey) != nil,
-                  explicitValue: defaults.bool(forKey: piEnabledKey),
-                  hasLastGood: defaults.string(forKey: lastGoodKey) != nil)
-    }
-
-    /// The rule with the defaults read taken out, so the truth table is checkable
-    /// (Tests/ServerAddressesCheck.swift).
-    static func piEnabled(explicitlySet: Bool, explicitValue: Bool, hasLastGood: Bool) -> Bool {
-        explicitlySet ? explicitValue : hasLastGood
+        defaults.bool(forKey: piEnabledKey)
     }
 
     /// #217: whether a URL the app would fetch natively points at the Pi. Its host, compared

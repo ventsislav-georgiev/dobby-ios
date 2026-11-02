@@ -59,6 +59,16 @@ enum BundledShellCheck {
         check(!rewritten.lowercased().contains("<base "),
               "the rewrite does not inject a <base> element (it would rebase /api/… and document.baseURI)")
 
+        // #479: the page builds its skin URLs in JS (index.html's dobbySkinSheet, js/26-skins.js), which no
+        // attribute rewrite reaches; it prefixes them with <html data-shell-base>, written here exactly once.
+        check(!raw.contains("data-shell-base=\"") && raw.contains("<html lang=\"en\">"),
+              "the shipped index.html opens with <html lang=\"en\"> and names no shell base itself")
+        check(rewritten.components(separatedBy: "data-shell-base=\"").count - 1 == 1
+              && rewritten.contains("<html data-shell-base=\"\(base)\" lang=\"en\">"),
+              "the rewrite names \(base) on <html> once, for the URLs the page builds itself (#479)")
+        check(raw.contains("document.documentElement.getAttribute('data-shell-base')"),
+              "the shipped head script reads data-shell-base (the PWA half of #479); without it the skin falls back to Simple")
+
         // The scheme+host in the markup are the SAME symbols the handler routes on, not a
         // second literal. Pin the literal too, so renaming either end is a deliberate act.
         check(base == "dobby-offline://shell", "sub-resources are addressed on dobby-offline://shell")

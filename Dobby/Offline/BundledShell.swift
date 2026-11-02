@@ -74,8 +74,16 @@ enum BundledShell {
             else { continue }
             out.insert(base, at: match.range(at: 2).location)
         }
+        // #479: the URLs the page builds in JS (the skin sheets and manifests, js/26-skins.js)
+        // are not attributes this rewrite can reach, so the page is told where its files live
+        // and prefixes them itself (index.html's dobbySkinSheet reads the same attribute).
+        if let html = htmlTag.firstMatch(in: out as String, range: NSRange(location: 0, length: out.length)) {
+            out.insert(" data-shell-base=\"\(base)\"", at: html.range.location + html.range.length)
+        }
         return out as String
     }
+
+    private static let htmlTag = try! NSRegularExpression(pattern: #"<html\b"#, options: .caseInsensitive)
 
     /// `src="/path"` or `href="/path"`, path captured without its `?query` / `#fragment`.
     /// `//host/…` is protocol-relative, not a shell path, so the path may not start with `/`.
