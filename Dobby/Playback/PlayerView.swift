@@ -34,6 +34,9 @@ struct PlayerView: View {
     /// touch? Separates "the release was delivered normally" from "the touch never became
     /// a drag" in the log, so those two never share one signature.
     @State var sliderDidBegin = false
+    /// How far up from the bottom the bar, and the pause cards over it, reach (#496 cue lift).
+    @State var barCover: CGFloat = 0
+    @State var pauseCardsCover: CGFloat = 0
 
     static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
     #if os(macOS)
