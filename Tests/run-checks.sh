@@ -587,8 +587,8 @@ PY
 # it needs AppKit and a host that can start a web content process.
 if [ "$(uname -s)" = "Darwin" ]; then
   OUT4="$(mktemp -d)/api-scheme-webview-check"
-  # Embed a minimal Info.plist carrying the same WKAppBoundDomains entry the app
-  # ships (Dobby/Info.plist), so isAppBound(server) in the check evaluates true
+  # Embed a minimal Info.plist carrying a WKAppBoundDomains entry the way the app
+  # ships one (Dobby/Info.plist, host injected at build time, #491; a placeholder here), so isAppBound(server) in the check evaluates true
   # exactly as it does for the Mac app — App-Bound Domains is the one thing that
   # changes what WebKit permits, and a check that ran with it off could be green
   # while the app stayed broken (reviewer Mutant F).
@@ -600,7 +600,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
 <dict>
 	<key>WKAppBoundDomains</key>
 	<array>
-		<string>solarflare-tarpon.ts.net</string>
+		<string>pi.example.ts.net</string>
 	</array>
 </dict>
 </plist>

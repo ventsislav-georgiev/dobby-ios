@@ -76,8 +76,8 @@ enum ServerAddressesCheck {
     static func normalization() {
         check(ServerAddresses.normalize("192.0.2.31:8080")?.absoluteString == "http://192.0.2.31:8080",
               "bare host:port is treated as a LAN box over http")
-        check(ServerAddresses.normalize("https://dobby.solarflare-tarpon.ts.net")?.absoluteString
-              == "https://dobby.solarflare-tarpon.ts.net", "an explicit https origin round-trips")
+        check(ServerAddresses.normalize("https://pi.example.ts.net")?.absoluteString
+              == "https://pi.example.ts.net", "an explicit https origin round-trips")
         check(ServerAddresses.normalize("ftp://x") == nil, "a non-http(s) scheme is refused")
         check(ServerAddresses.normalize("   ") == nil, "blank input is refused")
     }
@@ -143,14 +143,18 @@ enum ServerAddressesCheck {
               "no truthy-string coercion — exact match only")
     }
 
-    /// #245: the domains the app ships, read off Dobby/Info.plist (Bundle.main has none here).
+    /// #245: the domains the app ships. #491: Dobby/Info.plist carries only the build setting
+    /// (the real host is injected at build time), so the check pins that and uses a placeholder.
     static func shippedDomains() -> [String] {
         guard let data = FileManager.default.contents(atPath: "Dobby/Info.plist"),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              let domains = plist["WKAppBoundDomains"] as? [String], !domains.isEmpty
-        else { check(false, "#245 test setup: Dobby/Info.plist carries WKAppBoundDomains"); return [] }
-        return domains
+              plist["WKAppBoundDomains"] as? [String] == ["$(DOBBY_PI_HOST)"]
+        else { check(false, "#491 test setup: Dobby/Info.plist WKAppBoundDomains is exactly [$(DOBBY_PI_HOST)]"); return [] }
+        return [piHost.host!]
     }
+
+    /// Stands in for the injected Pi name (piHost is nil here: no Info.plist).
+    static let piHost = URL(string: "https://pi.example.ts.net")!
 
     static let iOSDevice = ServerAddresses.AppBound(enforced: true, loopback: false, domains: shippedDomains())
     static let iOSSimulator = ServerAddresses.AppBound(enforced: true, loopback: true, domains: shippedDomains())
@@ -159,14 +163,14 @@ enum ServerAddressesCheck {
     /// The addresses the iOS guard must drop: an IP literal, a LAN name, a non-Tailscale https
     /// name, http to the app-bound name, a look-alike that only starts with it, and loopback.
     static var refused: [URL] {
-        let host = AppConfig.serverURL.host!
+        let host = piHost.host!
         return ["http://192.0.2.10:8080", "http://box.home.arpa:8080", "https://dobby.example.com",
                 "http://\(host)", "https://\(host).example.com", "http://127.0.0.1:8080"].map { URL(string: $0)! }
     }
 
     static func appBoundRule() {
-        check(iOSDevice.keeps(AppConfig.serverURL), "#245 appBoundRule: iOS keeps the baked https app-bound name")
-        check(iOSDevice.keeps(URL(string: "https://" + AppConfig.serverURL.host!.uppercased())!),
+        check(iOSDevice.keeps(piHost), "#245 appBoundRule: iOS keeps the baked https app-bound name")
+        check(iOSDevice.keeps(URL(string: "https://" + piHost.host!.uppercased())!),
               "#245 appBoundRule: iOS keeps the app-bound name in any case")
         for url in refused {
             check(!iOSDevice.keeps(url), "#245 appBoundRule: an iOS device drops \(url.absoluteString)")
@@ -183,7 +187,7 @@ enum ServerAddressesCheck {
         let suite = "dobby.check.appBound.\(ProcessInfo.processInfo.processIdentifier)"
         guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
         defer { defaults.removePersistentDomain(forName: suite) }
-        let good = AppConfig.serverURL
+        let good = piHost
         let push = "[\"192.0.2.10:8080\", \"https://dobby.example.com\", \"http://box.home.arpa:8080\", \"\(good.absoluteString)\"]"
 
         ServerAddresses.store(json: push, defaults, rule: iOSDevice)
@@ -233,7 +237,7 @@ enum ServerAddressesCheck {
         let suite = "dobby.check.piOrigin.\(ProcessInfo.processInfo.processIdentifier)"
         guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
         defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set(["http://192.0.2.10:8080", AppConfig.serverURL.absoluteString], forKey: "dobby.serverAddresses")
+        defaults.set(["http://192.0.2.10:8080", piHost.absoluteString], forKey: "dobby.serverAddresses")
         defaults.set("http://198.51.100.20:8080", forKey: "dobby.serverAddresses.lastGood")
         let usable = ServerAddresses.candidates(defaults, rule: iOSDevice)
         check(!usable.contains { ["192.0.2.10", "198.51.100.20"].contains($0.host ?? "") },
@@ -256,10 +260,10 @@ enum ServerAddressesCheck {
         let suite = "dobby.check.piOriginPush.\(ProcessInfo.processInfo.processIdentifier)"
         guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
         defer { defaults.removePersistentDomain(forName: suite) }
-        ServerAddresses.store(json: "[\"http://192.0.2.10:8080\", \"\(AppConfig.serverURL.absoluteString)\"]", defaults, rule: iOSDevice)
+        ServerAddresses.store(json: "[\"http://192.0.2.10:8080\", \"\(piHost.absoluteString)\"]", defaults, rule: iOSDevice)
         check(ServerAddresses.isPiOrigin("http://192.0.2.10:8080/x.mkv", candidates: ServerAddresses.candidates(defaults, rule: .keepAll)),
               "#245 piOriginAfterPush: a Pi LAN address pushed through store(json:) on iOS is still the Pi")
-        check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [AppConfig.serverURL],
+        check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [piHost],
               "#245 piOriginAfterPush: and it is never probed on iOS")
     }
 

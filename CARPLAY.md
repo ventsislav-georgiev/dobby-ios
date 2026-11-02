@@ -105,7 +105,7 @@ several iOS clients ship CarPlay support with Apple's blessing already granted t
 - **play:Sub** — paid, explicitly advertises CarPlay browsing.
 
 Decisive detail: Subsonic clients talk **directly from the device to your server**, so the
-existing `dobby.solarflare-tarpon.ts.net` Tailscale name works as-is. Nothing needs to be
+existing `<pi>.<tailnet>.ts.net` Tailscale name works as-is. Nothing needs to be
 exposed publicly. (This is exactly what kills the podcast-RSS alternative below.)
 
 ### What the facade needs
@@ -271,7 +271,7 @@ Environment=DOBBY_SUBSONIC_USER=dobby
 Environment=DOBBY_SUBSONIC_PASSWORD=<pick one>
 ```
 
-Then in Amperfy (or play:Sub): server `https://dobby.solarflare-tarpon.ts.net`, that
+Then in Amperfy (or play:Sub): server `https://<pi>.<tailnet>.ts.net`, that
 username and password. The phone must be on the tailnet; nothing is exposed publicly.
 
 ## Sources

@@ -95,7 +95,7 @@ enum ServerAddresses {
         var out: [URL] = []
         append(&out, defaults.string(forKey: lastGoodKey))
         for stored in stored(defaults) { append(&out, stored.absoluteString) }
-        append(&out, AppConfig.serverURL.absoluteString)
+        append(&out, AppConfig.serverURL?.absoluteString)
         return out.filter(rule.keeps)
     }
 

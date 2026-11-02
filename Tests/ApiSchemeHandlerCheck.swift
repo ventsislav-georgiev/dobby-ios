@@ -208,9 +208,9 @@ enum ApiSchemeHandlerCheck {
         // Case and default ports are spellings of one origin, not different ones.
         check(ApiSchemeHandler.acao(origin: "HTTP://Dobby.Local:8080", serverOrigin: server,
                                     secret: true) == server, "origin compare is case-insensitive")
-        check(ApiSchemeHandler.acao(origin: "https://pi.ts.net:443",
-                                    serverOrigin: ApiSchemeHandler.normalizedOrigin("https://pi.ts.net/x"),
-                                    secret: true) == "https://pi.ts.net",
+        check(ApiSchemeHandler.acao(origin: "https://pi.example.ts.net:443",
+                                    serverOrigin: ApiSchemeHandler.normalizedOrigin("https://pi.example.ts.net/x"),
+                                    secret: true) == "https://pi.example.ts.net",
               "an explicit default port is the same origin")
         check(ApiSchemeHandler.normalizedOrigin("http://pi.local:80/api") == "http://pi.local",
               "http default port is dropped")

@@ -19,3 +19,10 @@ byte-identical in Safari / installed PWA.
 | Mac DMG for friends, with Sparkle OTA updates | `scripts/mac-release.sh` (setup in its header) |
 
 Pushes to `main` auto-release to TestFlight via GitHub Actions.
+
+The Pi's https name (`<pi>.<tailnet>.ts.net`) is not in this repo. Export
+`DOBBY_PI_HOST` before any of the builds above (CI takes it from the
+`DOBBY_PI_HOST` repo secret); xcodebuild expands it into `WKAppBoundDomains`,
+which iOS needs to load the Pi at all, and it becomes the default address.
+Without it the app has no default: add the address in Settings (macOS), and on
+iOS only a name listed in `WKAppBoundDomains` is usable.
