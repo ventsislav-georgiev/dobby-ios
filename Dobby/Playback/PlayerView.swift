@@ -11,7 +11,8 @@ import UIKit
 /// the input wiring only; the OSD contract (which file each part lives in, the key router, the
 /// layers) is OSD-CONTRACT.md (repo root). macOS: keys go through PlayerControls' router,
 /// a click on the picture shows or hides the bar, a double-click toggles fullscreen, mouse
-/// movement reveals the bar. iOS: tap regions, the left-edge back swipe, tappable rows.
+/// movement reveals the bar. iOS: tap regions, the left-edge back swipe (Esc), tappable rows,
+/// and a hardware keyboard (iPad) feeding the same router as the Mac keys (#487).
 struct PlayerView: View {
     @EnvironmentObject var playback: PlaybackCoordinator
     @ObservedObject var time: ControllerTimeModel
@@ -113,6 +114,8 @@ struct PlayerView: View {
 
             #if os(macOS)
             WindowAccessor { win in controls.attachWindow(win) }.allowsHitTesting(false)
+            #else
+            HardwareKeys { key, up in send(key, up: up) }.allowsHitTesting(false)
             #endif
         }
         .animation(.easeInOut(duration: 0.18), value: controls.visible)
@@ -128,10 +131,11 @@ struct PlayerView: View {
         // #197: the left-edge back swipe. The player covers the WebView, so its edge recognizer
         // never sees these touches; this is the macOS Esc / Android PlaybackActivity Back:
         // an open layer closes first, else the player closes. Simultaneous, so taps and the
-        // Slider keep their own gestures; only a drag that starts at the edge counts.
+        // Slider keep their own gestures; only a drag that starts at the edge counts. #487: it
+        // is Esc through the router, so it does exactly what a hardware Esc does.
         .simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in
             guard v.startLocation.x < 24, v.translation.width > 50 else { return }
-            if !controls.closeTopLayer() { playback.stop() }
+            _ = send(.escape, up: false)
         })
         #endif
         #if os(macOS)
@@ -246,16 +250,22 @@ struct PlayerView: View {
         #endif
     }
 
+    /// One key from any source (the Mac's NSEvent monitor, an iPad hardware keyboard, the iOS
+    /// edge swipe) into the router. True = handled (the event is swallowed).
+    private func send(_ key: OSDKey, up: Bool, isRepeat: Bool = false) -> Bool {
+        if up { return controls.keyUp(key) }
+        let handled = controls.keyDown(key, isRepeat: isRepeat)
+        if key == .space { isPlaying = controls.isPlaying }
+        return handled
+    }
+
     #if os(macOS)
     /// Returns true if the key was handled (and should be swallowed). Command / Control chords
     /// pass through untouched so the menu bar's shortcuts (Cmd-Q, Cmd-W) still work.
     private func handleKey(_ e: NSEvent) -> Bool {
         if !e.modifierFlags.intersection([.command, .control]).isEmpty { return false }
         guard let key = Self.osdKey(e) else { return false }
-        if e.type == .keyUp { return controls.keyUp(key) }
-        let handled = controls.keyDown(key, isRepeat: e.isARepeat)
-        if key == .space { isPlaying = controls.isPlaying }
-        return handled
+        return send(key, up: e.type == .keyUp, isRepeat: e.isARepeat)
     }
 
     /// Key codes are layout-independent; letters and punctuation map to the US key at that
@@ -278,6 +288,90 @@ struct PlayerView: View {
     }
     #endif
 }
+
+#if os(iOS)
+/// #487: a hardware keyboard on iOS (iPad) into the same router as the Mac keys. A view with no
+/// hit area that takes the first responder while the player is up and hands it back (the web
+/// view) when the player closes. Key codes are layout-independent like the Mac's; Command /
+/// Control chords and unmapped keys go up the responder chain untouched. UIKit delivers no
+/// auto-repeat presses here, so a held key acts once.
+private struct HardwareKeys: UIViewRepresentable {
+    let onKey: (OSDKey, _ up: Bool) -> Bool
+
+    func makeUIView(context: Context) -> KeyView { let v = KeyView(); v.onKey = onKey; return v }
+    func updateUIView(_ v: KeyView, context: Context) { v.onKey = onKey }
+
+    final class KeyView: UIView {
+        var onKey: ((OSDKey, Bool) -> Bool)?
+        private weak var previous: UIResponder?
+        override var canBecomeFirstResponder: Bool { true }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            previous = UIResponder.dobbyCurrent
+            becomeFirstResponder()
+        }
+
+        override func willMove(toWindow newWindow: UIWindow?) {
+            if newWindow == nil, isFirstResponder { resignFirstResponder(); previous?.becomeFirstResponder() }
+            super.willMove(toWindow: newWindow)
+        }
+
+        override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = presses.filter { !handle($0, up: false) }
+            if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+        }
+
+        override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = presses.filter { !handle($0, up: true) }
+            if !rest.isEmpty { super.pressesEnded(rest, with: event) }
+        }
+
+        /// A cancelled press ends like a release (Return's hold timer must not fire).
+        override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+            let rest = presses.filter { !handle($0, up: true) }
+            if !rest.isEmpty { super.pressesCancelled(rest, with: event) }
+        }
+
+        private func handle(_ press: UIPress, up: Bool) -> Bool {
+            guard let k = press.key, k.modifierFlags.intersection([.command, .control]).isEmpty,
+                  let key = Self.osdKey(k) else { return false }
+            return onKey?(key, up) ?? false
+        }
+
+        /// Same keys as PlayerView.osdKey on the Mac: US-layout position, "?" is Shift-slash.
+        private static func osdKey(_ k: UIKey) -> OSDKey? {
+            switch k.keyCode {
+            case .keyboardSpacebar: return .space
+            case .keyboardLeftArrow: return .left
+            case .keyboardRightArrow: return .right
+            case .keyboardUpArrow: return .up
+            case .keyboardDownArrow: return .down
+            case .keyboardReturnOrEnter, .keypadEnter: return .ret
+            case .keyboardEscape: return .escape
+            case .keyboardSlash: return .char(k.modifierFlags.contains(.shift) ? "?" : "/")
+            default:
+                let letters: [UIKeyboardHIDUsage: Character] = [
+                    .keyboardA: "a", .keyboardS: "s", .keyboardD: "d", .keyboardF: "f", .keyboardB: "b",
+                    .keyboardQ: "q", .keyboardW: "w", .keyboardI: "i", .keyboardComma: ",", .keyboardPeriod: "."]
+                return letters[k.keyCode].map(OSDKey.char)
+            }
+        }
+    }
+}
+
+private extension UIResponder {
+    private static weak var dobbyFound: UIResponder?
+    /// The current first responder (nil-targeted action trick), so the key view can hand it back.
+    static var dobbyCurrent: UIResponder? {
+        dobbyFound = nil
+        UIApplication.shared.sendAction(#selector(dobbyReportFirstResponder), to: nil, from: nil, for: nil)
+        return dobbyFound
+    }
+    @objc private func dobbyReportFirstResponder() { UIResponder.dobbyFound = self }
+}
+#endif
 
 #if os(macOS)
 /// Resolves the hosting NSWindow (for fullscreen) and clears the 16:9 aspect-ratio
