@@ -3516,7 +3516,7 @@ for l in body[1:g]:
         fail("playStreamUrl: %r runs before the #200 guard" % l.strip())
 if depth != 0:
     fail("the #200 guard is nested inside a block of playStreamUrl; it must sit at its top level")
-for reader in ["dobbyTvNative.tryDispatch(url", "modal.classList.add('active');", "  if (isOfflineVideoUrl(url)) {"]:
+for reader in ["dobbyTvNative.tryDispatch(url", "showWindow(modal, 'player');", "  if (isOfflineVideoUrl(url)) {"]:
     hits = [i for i, l in enumerate(body) if reader in l]
     if not hits or hits[0] < g:
         fail("playStreamUrl: %r must come after the #200 guard (found at %s, guard at %d)" % (reader, hits, g))
