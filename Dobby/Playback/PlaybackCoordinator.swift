@@ -33,8 +33,8 @@ final class PlaybackCoordinator: ObservableObject {
     // KSOptions.isAutoPlay is a static (default true); plain options autoplay.
     // automaticWindowResize snaps the macOS window to the video's aspect ratio on
     // readyToPlay (shrinks it); we manage sizing / fullscreen ourselves.
-    let options: KSOptions = {
-        let o = KSOptions()
+    let options: PreferredTrackOptions = {
+        let o = PreferredTrackOptions()
         o.automaticWindowResize = false
         // Render as soon as 2 frames are decoded instead of gating readyToPlay
         // on preferredForwardBufferDuration (3s) of buffered video. The buffer
@@ -126,6 +126,7 @@ final class PlaybackCoordinator: ObservableObject {
         lastReportSec = 0
         currentVideoUrl = req.videoUrl
         resumeSeconds = nil
+        attached = []
         // Clear the reused KSPlayer state so the OSD never shows the PREVIOUS video's
         // length / resume position before the new stream reports its own.
         player.timemodel.currentTime = 0
@@ -137,6 +138,7 @@ final class PlaybackCoordinator: ObservableObject {
         // Resume: native demuxer seek for the FFmpeg/ME path (MKV etc). AVPlayer (HLS/
         // MP4) ignores this, so onStateChanged also seeks manually at readyToPlay.
         options.startPlayTime = req.startSeconds
+        options.audioPriority = TrackPreference.priority(req.preferredAudioLang, deviceLanguage: Self.deviceLanguage)
         // KSPlayerLayer instantiates KSOptions.firstPlayerType and only falls
         // back to the second on failure. The synthesized MPD is FFmpeg-only,
         // so the default (KSAVPlayer) burns an async AVFoundation failure on
@@ -184,17 +186,25 @@ final class PlaybackCoordinator: ObservableObject {
         bridge?.callJS("window.dobbyNativeRequestSubtitle && window.dobbyNativeRequestSubtitle(\(json));")
     }
 
-    /// #466 stub, E8 fills it: post {positionMs, ref, videoMeta} to the page's
-    /// window.dobbyNativeBookmarkRequest (Android requestBookmark :7268-7284). The caller
-    /// (PlayerControls.bookmark) already checked allowBookmarks.
-    func requestBookmark() {}
+    /// Post {ref, positionMs} to the page's window.dobbyNativeBookmarkRequest (Android
+    /// requestBookmark :7268-7284); the page saves the bookmark against its active video. The
+    /// caller (PlayerControls.bookmark) already checked allowBookmarks and shows the toast.
+    func requestBookmark() {
+        guard let ref = activeRef else { return }
+        let live = player.playerLayer?.player.currentPlaybackTime ?? 0
+        let positionMs = live.isFinite && live > 0 ? Int(live * 1000) : lastPositionMs
+        guard let json = Self.json(["ref": ref, "positionMs": positionMs]) else { return }
+        bridge?.callJS("window.dobbyNativeBookmarkRequest && window.dobbyNativeBookmarkRequest(\(json));")
+        mark("bookmark ref=\(ref) positionMs=\(positionMs)")
+    }
 
     func setSubtitleOffset(ref: String, ms: Int) {
         player.subtitleModel.subtitleDelay = Double(ms) / 1000.0
     }
 
     /// Attach the subtitle tracks carried in the playNative envelope; auto-select a
-    /// track only when the web flagged it default (never force subtitles on).
+    /// track only when the web flagged it default (applyPreferredTracks, right after, may
+    /// override it with a preferred-language track).
     private func applyInitialSubtitles() {
         guard let subs = request?.subs, !subs.isEmpty else { return }
         var selected: URLSubtitleInfo?
@@ -203,9 +213,62 @@ final class PlaybackCoordinator: ObservableObject {
             let name = t.label ?? t.lang ?? url.lastPathComponent
             let info = URLSubtitleInfo(subtitleID: url.absoluteString, name: name, url: url)
             player.subtitleModel.addSubtitle(info: info)
+            attached.append((info, t.lang))
             if t.isDefault == true { selected = info }
         }
         if let selected { player.subtitleModel.selectedSubtitleInfo = selected }
+    }
+
+    /// The payload's subtitle tracks as attached on first open, with their languages.
+    private var attached: [(info: URLSubtitleInfo, lang: String?)] = []
+
+    private static var deviceLanguage: String? { Locale.current.language.languageCode?.identifier }
+
+    /// E8 (#473), first open only. Start on the preferred audio language (MEPlayer already
+    /// opened on it through PreferredTrackOptions.wantedAudio; this covers the AVPlayer lane)
+    /// and on the first track in the preferred subtitle languages, embedded before attached
+    /// (Android selectDefaultSubtitleIfNeeded: a preferred-language track beats DEFAULT flags,
+    /// and an online catalog entry is never downloaded just to have one). Then report the
+    /// embedded subtitle languages to window.dobbyNativeSubtitleTracks (Android
+    /// emitEmbeddedSubtitleTracks), so the page only auto-attaches an online subtitle when
+    /// embedded lacks the preferred language.
+    private func applyPreferredTracks() {
+        guard let req = request, let p = player.playerLayer?.player else { return }
+        let audio = p.tracks(mediaType: .audio)
+        if let i = TrackPreference.pick(audio.map(\.languageCode), priority: options.audioPriority),
+           !audio[i].isEnabled {
+            p.select(track: audio[i])
+        }
+
+        let embedded = p.tracks(mediaType: .subtitle)
+        // AVPlayer's legible tracks are not SubtitleInfo; they are reported, never picked here.
+        let pickable: [(info: any SubtitleInfo, lang: String?)] =
+            embedded.compactMap { t in (t as? any SubtitleInfo).map { ($0, t.languageCode) } }
+            + attached.map { ($0.info, $0.lang) }
+        let subPriority = TrackPreference.priority(req.preferredSubtitleLang, deviceLanguage: Self.deviceLanguage)
+        var selectedLang: String?
+        // A track the page flagged default (the offline sidecar the user picked, #228) stands.
+        let pageFlagged = req.subs?.contains { $0.isDefault == true } ?? false
+        if !pageFlagged, let i = TrackPreference.pick(pickable.map { $0.lang }, priority: subPriority) {
+            player.subtitleModel.selectedSubtitleInfo = pickable[i].info
+            if i < pickable.count - attached.count { selectedLang = TrackPreference.normalize(pickable[i].lang) }
+        }
+
+        var langs: [String] = []
+        for t in embedded {
+            let l = TrackPreference.normalize(t.languageCode) ?? "und"
+            if !langs.contains(l) { langs.append(l) }
+        }
+        var report: [String: Any] = ["ref": req.ref, "langs": langs]
+        if let selectedLang { report["selectedLang"] = selectedLang }
+        guard let json = Self.json(report) else { return }
+        bridge?.callJS("window.dobbyNativeSubtitleTracks && window.dobbyNativeSubtitleTracks(\(json));")
+        mark("subtitle tracks langs=\(langs) selected=\(selectedLang ?? "-") audio=\(audio.first { $0.isEnabled }?.languageCode ?? "-")")
+    }
+
+    private static func json(_ object: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Resolve a subtitle to a URL: remote/file URL as-is, or base64 written to a temp file.
@@ -342,6 +405,7 @@ final class PlaybackCoordinator: ObservableObject {
             // Only on first open — a quality switch keeps the subtitleModel
             // (it lives on the coordinator), re-adding would duplicate tracks.
             if resumeSeconds == nil { applyInitialSubtitles() }
+            if resumeSeconds == nil { applyPreferredTracks() }
             resumeSeconds = nil
             configureRemoteCommands()   // after KSPlayer's own registration on this layer
             #if os(iOS)
@@ -460,6 +524,7 @@ final class PlaybackCoordinator: ObservableObject {
         resumeSeconds = nil
         subtitleCatalog = []
         attachedCatalogIds = []
+        attached = []
         nowPlayingArtwork = nil
         #if os(iOS)
         NowPlayingActivity.shared.end()
@@ -544,5 +609,16 @@ final class PlaybackCoordinator: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         bridge?.callJS("window.\(fn) && window.\(fn)(\(json));")
+    }
+}
+
+/// MEPlayer asks for its audio stream at open; answering here starts on the preferred
+/// language without the seek a later select(track:) costs. Set per play() on the main actor
+/// before the layer opens, read on KSPlayer's open thread.
+final class PreferredTrackOptions: KSOptions {
+    var audioPriority: [String] = []
+
+    override func wantedAudio(tracks: [MediaPlayerTrack]) -> Int? {
+        TrackPreference.pick(tracks.map(\.languageCode), priority: audioPriority)
     }
 }
