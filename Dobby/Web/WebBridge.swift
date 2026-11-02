@@ -32,6 +32,12 @@ final class WebBridge: NSObject {
         offline.reportProgress = { [weak self] json in
             self?.callJS("window.dobbyNativeDownloadProgress && window.dobbyNativeDownloadProgress(\(json));")
         }
+        #if os(macOS)
+        // #464: the DMG update's state on the PWA version stamp, the APK's #460 contract.
+        Updater.shared.push = { [weak self] json in
+            self?.callJS("window.dobbyUpdateProgress && window.dobbyUpdateProgress(\(json));")
+        }
+        #endif
     }
 
     /// Tell the web app the audio route entered/left a car head unit, so it can drop
@@ -85,6 +91,9 @@ extension WebBridge: WKScriptMessageHandler {
             // DOBBY_NO_SERVER seam is checked inside backfillBookExtras.
             if ServerAddresses.piEnabled(), let origin = webView?.url { offline.backfillBookExtras(server: origin) }
             pushCarRoute(playback.carRoute.isCar)   // page reload lost the latched value
+            #if os(macOS)
+            Updater.shared.repush()                 // and the update stamp with it (#464)
+            #endif
             // Siri may have launched us with a command; the page can run it now.
             VoiceCommandQueue.shared.deliver = { [weak self] command in self?.pushVoiceCommand(command) }
             VoiceCommandQueue.shared.flush()

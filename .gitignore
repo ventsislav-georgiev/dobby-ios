@@ -21,6 +21,7 @@ build-ios-debug/
 build-ios-release/
 build-sim/
 build-mac/
+build-mac-release/
 .omc/
 
 # Build-time copy of the PWA app shell (scripts/copy-app-shell.sh, #151). Generated

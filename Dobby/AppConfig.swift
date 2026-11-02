@@ -38,4 +38,16 @@ enum AppConfig {
         components.port = origin.port
         return components.url ?? origin
     }
+
+    /// #464: the Mac DMG's update settings out of Info.plist (Updater.swift), or nil when the
+    /// build carries none: no feed, a non-https feed, no EdDSA public key or no update token.
+    /// Only scripts/mac-release.sh builds fill them, so every other build starts no updater.
+    /// Here rather than in Updater.swift so Tests/AppConfigCheck.swift runs it without Sparkle.
+    static func macUpdateConfig(_ info: [String: Any]) -> (feed: URL, token: String)? {
+        let value = { (key: String) in (info[key] as? String ?? "").trimmingCharacters(in: .whitespaces) }
+        guard !value("SUPublicEDKey").isEmpty, !value("DobbyUpdateToken").isEmpty,
+              let feed = URL(string: value("SUFeedURL")), feed.scheme == "https", feed.host != nil
+        else { return nil }
+        return (feed, value("DobbyUpdateToken"))
+    }
 }

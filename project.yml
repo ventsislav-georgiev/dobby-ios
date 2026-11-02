@@ -19,6 +19,11 @@ packages:
     # each checkout/CI run instead of a shared, reproducible one. Upgrading later is a
     # deliberate change (see ledger #130/#115; moved forward to origin/main tip in #132).
     revision: 75e590e770f7f01d088ced2546deed9817b660ae
+  # #464: macOS-only OTA updates for the DMG build (Dobby/Updater.swift). Exact version, not a
+  # range, for the same reproducibility reason as KSPlayer above.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
 targets:
   Dobby:
     type: application
@@ -43,6 +48,10 @@ targets:
       # iOS-only: WidgetKit/ActivityKit Live Activities have no macOS counterpart.
       - target: DobbyWidgets
         destinationFilters: [iOS]
+      # #464: the DMG's self-update. iOS and iPad stay on TestFlight.
+      - package: Sparkle
+        product: Sparkle
+        destinationFilters: [macOS]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.illegible.dobbyios
@@ -56,6 +65,20 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: Dobby/Dobby.entitlements
+        # #464: the Mac app is not sandboxed. Every Mac install so far was an unsigned
+        # install.sh build, so none ever ran in a container; turning the sandbox on with the
+        # first signed DMG would move WebKit storage and offline files into a fresh container
+        # and the owner's data would be gone. Developer ID does not need the sandbox, and
+        # network.client and user-selected files only mean anything inside one.
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": ""
+        # #464: the EdDSA PUBLIC key from Sparkle's generate_keys (owner step, see
+        # scripts/mac-release.sh), expanded into Info.plist SUPublicEDKey. Public and safe to
+        # commit; committing it pins the signer. The other two update settings,
+        # DOBBY_MAC_FEED_URL and DOBBY_UPDATE_TOKEN, name and gate the private update host, so
+        # they are deliberately NOT defined here: xcodebuild takes them from the environment
+        # scripts/mac-release.sh sets (a target value would override it), and everywhere else
+        # they expand empty. A build missing any of the three starts no updater (Updater.swift).
+        DOBBY_SPARKLE_ED_KEY: ""
         SWIFT_VERSION: "5.0"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
     preBuildScripts:

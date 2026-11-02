@@ -16,5 +16,6 @@ byte-identical in Safari / installed PWA.
 | macOS app | `./install.sh` → installs to `/Applications` |
 | iPhone (dev signing) | `./install.sh device` |
 | TestFlight | `./install.sh testflight` (needs App Store Connect API key in env) |
+| Mac DMG for friends, with Sparkle OTA updates | `scripts/mac-release.sh` (setup in its header) |
 
 Pushes to `main` auto-release to TestFlight via GitHub Actions.

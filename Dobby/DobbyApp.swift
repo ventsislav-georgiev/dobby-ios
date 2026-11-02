@@ -6,6 +6,9 @@ struct DobbyApp: App {
     @StateObject private var offline = OfflineStore()
     #if os(iOS)
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #else
+    /// #464: the DMG build's self-update; a no-op in a build without update settings.
+    init() { Updater.shared.start() }
     #endif
 
     var body: some Scene {
@@ -19,6 +22,12 @@ struct DobbyApp: App {
         // Standard title bar: hiddenTitleBar left no draggable region (the web view
         // fills the window and eats mouse events), so the window couldn't be moved.
         .defaultSize(width: 1280, height: 800)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { Updater.shared.checkForUpdates() }
+                    .disabled(!Updater.shared.isOn)
+            }
+        }
         #endif
     }
 }
