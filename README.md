@@ -19,3 +19,11 @@ byte-identical in Safari / installed PWA.
 | Mac DMG for friends, with Sparkle OTA updates | `scripts/mac-release.sh` (setup in its header) |
 
 Pushes to `main` auto-release to TestFlight via GitHub Actions.
+
+The Pi's https name (`<pi>.<tailnet>.ts.net`) is not in this repo. Export
+`DOBBY_PI_HOST` before any of the builds above (CI takes it from the
+`DOBBY_PI_HOST` repo secret); xcodebuild expands it into `WKAppBoundDomains`,
+which iOS needs to load the Pi at all, and it becomes the default address.
+It is also the origin the web data lives under, so `install.sh` and the
+TestFlight workflow refuse to build without it (`scripts/mac-release.sh` must
+have it exported too). A Debug build without it has no default Pi address.

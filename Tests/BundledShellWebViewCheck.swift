@@ -32,9 +32,9 @@ import WebKit
 // macOS only — `run-checks.sh` skips it elsewhere, same as ApiSchemeWebViewCheck.
 @main
 enum BundledShellWebViewCheck {
-    /// Not a real host. A sibling of AppConfig.serverURL's host under the same
-    /// app-bound domain, so `isAppBound` is true and nothing reaches the Pi.
-    private static let origin = URL(string: "https://never-paired.solarflare-tarpon.ts.net")!
+    /// Not a real host. A subdomain of the placeholder app-bound domain run-checks.sh
+    /// embeds, so `isAppBound` is true and nothing reaches the Pi.
+    private static let origin = URL(string: "https://dead.pi.example.ts.net")!
 
     private static var failures = 0
 

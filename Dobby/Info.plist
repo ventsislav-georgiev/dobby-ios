@@ -72,10 +72,12 @@
 	<!-- App-Bound Domains: opting in turns on Service Workers (and other
 	     privileged web APIs) inside WKWebView. Covers the host + subdomains.
 	     Only domains are accepted here, so a LAN address can't be listed — the
-	     opt-in is applied conditionally, see WebContainer.isAppBound. -->
+	     opt-in is applied conditionally, see WebContainer.isAppBound.
+	     #491: DOBBY_PI_HOST (the Pi's https name) comes from the build
+	     environment, never this repo; AppConfig.serverURL reads it back. -->
 	<key>WKAppBoundDomains</key>
 	<array>
-		<string>solarflare-tarpon.ts.net</string>
+		<string>$(DOBBY_PI_HOST)</string>
 	</array>
 </dict>
 </plist>

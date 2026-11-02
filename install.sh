@@ -15,6 +15,9 @@ cd "$(dirname "$0")"
 
 TEAM=V5XV3994L8
 TARGET="${1:-mac}"
+# #491: the Pi's https name is injected, never committed. It is also the origin the web
+# data lives under, so an install without it would come up on a different origin.
+: "${DOBBY_PI_HOST:?export DOBBY_PI_HOST (the Pi https name, see README)}"
 
 xcodegen generate
 

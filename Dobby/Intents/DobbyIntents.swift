@@ -50,7 +50,8 @@ struct BookEntityQuery: EntityStringQuery {
     private func allBooks() async throws -> [BookEntity] {
         // #181: the library lives on the Pi; with the Pi turned off there is none to offer.
         guard ServerAddresses.piEnabled() else { return [] }
-        let url = AppConfig.serverURL.appendingPathComponent("api/books")
+        guard let pi = ServerAddresses.candidates().first else { return [] } // #491: no baked default
+        let url = pi.appendingPathComponent("api/books")
         let (data, _) = try await URLSession.shared.data(from: url)
         let raw = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
         return raw.compactMap { entry in

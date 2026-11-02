@@ -3,7 +3,16 @@ import Foundation
 /// Static app configuration. The web app and this native app are both Dobby.
 enum AppConfig {
     /// Web app origin (served from the Pi over Tailscale, valid TLS via `tailscale serve`).
-    static let serverURL = URL(string: "https://dobby.solarflare-tarpon.ts.net")!
+    /// #491: the Pi's https name is not in this public repo. DOBBY_PI_HOST is expanded at
+    /// build time into Info.plist's WKAppBoundDomains (the one place iOS needs it), and the
+    /// default address is read back from there. Unset means no default: Settings adds one.
+    static let serverURL = piURL(Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String] ?? [])
+
+    static func piURL(_ appBoundDomains: [String]) -> URL? {
+        guard let host = appBoundDomains.first?.trimmingCharacters(in: .whitespaces),
+              !host.isEmpty else { return nil }
+        return URL(string: "https://" + host)
+    }
 
     /// Appended to WKWebView's User-Agent so the web app can detect the native wrapper.
     static let userAgentSuffix = "Dobby/0.1"

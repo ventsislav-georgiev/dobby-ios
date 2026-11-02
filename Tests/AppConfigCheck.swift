@@ -6,6 +6,7 @@ enum AppConfigCheck {
         startPathComposition()
         startPathRejection()
         macUpdateConfig()
+        piURL()
         print("AppConfigCheck: all checks passed")
     }
 
@@ -16,17 +17,25 @@ enum AppConfigCheck {
         }
     }
 
-    static let origin = URL(string: "https://dobby.solarflare-tarpon.ts.net")!
+    static let origin = URL(string: "https://pi.example.ts.net")!
 
     static func startPathComposition() {
         check(AppConfig.startURL(origin: origin, env: [:]) == origin,
               "no DOBBY_START_PATH set: bare origin is used")
         check(AppConfig.startURL(origin: origin, env: ["DOBBY_START_PATH": "/tv/123"]).absoluteString
-              == "https://dobby.solarflare-tarpon.ts.net/tv/123",
+              == "https://pi.example.ts.net/tv/123",
               "a path-only value is appended to the origin")
         check(AppConfig.startURL(origin: origin, env: ["DOBBY_START_PATH": "/tv/123?season=2"]).absoluteString
-              == "https://dobby.solarflare-tarpon.ts.net/tv/123?season=2",
+              == "https://pi.example.ts.net/tv/123?season=2",
               "the query string survives the composition")
+    }
+
+    /// #491: the default Pi address comes only from the build (DOBBY_PI_HOST in WKAppBoundDomains).
+    static func piURL() {
+        check(AppConfig.piURL([]) == nil, "#491 piURL: no app-bound domain means no default address")
+        check(AppConfig.piURL([""]) == nil, "#491 piURL: DOBBY_PI_HOST unset (expanded empty) means no default address")
+        check(AppConfig.piURL(["pi.example.ts.net"])?.absoluteString == "https://pi.example.ts.net",
+              "#491 piURL: an injected host becomes the https default")
     }
 
     static func startPathRejection() {

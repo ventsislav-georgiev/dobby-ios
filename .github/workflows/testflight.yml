@@ -219,7 +219,13 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
 
       - name: Archive
+        env:
+          # #491: the Pi's https name, kept out of this public repo. xcodebuild expands it
+          # into Info.plist WKAppBoundDomains; unset builds an app with no default Pi address.
+          DOBBY_PI_HOST: ${{ secrets.DOBBY_PI_HOST }}
         run: |
+          # The Pi name is also the origin the web data lives under: never ship without it.
+          [ -n "$DOBBY_PI_HOST" ] || { echo "::error::the DOBBY_PI_HOST repo secret is not set (#491)"; exit 1; }
           xcodebuild archive \
             -project Dobby.xcodeproj -scheme Dobby -configuration Release \
             -destination 'generic/platform=iOS' \

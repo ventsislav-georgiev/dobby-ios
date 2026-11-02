@@ -132,7 +132,7 @@ enum ApiSchemeWebViewCheck {
     static func main() {
         _ = NSApplication.shared
 
-        let server = AppConfig.serverURL
+        let server = AppConfig.serverURL! // the embedded placeholder domain (#491)
         let handler = SpyHandler(server: server)
 
         // Mirrors WebContainer.makeWebView, including the order: the scheme is

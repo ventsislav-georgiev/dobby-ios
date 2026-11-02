@@ -134,7 +134,7 @@ final class PlaybackCoordinator: ObservableObject {
         player.subtitleModel.subtitleDelay = 0
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
         options.userAgent = AppConfig.streamUserAgent
-        options.referer = AppConfig.serverURL.absoluteString
+        options.referer = AppConfig.serverURL?.absoluteString
         // Resume: native demuxer seek for the FFmpeg/ME path (MKV etc). AVPlayer (HLS/
         // MP4) ignores this, so onStateChanged also seeks manually at readyToPlay.
         options.startPlayTime = req.startSeconds
