@@ -50,6 +50,25 @@
 	<array>
 		<string>_dobby-link._tcp</string>
 	</array>
+	<!-- #464: Sparkle, the DMG's self-update (macOS only; iOS never links Sparkle and ignores
+	     these). Values come from build settings, see project.yml; empty in every build but
+	     scripts/mac-release.sh, and Updater.swift starts nothing while any is empty. Android
+	     parity: a check every 6 h with no first-run prompt, a silent background download,
+	     then Updater.swift's Later/Install alert. -->
+	<key>SUFeedURL</key>
+	<string>$(DOBBY_MAC_FEED_URL)</string>
+	<key>SUPublicEDKey</key>
+	<string>$(DOBBY_SPARKLE_ED_KEY)</string>
+	<key>DobbyUpdateToken</key>
+	<string>$(DOBBY_UPDATE_TOKEN)</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<!-- App-Bound Domains: opting in turns on Service Workers (and other
 	     privileged web APIs) inside WKWebView. Covers the host + subdomains.
 	     Only domains are accepted here, so a LAN address can't be listed — the

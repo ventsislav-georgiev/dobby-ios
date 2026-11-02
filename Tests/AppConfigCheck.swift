@@ -5,6 +5,7 @@ enum AppConfigCheck {
     static func main() {
         startPathComposition()
         startPathRejection()
+        macUpdateConfig()
         print("AppConfigCheck: all checks passed")
     }
 
@@ -39,5 +40,24 @@ enum AppConfigCheck {
               "a value carrying its own scheme is rejected")
         check(AppConfig.startURL(origin: origin, env: ["DOBBY_START_PATH": "http://evil.example//x"]) == origin,
               "a value carrying its own scheme+host is rejected even with a deeper path")
+    }
+
+    /// #464: a build missing any update setting starts no updater.
+    static func macUpdateConfig() {
+        let full: [String: Any] = ["SUFeedURL": "https://updates.invalid/v1/mac/appcast.xml",
+                                   "SUPublicEDKey": "pub", "DobbyUpdateToken": "tok"]
+        let on = AppConfig.macUpdateConfig(full)
+        check(on?.feed.absoluteString == "https://updates.invalid/v1/mac/appcast.xml" && on?.token == "tok",
+              "all three settings: the updater starts with that feed and token")
+        for key in ["SUFeedURL", "SUPublicEDKey", "DobbyUpdateToken"] {
+            var missing = full; missing[key] = ""
+            check(AppConfig.macUpdateConfig(missing) == nil, "empty \(key): no updater")
+            missing[key] = nil
+            check(AppConfig.macUpdateConfig(missing) == nil, "absent \(key): no updater")
+        }
+        var http = full; http["SUFeedURL"] = "http://updates.invalid/v1/mac/appcast.xml"
+        check(AppConfig.macUpdateConfig(http) == nil, "a plain-http feed: no updater")
+        var unexpanded = full; unexpanded["SUFeedURL"] = "$(DOBBY_MAC_FEED_URL)"
+        check(AppConfig.macUpdateConfig(unexpanded) == nil, "an unexpanded build setting: no updater")
     }
 }
