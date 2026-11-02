@@ -10,6 +10,7 @@ struct TransportState {}
 
 extension PlayerControls {
     func togglePlay() {
+        more.cancelPausedByOk()   // #474: the user chose the play state (Android togglePlay :7200)
         let pausing = isPlaying
         playback?.togglePlayPause()
         // Pausing shows the bar (pre-#466). A resume leaves it to syncState, which KSPlayer
