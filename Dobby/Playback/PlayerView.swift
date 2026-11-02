@@ -66,7 +66,7 @@ struct PlayerView: View {
                 .clipped()
 
             #if os(iOS)
-            tapRegions
+            touchRegions                                           // ControlBar.swift (E2)
             #else
             pictureClicks
             #endif
@@ -141,38 +141,9 @@ struct PlayerView: View {
         #endif
     }
 
-    // MARK: Tap regions (iOS)
+    // MARK: Picture clicks (macOS; iOS taps are ControlBar.swift's touchRegions)
 
-    /// Tap layout (OSD hidden): big center square = play/pause, bottom-left corner
-    /// = −10s, bottom-right corner = +10s, everywhere else (top corners, left/right
-    /// of center) only reveals the OSD. While the OSD is showing, any tap dismisses
-    /// it (first tap = hide). Sits below the OSD in the ZStack, so OSD buttons win.
-    #if os(iOS)
-    private var tapRegions: some View {
-        GeometryReader { geo in
-            let w = geo.size.width, h = geo.size.height
-            ZStack {
-                tapZone { controls.wake() }   // base: dead zones just reveal the OSD
-                tapZone { controls.togglePlay(); isPlaying = controls.isPlaying }
-                    .frame(width: w * 0.5, height: h * 0.5)
-                    .position(x: w / 2, y: h / 2)
-                tapZone { controls.seekBy(-10) }
-                    .frame(width: w * 0.28, height: h * 0.3)
-                    .position(x: w * 0.14, y: h * 0.85)
-                tapZone { controls.seekBy(10) }
-                    .frame(width: w * 0.28, height: h * 0.3)
-                    .position(x: w * 0.86, y: h * 0.85)
-            }
-        }
-        .ignoresSafeArea()
-    }
-
-    private func tapZone(_ action: @escaping () -> Void) -> some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .onTapGesture { if controls.visible { controls.hide() } else { action() } }
-    }
-    #else
+    #if os(macOS)
     /// macOS: a click on the picture is Android's OK (show / hide the bar, owner ruling D2),
     /// a double-click toggles fullscreen. Below the OSD in the ZStack, so its controls win.
     private var pictureClicks: some View {
