@@ -75,14 +75,15 @@ extension WebBridge: WKScriptMessageHandler {
               let body = message.body as? [String: Any],
               let action = body["action"] as? String else { return }
         let payload = body["payload"]
+        let mainFrame = message.frameInfo.isMainFrame && message.webView === webView
 
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.dispatch(action: action, payload: payload) }
+            MainActor.assumeIsolated { self?.dispatch(action: action, payload: payload, mainFrame: mainFrame) }
         }
     }
 
     @MainActor
-    private func dispatch(action: String, payload: Any?) {
+    private func dispatch(action: String, payload: Any?, mainFrame: Bool) {
         switch action {
         case "ready":
             NSLog("%@", "Dobby ready bridge \(String(describing: payload))")
@@ -162,6 +163,18 @@ extension WebBridge: WKScriptMessageHandler {
             playback.stop()
         case "openTvLink":
             NotificationCenter.default.post(name: TvLink.open, object: nil)
+        case "openExternal":
+            // #486: the sync sign-in page in the system browser; the page's poll finishes the sign-in.
+            guard let url = BridgeInjection.externalURL(payload, mainFrame: mainFrame) else {
+                NSLog("%@", "Dobby: openExternal refused (mainFrame=\(mainFrame)): only an https link from the app page")
+                return
+            }
+            NSLog("%@", "Dobby: openExternal hands an https link to the system browser")
+            #if os(iOS)
+            UIApplication.shared.open(url)
+            #else
+            NSWorkspace.shared.open(url)
+            #endif
         case "setNowPlaying":
             #if os(iOS)
             guard let json = payload as? String,
