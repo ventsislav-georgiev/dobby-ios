@@ -2518,8 +2518,6 @@ PWA_CALLS_NOT_DECLARED = {
                            "installed before #158 would silently lose book removal. Drop the "
                            "else-branch there and this entry together once every installed "
                            "build carries removeNativeOffline.",
-    "a4k": "#484: the PWA reads window.Dobby.a4k (a flag, not a call) to send the a4k lanes to "
-           "dobby-api://. #483 declares it in BridgeInjection.swift; drop this entry with it.",
 }
 
 def read(path):
