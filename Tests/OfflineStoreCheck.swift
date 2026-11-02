@@ -23,6 +23,7 @@ enum OfflineStoreCheck {
             ("bookCancelWithAFailedIndexWriteGetsABookErrorEvent", bookCancelWithAFailedIndexWriteGetsABookErrorEvent),
             ("idsOutsideOfflineAreRefused", idsOutsideOfflineAreRefused),
             ("nestedBookIdStillWorks", nestedBookIdStillWorks),
+            ("replacementCancelKeepsTheFinishedCopy", replacementCancelKeepsTheFinishedCopy),
         ]
         // Names on the command line run just those (one process per check counts failures by name).
         let only = Set(CommandLine.arguments.dropFirst())
@@ -247,6 +248,34 @@ enum OfflineStoreCheck {
         check(errors(ev, "fake-book-12").count == 1 && !exists("fake-book-12"),
               "a chapter file name outside its book folder must refuse the start, got \(ev.all)")
         check(tree() == before && parsed(s) == listed, "a refused chapter file name touched a path or the index")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// #502: a replacement download of a finished video is the state startDownload leaves (the
+    /// complete entry, its path kept, status downloading). Cancelling it removed Offline/<id>
+    /// whole, the earlier copy with it. Cancel keeps the file and the entry, complete again;
+    /// delete still removes both, and a first download's cancel still leaves nothing.
+    @MainActor static func replacementCancelKeepsTheFinishedCopy() {
+        let id = "fake-video-3"
+        let file = root.appendingPathComponent("\(id)/video.mp4")
+        let seed = "{\"\(id)\":{\"videoId\":\"\(id)\",\"kind\":\"video\",\"title\":\"Fake Video\",\"subs\":[],"
+            + "\"path\":\"\(file.path)\",\"bytes\":0,\"total\":16,\"status\":\"downloading\"}}"
+        let (s, ev) = store(seed: seed)
+        try! FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! Data("fake video bytes".utf8).write(to: file)
+        s.cancel(id)
+        check(exists("\(id)/video.mp4"), "#502: cancelling a replacement download must keep the finished copy on disk")
+        check(entry(s, id)?["status"] as? String == "complete" && entry(s, id)?["path"] as? String == file.path,
+              "#502: cancelling a replacement download must keep its entry, complete: \(s.indexJSON())")
+        check(ev.all.contains { $0["videoId"] as? String == id && $0["status"] as? String == "cancelled" },
+              "#502: a replacement's cancel must still report cancelled: \(ev.all)")
+        s.delete(id)
+        check(!exists(id) && entry(s, id) == nil, "#502: delete must still remove the finished copy and its entry")
+
+        let (s2, _) = store(seed: videoSeed("fake-video-4"))
+        try! FileManager.default.createDirectory(at: root.appendingPathComponent("fake-video-4"), withIntermediateDirectories: true)
+        s2.cancel("fake-video-4")
+        check(!exists("fake-video-4") && entry(s2, "fake-video-4") == nil, "#502: a first download's cancel must leave nothing")
         try? FileManager.default.removeItem(at: root)
     }
 
