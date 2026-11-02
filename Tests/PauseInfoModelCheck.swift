@@ -24,16 +24,6 @@ enum PauseInfoModelCheck {
         let noThumb = PauseInfoModel(title: "T", subtitle: nil, description: nil, thumb: "", poster: "https://p.example.org/p.jpg")
         check(noThumb.image?.host == "p.example.org", "an empty thumb falls through to the poster")
 
-        // #496: a trailer arrives titled a bare "Trailer"; the film's name comes back from video.title.
-        let trailer = PauseInfoModel(title: "Trailer", subtitle: "1998", description: nil, thumb: nil, poster: nil,
-                                     videoTitle: "Practical Magic")
-        check(trailer.title == "Practical Magic — Trailer", "a bare Trailer title gets the film's name")
-        let film = PauseInfoModel(title: "Practical Magic", subtitle: nil, description: nil, thumb: nil, poster: nil,
-                                  videoTitle: "Practical Magic")
-        check(film.title == "Practical Magic", "a named title stays as sent")
-        let lone = PauseInfoModel(title: "Trailer", subtitle: nil, description: nil, thumb: nil, poster: nil, videoTitle: " ")
-        check(lone.title == "Trailer", "no film name: the title stays as sent")
-
         // Visibility: Android refreshMediaInfoPanel.
         let m = PauseInfoModel(title: "Title", subtitle: " ", description: "Plot", thumb: nil, poster: nil)
         check(m.meta == nil, "a blank meta line is absent")

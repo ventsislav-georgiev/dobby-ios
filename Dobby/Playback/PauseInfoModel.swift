@@ -10,20 +10,12 @@ struct PauseInfoModel: Equatable {
     let plot: String?
     let image: URL?
 
-    /// `videoTitle` is the payload's `video.title`, the film's name.
-    init(title: String?, subtitle: String?, description: String?, thumb: String?, poster: String?,
-         videoTitle: String? = nil) {
+    init(title: String?, subtitle: String?, description: String?, thumb: String?, poster: String?) {
         func text(_ s: String?) -> String? {
             guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
             return t
         }
-        // #496: the page's playTrailer means "<film> — Trailer" but reads a name the IMDb detail
-        // lacks, so a trailer arrives titled a bare "Trailer"; put the film's name back.
-        if text(title) == "Trailer", let film = text(videoTitle) {
-            self.title = film + " — Trailer"
-        } else {
-            self.title = text(title)
-        }
+        self.title = text(title)
         self.meta = text(subtitle)
         self.plot = text(description)
         // The still, else the poster; an empty or unusable thumb falls through to the poster.

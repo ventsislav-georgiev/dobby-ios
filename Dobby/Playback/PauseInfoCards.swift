@@ -27,7 +27,7 @@ extension PlayerView {
     private var pauseInfoModel: PauseInfoModel? {
         guard let req = playback.request else { return nil }
         let model = PauseInfoModel(title: req.title, subtitle: req.subtitle, description: req.description,
-                                   thumb: req.thumb, poster: req.poster, videoTitle: req.video?.title)
+                                   thumb: req.thumb, poster: req.poster)
         return model.hasText ? model : nil
     }
 
