@@ -164,6 +164,7 @@ final class PlayerControls: ObservableObject {
     // MARK: Layers: open / close
 
     func openSheet(_ s: Sheet) {
+        if s == .subtitles { subtitleSheetWillOpen() }   // E3: land on the playing subtitle's tab
         sheet = s
         focusIndex = sheetContent(s).rows.firstIndex { $0.selected } ?? 0
         forceShow()
