@@ -277,7 +277,7 @@ xcrun swiftc -o "$OUT5" \
 
 # #466: the Mac OSD's pure-logic files (no SwiftUI / KSPlayer import), one check each. The
 # entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
-for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel; do
+for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference; do
   OUTP="$(mktemp -d)/$PURE-check"
   xcrun swiftc -o "$OUTP" "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
@@ -3326,6 +3326,7 @@ def fail(msg):
 EXPECTED = {
     "dobbyNativeDownloadProgress", "dobbyNativeAudioRoute", "dobbyNativeVoiceCommand",
     "dobbyNativeRequestSubtitle", "dobbyNativePlaybackEnded", "dobbyNativePlaybackProgress",
+    "dobbyNativeBookmarkRequest", "dobbyNativeSubtitleTracks",
 }
 NOT_DEFINED_BY_PWA = {
     "dobbyNativeAudioRoute": "never defined by the PWA; it reads window.Dobby.isCarAudio, which "
