@@ -24,5 +24,6 @@ The Pi's https name (`<pi>.<tailnet>.ts.net`) is not in this repo. Export
 `DOBBY_PI_HOST` before any of the builds above (CI takes it from the
 `DOBBY_PI_HOST` repo secret); xcodebuild expands it into `WKAppBoundDomains`,
 which iOS needs to load the Pi at all, and it becomes the default address.
-Without it the app has no default: add the address in Settings (macOS), and on
-iOS only a name listed in `WKAppBoundDomains` is usable.
+It is also the origin the web data lives under, so `install.sh` and the
+TestFlight workflow refuse to build without it (`scripts/mac-release.sh` must
+have it exported too). A Debug build without it has no default Pi address.
