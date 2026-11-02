@@ -184,6 +184,11 @@ final class PlaybackCoordinator: ObservableObject {
         bridge?.callJS("window.dobbyNativeRequestSubtitle && window.dobbyNativeRequestSubtitle(\(json));")
     }
 
+    /// #466 stub, E8 fills it: post {positionMs, ref, videoMeta} to the page's
+    /// window.dobbyNativeBookmarkRequest (Android requestBookmark :7268-7284). The caller
+    /// (PlayerControls.bookmark) already checked allowBookmarks.
+    func requestBookmark() {}
+
     func setSubtitleOffset(ref: String, ms: Int) {
         player.subtitleModel.subtitleDelay = Double(ms) / 1000.0
     }

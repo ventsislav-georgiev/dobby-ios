@@ -275,6 +275,14 @@ xcrun swiftc -o "$OUT5" \
   Dobby/Playback/ScrubState.swift Tests/ScrubStateCheck.swift
 "$OUT5"
 
+# #466: the Mac OSD's pure-logic files (no SwiftUI / KSPlayer import), one check each. The
+# entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
+for PURE in SubtitleOrdering SubsDelayModel AspectModel; do
+  OUTP="$(mktemp -d)/$PURE-check"
+  xcrun swiftc -o "$OUTP" "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
+  "$OUTP"
+done
+
 OUT6="$(mktemp -d)/offline-store-path-check"
 xcrun swiftc -o "$OUT6" \
   Dobby/Offline/OfflinePathAnchor.swift Tests/OfflineStorePathCheck.swift
@@ -469,7 +477,7 @@ ISDEFAULTKEYPY
 python3 - <<'SCRUBPY'
 import sys
 
-path = "Dobby/Playback/PlayerView.swift"
+path = "Dobby/Playback/ControlBar.swift"   # #466: the Slider moved here from PlayerView.swift
 with open(path) as f:
     src = f.read()
 
@@ -665,11 +673,11 @@ controls_path = "Dobby/Playback/PlayerControls.swift"
 with open(controls_path) as f:
     controls_src = f.read()
 
-if "guard menu == nil, !showInfo, isPlaying, !scrubbing else { return }" not in controls_src:
+if "guard !anyLayerOpen, !showInfo, isPlaying, !scrubbing else { return }" not in controls_src:
     sys.stderr.write("FAIL: PlayerControls.scheduleHide() no longer guards on scrubbing (#129)\n")
     sys.exit(1)
 
-view_path = "Dobby/Playback/PlayerView.swift"
+view_path = "Dobby/Playback/ControlBar.swift"   # #466: the Slider moved here from PlayerView.swift
 with open(view_path) as f:
     view_src = f.read()
 
@@ -722,16 +730,21 @@ import sys
 view_path = "Dobby/Playback/PlayerView.swift"
 with open(view_path) as f:
     view_src = f.read()
+# #466: the control bar (Slider, sliderTouchEnded) moved to ControlBar.swift; the gesture state
+# and the root-level onChange stay on PlayerView, which is the point of this check.
+bar_path = "Dobby/Playback/ControlBar.swift"
+with open(bar_path) as f:
+    bar_src = f.read()
 
-def need(needle, message):
-    if needle not in view_src:
+def need(needle, message, src=None):
+    if needle not in (view_src if src is None else src):
         sys.stderr.write(f"FAIL: {message} (#131)\n")
         sys.exit(1)
 
-need("@GestureState private var sliderTouch = false",
+need("@GestureState var sliderTouch = false",
      "PlayerView no longer carries the @GestureState that SwiftUI resets on a cancelled drag")
 need(".simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch) { _, down, _ in down = true })",
-     "the Slider no longer rides a simultaneous DragGesture that drives sliderTouch")
+     "the Slider no longer rides a simultaneous DragGesture that drives sliderTouch", bar_src)
 need(".onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }",
      "PlayerView no longer recovers the lost Slider release from the gesture-state reset")
 
@@ -748,7 +761,7 @@ need(".onChange(of: sliderTouch) { down in if !down { sliderTouchEnded() } }",
 # which pins it to the root body rather than merely to a range of the file.
 anchor_idx = view_src.index(".onDisappear {")
 change_idx = view_src.index(".onChange(of: sliderTouch)")
-if not (anchor_idx < change_idx < view_src.index("Slider(value:")):
+if not anchor_idx < change_idx or "Slider(value:" in view_src or ".onChange(of: sliderTouch)" in bar_src:
     sys.stderr.write("FAIL: the sliderTouch onChange moved off the root view onto the control bar, where it dies with the Slider it backs up (#131)\n")
     sys.exit(1)
 between = view_src[anchor_idx:change_idx]
@@ -756,12 +769,12 @@ if "private var " in between or "private func " in between:
     sys.stderr.write("FAIL: the sliderTouch onChange moved into a nested view body (a declaration opens between it and the root chain); it must hang off the root so it outlives the OSD and the control bar (#131)\n")
     sys.exit(1)
 
-if view_src.count("sliderTouchEnded()") != 2:   # the declaration and its single call site
+if view_src.count("sliderTouchEnded()") + bar_src.count("sliderTouchEnded()") != 2:   # the declaration and its single call site
     sys.stderr.write("FAIL: sliderTouchEnded() must have exactly one call site (#131)\n")
     sys.exit(1)
 
-start = view_src.index("private func sliderTouchEnded() {")
-body = view_src[start:view_src.index("\n    }\n", start)]
+start = bar_src.index("    func sliderTouchEnded() {")
+body = bar_src[start:bar_src.index("\n    }\n", start)]
 
 for needle, message in [
     ("if scrub.isScrubbing {", "the recovery does not gate on a live scrub, so a bare tap can seek to a stale value"),
@@ -1371,7 +1384,7 @@ import sys
 sys.path.insert(0, "Tests")
 from swift_strip import strip_swift
 
-path = "Dobby/Playback/PlayerView.swift"
+path = "Dobby/Playback/ControlBar.swift"   # #466: the bar moved here from PlayerView.swift
 src = strip_swift(open(path).read(), path)
 
 if "Text(timeLabel(current, matching: total))" not in src:
@@ -3208,7 +3221,7 @@ pv = swift("Dobby/Playback/PlayerView.swift")
 drag = consecutive(pv, [
     ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
     "guard v.startLocation.x < 24, v.translation.width > 50 else { return }",
-    "if controls.menu != nil { controls.closeMenu() } else { playback.stop() }"], "PlayerView edge drag")
+    "if !controls.closeTopLayer() { playback.stop() }"], "PlayerView edge drag")
 if pv[drag[-1] + 1].strip() != "})":
     fail("PlayerView's edge drag must close right after its back action")
 if not one(pv, "var body: some View {", "PlayerView") < one(

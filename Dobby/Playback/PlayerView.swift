@@ -7,41 +7,37 @@ import AppKit
 import UIKit
 #endif
 
-/// Full-window native player with an Android-TV-style OSD: bottom transport bar,
-/// right-side selection menus (subtitles / audio / speed / aspect), toast feedback.
-/// macOS: space=play/pause, ←/→ seek, ↑/↓ menu nav, f=fullscreen, esc=back/close,
-/// mouse move reveals the OSD (auto-hides while playing). iOS: tap toggles pause +
-/// reveals the OSD; menu rows are tappable.
+/// Full-window native player with an Android-TV-style OSD. This file is the composition and
+/// the input wiring only; the OSD contract (which file each part lives in, the key router, the
+/// layers) is OSD-CONTRACT.md (repo root). macOS: keys go through PlayerControls' router,
+/// a click on the picture shows or hides the bar, a double-click toggles fullscreen, mouse
+/// movement reveals the bar. iOS: tap regions, the left-edge back swipe, tappable rows.
 struct PlayerView: View {
-    @EnvironmentObject private var playback: PlaybackCoordinator
-    @ObservedObject private var time: ControllerTimeModel
-    @ObservedObject private var subtitles: SubtitleModel
-    @StateObject private var controls = PlayerControls()
+    @EnvironmentObject var playback: PlaybackCoordinator
+    @ObservedObject var time: ControllerTimeModel
+    @ObservedObject var subtitles: SubtitleModel
+    @StateObject var controls = PlayerControls()
     let url: URL
 
-    @State private var scrub = ScrubState()
-    @State private var isPlaying = true
+    @State var scrub = ScrubState()
+    @State var isPlaying = true
     /// #131: true from touch-down on the Slider until SwiftUI tears the gesture down.
     /// `@GestureState` is reset automatically when the gesture ends *or is cancelled* —
     /// that is the whole reason the wrapper exists over a plain `@State` set in
     /// `onChanged` and cleared in `onEnded`. Every terminal callback SwiftUI offers
     /// (`onEnded`, `Slider`'s `onEditingChanged(false)`) is only delivered when the
     /// gesture *completes*, so they all fail in the same direction; the reset does not.
-    @GestureState private var sliderTouch = false
+    /// Declared here, on the root view, so it outlives the control bar (ControlBar.swift).
+    @GestureState var sliderTouch = false
     /// #131 diagnostics only: did the Slider report `onEditingChanged(true)` for this
     /// touch? Separates "the release was delivered normally" from "the touch never became
     /// a drag" in the log, so those two never share one signature.
-    @State private var sliderDidBegin = false
+    @State var sliderDidBegin = false
 
-    private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
+    static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "playback")
     #if os(macOS)
     @State private var keyMonitor: Any?
     #endif
-
-    // Android OSD palette.
-    private let panelBG = Color(red: 8/255, green: 12/255, blue: 24/255).opacity(0.82)
-    private let accent = Color(red: 0x5d/255, green: 0xad/255, blue: 0xe2/255)
-    private let selectedBG = Color(red: 0x0f/255, green: 0x34/255, blue: 0x60/255)
 
     init(url: URL, time: ControllerTimeModel, subtitles: SubtitleModel) {
         self.url = url
@@ -60,32 +56,33 @@ struct PlayerView: View {
                     controls.syncState(state)
                     if state == .readyToPlay { controls.wake() }
                 }
-                .onPlay { cur, total in playback.onProgress(current: cur, total: total) }
+                .onPlay { cur, total in
+                    playback.onProgress(current: cur, total: total)
+                    controls.playbackTick(current: cur)
+                }
                 .onFinish { _, err in playback.onFinish(error: err) }
-                .scaleEffect(x: controls.zoom, y: controls.zoom * controls.stretch)   // Zoom (uniform) + Stretch (vertical only)
+                .aspectTransform(controls.aspect)                  // AspectSheet.swift (E7)
                 .ignoresSafeArea()
                 .clipped()
 
             #if os(iOS)
             tapRegions
+            #else
+            pictureClicks
             #endif
 
-            subtitleOverlay
-
-            if controls.buffering || !controls.loaded {
-                loadingSpinner.transition(.opacity)
-            }
+            subtitleOverlay                                        // SubtitleOverlay.swift (E5)
+            playerLoaders                                          // PlayerLoaders.swift (E11)
 
             if controls.showInfo {
                 infoOverlay.transition(.opacity)
             }
 
-            if controls.visible {
-                osd.transition(.opacity)
-            }
+            pauseInfoCards                                         // PauseInfoCards.swift (E10)
+            controlBarLayer                                        // ControlBar.swift (E2)
 
-            // Close button as a top-level, topmost layer (not inside `osd`): in iOS
-            // portrait the osd's overlay was below the tap regions in hit-test order, so
+            // Close button as a top-level, topmost layer (not inside the bar): in iOS
+            // portrait the bar's overlay was below the tap regions in hit-test order, so
             // the X wasn't tappable. A dedicated top layer always wins the touch.
             if controls.visible {
                 // Root view ignores the safe area, so offset manually below the status
@@ -95,8 +92,23 @@ struct PlayerView: View {
                     .padding(.top, topSafeInset)
             }
 
+            // Modal layers, bottom to top in the router's reverse priority.
+            moreMenu                                               // MoreMenu.swift (E9)
+            shortcutsOverlay                                       // ShortcutsOverlay.swift (E9)
+            if let sheet = controls.sheet {
+                OSDSheetView(content: controls.sheetContent(sheet), tint: controls.tint,
+                             focusIndex: controls.focusIndex,
+                             onFocus: { controls.focusIndex = $0 },
+                             onPick: { controls.pickRow($0) },
+                             onDismiss: { controls.closeSheet() })
+                    .transition(.opacity)
+            }
+            subsDelayPill                                          // SubsDelayPill.swift (E6)
+
             if let toast = controls.toast {
-                toastView(toast).transition(.opacity)
+                OSDToast(message: toast, tint: controls.tint)
+                    .padding(.top, topSafeInset)
+                    .transition(.opacity)
             }
 
             #if os(macOS)
@@ -105,6 +117,7 @@ struct PlayerView: View {
         }
         .animation(.easeInOut(duration: 0.18), value: controls.visible)
         .animation(.easeInOut(duration: 0.12), value: controls.toast)
+        .animation(.easeInOut(duration: 0.16), value: controls.sheet)
         .onAppear { controls.playback = playback; installInput() }
         .onDisappear { removeInput(); controls.exitFullscreenIfNeeded() }
         // #131: deliberately on the root, not on the Slider. If the control bar is torn
@@ -114,11 +127,11 @@ struct PlayerView: View {
         #if os(iOS)
         // #197: the left-edge back swipe. The player covers the WebView, so its edge recognizer
         // never sees these touches; this is the macOS Esc / Android PlaybackActivity Back:
-        // an open menu closes first, else the player closes. Simultaneous, so taps and the
+        // an open layer closes first, else the player closes. Simultaneous, so taps and the
         // Slider keep their own gestures; only a drag that starts at the edge counts.
         .simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in
             guard v.startLocation.x < 24, v.translation.width > 50 else { return }
-            if controls.menu != nil { controls.closeMenu() } else { playback.stop() }
+            if !controls.closeTopLayer() { playback.stop() }
         })
         #endif
         #if os(macOS)
@@ -159,25 +172,16 @@ struct PlayerView: View {
             .contentShape(Rectangle())
             .onTapGesture { if controls.visible { controls.hide() } else { action() } }
     }
-    #endif
-
-    // MARK: OSD
-
-    private var osd: some View {
-        ZStack {
-            // Dim only while paused, like a modal pause screen.
-            if !isPlaying { Color.black.opacity(0.25).ignoresSafeArea() }
-
-            VStack { Spacer(); controlBar }
-
-            if let menu = controls.menu {
-                HStack { Spacer(); menuPanel(menu) }
-                    .padding(.trailing, 24)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.16), value: controls.menu)
+    #else
+    /// macOS: a click on the picture is Android's OK (show / hide the bar, owner ruling D2),
+    /// a double-click toggles fullscreen. Below the OSD in the ZStack, so its controls win.
+    private var pictureClicks: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { controls.toggleFullscreen() }
+            .onTapGesture(count: 1) { controls.okPress() }
     }
+    #endif
 
     private var closeButton: some View {
         Button { playback.stop() } label: {
@@ -204,299 +208,6 @@ struct PlayerView: View {
         #endif
     }
 
-    private var controlBar: some View {
-        let total = max(1, Double(time.totalTime))
-        let current = scrub.displayed(live: Double(time.currentTime))
-        return VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                Text(timeLabel(current, matching: total)).font(.caption.monospacedDigit())
-                Slider(value: Binding(get: { current }, set: { scrub.update(to: $0) }), in: 0...total) { editing in
-                    // The knob binds to this value the instant the drag starts — seed it
-                    // from the live position or it lands wherever the last drag ended (#115).
-                    // #131 review: a healthy release and a release the recovery already
-                    // committed both reach this branch, and SwiftUI documents no ordering
-                    // between the gesture-state reset and onEditingChanged(false). Capture
-                    // whether THIS callback is the one that seeked, so the two never share
-                    // a log signature.
-                    let seekedHere = !editing && scrub.isScrubbing
-                    if editing { controls.scrubbing = true }   // #129: hold the OSD for the whole drag
-                    if editing { scrub.begin(at: current) }
-                    else if scrub.isScrubbing { playback.seek(to: scrub.end()) }   // #131: skip if the recovery path already committed this drag
-                    if editing {
-                        sliderDidBegin = true
-                        Self.log.info("slider scrub begin at=\(current, privacy: .public)s total=\(total, privacy: .public)s")
-                    } else {
-                        Self.log.info("slider release delivered target=\(scrub.value, privacy: .public)s seeked=\(seekedHere, privacy: .public)")
-                    }
-                    if !editing { controls.scrubbing = false }
-                    controls.forceShow()
-                    if !editing { controls.scheduleHide() }   // #129: resume the idle timer after release
-                }
-                .tint(accent)
-                // #131: the Slider's own release callback is the only thing that used to
-                // end a drag, and on device SwiftUI simply did not deliver it once. This
-                // rides along (never steals — `simultaneousGesture`, and the Slider keeps
-                // tracking normally) purely so `sliderTouch` exists to be reset.
-                .simultaneousGesture(DragGesture(minimumDistance: 0).updating($sliderTouch) { _, down, _ in down = true })
-                Text(timeLabel(total, matching: total)).font(.caption.monospacedDigit())
-            }
-
-            // Portrait iPhone can't fit every button: fall back to a tighter row
-            // without the ±10s buttons (the tap zones already cover seeking).
-            ViewThatFits(in: .horizontal) {
-                buttonRow(spacing: 18, compact: false)
-                buttonRow(spacing: 12, compact: true)
-                buttonRow(spacing: 6, compact: true)
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 22)
-        .padding(.vertical, 14)
-        .background(LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .top, endPoint: .bottom))
-    }
-
-    // MARK: Slider release recovery (#131)
-
-    /// Every finger that goes down on the Slider comes back through here, whether the
-    /// gesture ended or was cancelled — see `sliderTouch`. On device SwiftUI dropped one
-    /// drag's `onEditingChanged(false)` entirely (`.claude-work/115-evidence/diag4-owner-drag.log`,
-    /// drag 3 at 19:08:36.942): the knob moved, the finger lifted, no seek ran, and
-    /// `controls.scrubbing` stayed set, so #129's guards kept the OSD on screen for the
-    /// rest of the session.
-    ///
-    /// Exactly-once is `ScrubState.isScrubbing`, not a second flag: `end()` clears it, so
-    /// whichever of the two release paths runs first commits and the other sees `false`
-    /// and does nothing. Both are MainActor-isolated, so the read and the clear cannot
-    /// interleave. A touch that never became a drag (a tap on the track, which iOS's
-    /// Slider ignores) leaves `isScrubbing` false and therefore cannot seek to the
-    /// *previous* drag's stale value.
-    ///
-    /// A cancelled drag still seeks, on purpose: the knob was visibly moved and the user's
-    /// last seen intent is where it sits. Snapping back would be the surprising behaviour.
-    private func sliderTouchEnded() {
-        if scrub.isScrubbing {
-            let target = scrub.end()
-            Self.log.info("slider release recovered target=\(target, privacy: .public)s scrubWasLive=true (#131)")
-            playback.seek(to: target)
-        } else if sliderDidBegin {
-            Self.log.info("slider touch ended, release already delivered")
-        } else {
-            Self.log.info("slider touch ended without starting a drag")
-        }
-        sliderDidBegin = false
-        controls.scrubbing = false   // #131: the one clear that cannot be lost
-        controls.scheduleHide()
-    }
-
-    /// Menus that make sense for the current stream: quality is only offered
-    /// when the payload carried per-height alternates (ytdlpAdaptive lane).
-    private var menuButtons: [PlayerControls.Menu] {
-        PlayerControls.Menu.allCases.filter { $0 != .quality || !playback.qualityOptions.isEmpty }
-    }
-
-    private func buttonRow(spacing: CGFloat, compact: Bool) -> some View {
-        HStack(spacing: spacing) {
-            iconButton(isPlaying ? "pause.fill" : "play.fill", size: 22) { controls.togglePlay(); isPlaying = controls.isPlaying }
-            if !compact {
-                iconButton("gobackward.10", size: 19) { controls.seekBy(-10) }
-                iconButton("goforward.10", size: 19) { controls.seekBy(10) }
-            }
-            Spacer()
-            ForEach(menuButtons) { m in
-                iconButton(m.icon, size: 18, active: controls.menu == m) { controls.toggleMenu(m) }
-            }
-            iconButton("info.circle", size: 18, active: controls.showInfo) { controls.toggleInfo() }
-            #if os(macOS)
-            iconButton("arrow.up.left.and.arrow.down.right", size: 18) { controls.toggleFullscreen() }
-            #endif
-        }
-    }
-
-    private func iconButton(_ name: String, size: CGFloat, active: Bool = false, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: name)
-                .font(.system(size: size, weight: .medium))
-                .foregroundStyle(active ? accent : .white)
-                .frame(width: 34, height: 30)
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Side menu panel (Android subtitle-osd look)
-
-    private func menuPanel(_ menu: PlayerControls.Menu) -> some View {
-        let rows = controls.items(for: menu)
-        return VStack(alignment: .leading, spacing: 2) {
-            Text(menu.title)
-                .font(.system(size: 12, weight: .heavy))
-                .tracking(1.2)
-                .foregroundStyle(accent)
-                .padding(.bottom, 6)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
-                            menuRow(row, focused: controls.focusIndex == idx)
-                                .id(idx)
-                                .onTapGesture { selectRow(row) }
-                        }
-                    }
-                }
-                .onChange(of: controls.focusIndex) { i in withAnimation { proxy.scrollTo(i, anchor: .center) } }
-            }
-        }
-        .padding(12)
-        .frame(width: 320)
-        .frame(maxHeight: 460)
-        .background(panelBG)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.18), lineWidth: 1))
-        .shadow(color: .black.opacity(0.5), radius: 17, y: 12)
-    }
-
-    private func selectRow(_ row: OSDItem) {
-        guard row.enabled else { return }
-        row.action()
-        controls.forceShow()
-    }
-
-    private func menuRow(_ row: OSDItem, focused: Bool) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: row.selected ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 13))
-                .foregroundStyle(row.selected ? accent : .white.opacity(0.35))
-            Text(row.label)
-                .font(.system(size: 14))
-                .foregroundStyle(row.enabled ? .white : .white.opacity(0.4))
-            Spacer(minLength: 4)
-            if let d = row.detail {
-                Text(d).font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .background(focused ? selectedBG : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(focused ? accent : .clear, lineWidth: 2))
-        .contentShape(Rectangle())
-    }
-
-    // MARK: Subtitles (styled)
-
-    private var subtitleOverlay: some View {
-        VStack {
-            Spacer()
-            ForEach(subtitles.parts) { part in
-                if let text = part.text {
-                    styledSubtitle(plainText(text))
-                }
-            }
-        }
-        .padding(.bottom, (controls.visible ? 120 : 56) + controls.subtitlePosition)
-        .animation(.easeInOut(duration: 0.18), value: controls.visible)
-        .allowsHitTesting(false)
-    }
-
-    /// KSPlayer stamps `SubtitleModel.textFont` as a .font attribute over the whole
-    /// string; an embedded attribute beats SwiftUI's .font() modifier, which made the
-    /// style/size menu a no-op. Strip it so our styling applies.
-    private func plainText(_ text: NSAttributedString) -> AttributedString {
-        // KSPlayer's SRT/VTT parser leaves HTML-style tags (<i>, <b>, <u>) in the
-        // cue text verbatim — render them instead of showing them.
-        if text.string.contains("<") { return renderTags(text.string) }
-        let m = NSMutableAttributedString(attributedString: text)
-        m.removeAttribute(.font, range: NSRange(location: 0, length: m.length))
-        return AttributedString(m)
-    }
-
-    /// Minimal subtitle tag renderer: applies <i>/<em>, <b>/<strong>, <u>;
-    /// strips any other <...> tag (e.g. <font ...>). Not a full HTML parser —
-    /// subtitle cues only ever carry this handful of tags.
-    private func renderTags(_ s: String) -> AttributedString {
-        var out = AttributedString()
-        var italic = 0, bold = 0, underline = 0
-        var buf = ""
-        func flush() {
-            guard !buf.isEmpty else { return }
-            var run = AttributedString(buf)
-            var intent: InlinePresentationIntent = []
-            if italic > 0 { intent.insert(.emphasized) }
-            if bold > 0 { intent.insert(.stronglyEmphasized) }
-            if !intent.isEmpty { run.inlinePresentationIntent = intent }
-            if underline > 0 { run.underlineStyle = .single }
-            out += run
-            buf = ""
-        }
-        var idx = s.startIndex
-        while idx < s.endIndex {
-            if s[idx] == "<", let close = s[idx...].firstIndex(of: ">") {
-                let tag = s[s.index(after: idx)..<close].lowercased()
-                let closing = tag.hasPrefix("/")
-                let name = (closing ? tag.dropFirst() : tag[...]).prefix { !$0.isWhitespace }
-                flush()
-                let delta = closing ? -1 : 1
-                switch name {
-                case "i", "em": italic = max(0, italic + delta)
-                case "b", "strong": bold = max(0, bold + delta)
-                case "u": underline = max(0, underline + delta)
-                default: break
-                }
-                idx = s.index(after: close)
-            } else {
-                buf.append(s[idx])
-                idx = s.index(after: idx)
-            }
-        }
-        flush()
-        return out
-    }
-
-    @ViewBuilder
-    private func styledSubtitle(_ text: AttributedString) -> some View {
-        let size = (controls.subtitleStyle == .large ? 34.0 : 22.0) * controls.subtitleScale
-        switch controls.subtitleStyle {
-        case .standard:
-            Text(text).font(.system(size: size)).foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.9), radius: 1, x: 1, y: 1)
-                .multilineTextAlignment(.center)
-        case .large:
-            Text(text).font(.system(size: size, weight: .semibold)).foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.9), radius: 2, x: 1, y: 1)
-                .multilineTextAlignment(.center)
-        case .contrast:
-            Text(text).font(.system(size: size, weight: .semibold)).foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 10).padding(.vertical, 4)
-                .background(.black.opacity(0.7))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private func toastView(_ msg: String) -> some View {
-        VStack {
-            Spacer()
-            Text(msg)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16).padding(.vertical, 9)
-                .background(.black.opacity(0.7))
-                .clipShape(Capsule())
-            Spacer().frame(height: 140)
-        }
-        .allowsHitTesting(false)
-    }
-
-    // MARK: Loading spinner (#3 initial load, #5 seek buffering)
-
-    private var loadingSpinner: some View {
-        ProgressView()
-            .progressViewStyle(.circular)
-            .controlSize(.large)
-            .scaleEffect(1.4)
-            .tint(.white)
-            .allowsHitTesting(false)
-    }
-
     // MARK: Info OSD (stats for nerds) — live, refreshed each second
 
     private var infoOverlay: some View {
@@ -507,9 +218,7 @@ struct PlayerView: View {
             .font(.system(size: 11, weight: .medium).monospaced())
             .foregroundStyle(.white)
             .padding(12)
-            .background(panelBG)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.18), lineWidth: 1))
+            .osdCard(fill: controls.tint.panel, radius: 10, hairline: .white.opacity(0.18))
             .padding(.top, 56)
             .padding(.trailing, 16)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -550,30 +259,11 @@ struct PlayerView: View {
         return s.isEmpty ? "—" : s
     }
 
-    // #128: the elapsed label used to format itself alone, so scrubbing across the
-    // 1:00:00 mark grew it from d:dd to d:dd:dd mid-drag, reflowing the HStack and
-    // sliding the Slider under the tracking finger. `matching` pins the field width
-    // to the total's own shape (which never changes during a drag) so the elapsed
-    // label never grows independently.
-    private func timeLabel(_ seconds: Double, matching total: Double = 0) -> String {
-        let s = Int(seconds.isFinite ? seconds : 0)
-        let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
-        let showHours = h > 0 || total >= 3600
-        if showHours { return String(format: "%d:%02d:%02d", h, m, sec) }
-        // Same defect one field down: under an hour the minutes are unpadded, so the
-        // elapsed label still grows from 9:59 to 10:00 mid-drag on anything over ten
-        // minutes. Pin the minutes width to the total's the way the hours field is
-        // pinned above. The total's own rendering never changes, only the elapsed
-        // label gains a leading zero, which is what makes the two labels equal width.
-        let totalMinutes = Int(total.isFinite ? total : 0) / 60
-        return String(format: totalMinutes >= 10 ? "%02d:%02d" : "%d:%02d", m, sec)
-    }
-
     // MARK: Input wiring
 
     private func installInput() {
         #if os(macOS)
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
             handleKey(event) ? nil : event   // swallow handled keys
         }
         #endif
@@ -586,30 +276,34 @@ struct PlayerView: View {
     }
 
     #if os(macOS)
-    /// Returns true if the key was handled (and should be swallowed).
+    /// Returns true if the key was handled (and should be swallowed). Command / Control chords
+    /// pass through untouched so the menu bar's shortcuts (Cmd-Q, Cmd-W) still work.
     private func handleKey(_ e: NSEvent) -> Bool {
-        let menuOpen = controls.menu != nil
+        if !e.modifierFlags.intersection([.command, .control]).isEmpty { return false }
+        guard let key = Self.osdKey(e) else { return false }
+        if e.type == .keyUp { return controls.keyUp(key) }
+        let handled = controls.keyDown(key, isRepeat: e.isARepeat)
+        if key == .space { isPlaying = controls.isPlaying }
+        return handled
+    }
+
+    /// Key codes are layout-independent; letters and punctuation map to the US key at that
+    /// position. "?" is Shift-slash.
+    private static func osdKey(_ e: NSEvent) -> OSDKey? {
         switch e.keyCode {
-        case 49: controls.togglePlay(); isPlaying = controls.isPlaying           // space
-        case 123: if menuOpen { controls.closeMenu() } else { controls.seekBy(-10) } // ←
-        case 124: if menuOpen { controls.activateFocused() } else { controls.seekBy(10) } // →
-        case 126: if menuOpen { controls.navUp() } else { controls.wake() }      // ↑
-        case 125: if menuOpen { controls.navDown() } else { controls.wake() }    // ↓
-        case 36, 76: if menuOpen { controls.activateFocused() } else { controls.togglePlay() } // enter
-        case 53:                                                                  // esc
-            if menuOpen { controls.closeMenu() }
-            else if controls.isFullscreen { controls.toggleFullscreen() }
-            else { playback.stop() }
-        case 3: controls.toggleFullscreen()                                       // f
-        case 1: controls.toggleMenu(.subtitles)                                   // s
-        case 0: controls.toggleMenu(.audio)                                       // a
-        case 2: controls.toggleMenu(.speed)                                       // d
-        case 12: if !playback.qualityOptions.isEmpty { controls.toggleMenu(.quality) } // q
-        case 13: controls.toggleMenu(.aspect)                                     // w
-        case 34: controls.toggleInfo()                                            // i
-        default: return false
+        case 49: return .space
+        case 123: return .left
+        case 124: return .right
+        case 126: return .up
+        case 125: return .down
+        case 36, 76: return .ret
+        case 53: return .escape
+        case 44: return .char(e.modifierFlags.contains(.shift) ? "?" : "/")
+        default:
+            let letters: [UInt16: Character] = [0: "a", 1: "s", 2: "d", 3: "f", 11: "b", 12: "q", 13: "w",
+                                                34: "i", 43: ",", 47: "."]
+            return letters[e.keyCode].map(OSDKey.char)
         }
-        return true
     }
     #endif
 }
