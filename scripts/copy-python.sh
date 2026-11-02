@@ -135,6 +135,9 @@ else
   # where the .so was (the import system follows the stub). It reads these from the environment.
   export EXPANDED_CODE_SIGN_IDENTITY="$SIGN_ID" EXPANDED_CODE_SIGN_IDENTITY_NAME="${EXPANDED_CODE_SIGN_IDENTITY_NAME:-ad hoc}"
   export CODESIGNING_FOLDER_PATH="$TARGET_BUILD_DIR/$WRAPPER_NAME" PROJECT_DIR="$PWD"
+  # The helper reads lib-$ARCHS, one slice only; a generic simulator build lists two.
+  # ponytail: binary modules for the native arch only, an x86_64 simulator on Apple silicon misses them.
+  case " $ARCHS " in *" ${NATIVE_ARCH:-arm64} "*) export ARCHS="${NATIVE_ARCH:-arm64}" ;; esac
   # shellcheck source=/dev/null
   source "$CACHE/iOS/Python.xcframework/build/utils.sh"
   install_python python-support/iOS/Python.xcframework python/app_packages >/dev/null
