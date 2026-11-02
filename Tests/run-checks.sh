@@ -3129,7 +3129,8 @@ PIGATEPY
 #     the WKWebView exists and before coordinator.attach; WebBridge.edgeBack (iOS-only) fires
 #     backJS once per completed swipe; backJS is the Escape keydown dobby-android's
 #     MainActivity.handleWebBackOrRootExit dispatches for the TV Back key; the native player
-#     (which covers the web view) has its own iOS-only edge drag with the macOS Esc order.
+#     (which covers the web view) has its own iOS-only edge drag that sends Esc into the
+#     OSD key router (#487), so it does exactly what the macOS Esc key does.
 #   consumer: the PWA's document keydown listener still treats Escape as back, and its own
 #     touch flick handler skips a touch that starts in the edge strip when window.Dobby.edgeBack
 #     is true, which BridgeInjection sets on iOS only (else one edge flick is two backs).
@@ -3233,7 +3234,7 @@ pv = swift("Dobby/Playback/PlayerView.swift")
 drag = consecutive(pv, [
     ".simultaneousGesture(DragGesture(minimumDistance: 30, coordinateSpace: .global).onEnded { v in",
     "guard v.startLocation.x < 24, v.translation.width > 50 else { return }",
-    "if !controls.closeTopLayer() { playback.stop() }"], "PlayerView edge drag")
+    "_ = send(.escape, up: false)"], "PlayerView edge drag")   # #487: Esc through the router
 if pv[drag[-1] + 1].strip() != "})":
     fail("PlayerView's edge drag must close right after its back action")
 if not one(pv, "var body: some View {", "PlayerView") < one(

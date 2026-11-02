@@ -68,7 +68,9 @@ the Pause-on-OK resume hook; it may be called repeatedly and must check its own 
 Keys: PlayerView's NSEvent monitor (keyDown and keyUp, Command/Control chords excluded) maps to
 `OSDKey` (`.left .right .up .down .ret .escape .space`, `.char(c)` for the US-layout key at that
 position: a s d f b q w i , . / and `?` = Shift-slash) and calls `controls.keyDown(_:isRepeat:)`
-/ `keyUp(_:)`.
+/ `keyUp(_:)`. On iOS a hardware keyboard (iPad) feeds the same keys through PlayerView's
+`HardwareKeys` first responder (UIKit sends no auto-repeat there), and the left-edge swipe is
+`.escape` through the same router (#487).
 
     func <name>HandleKey(_ key: OSDKey) -> Bool   // in extension PlayerControls
 
@@ -100,7 +102,10 @@ A sheet component provides `func <name>SheetContent() -> OSDSheetContent` (title
 tabs with `activeTab` and `selectTab`), rebuilt from live state on every render, and is a case of
 `PlayerControls.Sheet` (subtitles, audio, quality, speed, aspect, style). `OSDSheetView` draws it:
 centred 420 pt card, at most 60 % of the height, rows filled `row`, focused row filled `accent`
-with `onAccent` text, "✓ " before a selected row, disabled rows dimmed.
+with `onAccent` text, "✓ " before a selected row, disabled rows dimmed. macOS: a click outside the card
+closes the sheet. iOS: the sheet has no dismiss layer, so the bar and the close X stay tappable
+under it; a tap on the picture (ControlBar.swift `touchRegions`) closes the top layer. Rows, tabs
+and chevrons are at least 44 pt tall on iOS; macOS keeps its sizes (#487).
 
 Rows are `OSDItem(id:label:detail:selected:enabled:adjust:action:)`. `action` runs on Return or a
 click; picking never closes the sheet (call `closeSheet()` in your action for Android's
