@@ -33,6 +33,8 @@ targets:
         # Shell/ is a build-time copy (scripts/copy-app-shell.sh), not source.
         excludes:
           - Shell
+          # #482: copied next to the a4k tree by scripts/copy-python.sh, not a bundle-root resource.
+          - "Python/*.py"
       # #151, the bundled app shell for a Pi-less cold start. A folder REFERENCE
       # (`type: folder`), not a group: Xcode's resource copy flattens a group, and the
       # shell's `js/…` and `playsvideo/assets/…` paths have to survive into the bundle —
@@ -71,6 +73,11 @@ targets:
         # and the owner's data would be gone. Developer ID does not need the sandbox, and
         # network.client and user-selected files only mean anything inside one.
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": ""
+        # #482: a Mac app keeps its frameworks in Contents/Frameworks, one level up from the
+        # executable; the iOS-style @executable_path/Frameworks alone finds none of them. Python's
+        # binary modules load libssl and friends through @rpath/Python.framework/..., and the
+        # Sparkle link (#464) needs the same entry or dyld stops the app before main.
+        "LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]": "$(inherited) @executable_path/../Frameworks"
         # #464: the EdDSA PUBLIC key from Sparkle's generate_keys (owner step, see
         # scripts/mac-release.sh), expanded into Info.plist SUPublicEDKey. Public and safe to
         # commit; committing it pins the signer. The other two update settings,
@@ -91,6 +98,12 @@ targets:
         name: Fix framework bundle ids
       - path: scripts/deepen-macos-frameworks.sh
         name: Deepen macOS FFmpeg frameworks
+    postBuildScripts:
+      # #482: embedded CPython for the a4k lanes. After the resources, before Xcode signs the app:
+      # it embeds and signs Python.framework (and on iOS one framework per binary module), copies
+      # the a4k tree from the private sibling checkout, and degrades to no Python without one.
+      - path: scripts/copy-python.sh
+        name: Embed Python and the a4k tree
 
   # Now Playing Live Activity. Exists for the CarPlay Dashboard, which renders Live
   # Activities without any CarPlay entitlement. iOS 26 floor: that is when

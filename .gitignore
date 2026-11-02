@@ -32,3 +32,7 @@ Dobby/Shell/*
 
 # Agent scratch/evidence, never published
 .claude-work/
+
+# #482: Python-Apple-support and the pinned wheels, fetched by scripts/copy-python.sh. The a4k
+# tree itself is only ever copied into the built app, never into this (public) repo.
+python-support/
