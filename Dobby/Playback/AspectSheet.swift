@@ -60,10 +60,19 @@ extension PlayerControls {
         }
         if let row = AspectStore.loadMemory().rows[aspect.titleKey], let r = aspect.restore(row) {
             let what = r.knob == "zoom" ? "scale" : row.m == "manual" ? "stretch height" : "auto stretch"
-            flash("Restored \(what): \(r.percent)%")
+            if r.percent != 100 { flash("Restored \(what): \(r.percent)%") }   // 100: the sampler's "none needed"
             return
         }
         autoStretchFromMetadata()
+        startLetterboxSampler()                                 // LetterboxSampler.swift (#477)
+    }
+
+    /// #477 / #472 review: a new request in the same PlayerView (next episode) starts a fresh
+    /// aspect session, so the next readyToPlay restores or auto-fills again; a running sampler
+    /// sees its token gone and stops.
+    func resetAspectSession() {
+        aspect = AspectModel()
+        loaded = false
     }
 
     private func autoStretchFromMetadata() { autoStretch(videoAspect: aspect.videoAspect) }
@@ -79,7 +88,7 @@ extension PlayerControls {
         flash("Auto stretch: \(p)% (fills \(String(format: "%.2f", videoAspect)):1)")
     }
 
-    private func rememberAspect(knob: String, source: String) {
+    func rememberAspect(knob: String, source: String) {
         var m = AspectStore.loadMemory()
         m.remember(key: aspect.titleKey, aspect: aspect, knob: knob, source: source,
                    now: Date().timeIntervalSince1970)
@@ -102,7 +111,7 @@ extension PlayerControls {
         flash("Auto stretch: \(AspectModel.levelLabel(aspect.autoLevel))")
         switch aspect.reapplyLevel() {
         case .remember: rememberAspect(knob: "stretchV", source: "auto")
-        case .runStartPaths: autoStretchFromMetadata()      // #477: start the sampler here too
+        case .runStartPaths: autoStretchFromMetadata(); startLetterboxSampler()
         case .none: break
         }
         applyAspect()
@@ -152,6 +161,11 @@ extension PlayerControls {
 }
 
 extension View {
+    /// The video's aspect hook in PlayerView: the transform below, plus the next-episode reset.
+    func aspectTransform(_ controls: PlayerControls) -> some View {
+        modifier(AspectSessionReset(controls: controls))
+    }
+
     /// The video-only transform PlayerView applies to the picture (never to subtitles or the
     /// OSD, #154): scale about the centre, then the Position Y offset.
     func aspectTransform(_ a: AspectModel) -> some View {
@@ -160,5 +174,19 @@ extension View {
             self.scaleEffect(x: t.x, y: t.y).offset(y: t.dy)
                 .frame(width: geo.size.width, height: geo.size.height)
         }
+    }
+}
+
+/// Applies `aspectTransform(controls.aspect)` and resets the aspect session when the request
+/// changes under the same PlayerView (PlaybackCoordinator.play while the player is open).
+private struct AspectSessionReset: ViewModifier {
+    @ObservedObject var controls: PlayerControls
+    @EnvironmentObject var playback: PlaybackCoordinator
+
+    func body(content: Content) -> some View {
+        content.aspectTransform(controls.aspect)
+            .onChange(of: playback.request.map { "\($0.ref)|\($0.url ?? $0.videoUrl ?? "")" }) { _ in   // the one-argument form: iOS 16
+                controls.resetAspectSession()
+            }
     }
 }
