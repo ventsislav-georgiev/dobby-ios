@@ -30,6 +30,14 @@ enum BridgeInjection {
     /// while `PythonRuntime.shared` is non-nil, without the main thread ever starting Python.
     static var a4k = false
 
+    /// #486: what openExternal may open: an https link with a host, posted by the app page's main frame (a sub-frame
+    /// reaches the message handler too). nil refuses it. No host list: this repo names no server.
+    static func externalURL(_ payload: Any?, mainFrame: Bool) -> URL? {
+        guard mainFrame, let text = payload as? String, let url = URL(string: text),
+              url.scheme?.lowercased() == "https", let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
+
     /// #483: the interpreter would not start. The page's live flag and every later injection go false.
     static func withdrawA4k(from webView: WKWebView?) {
         a4k = false
@@ -93,6 +101,7 @@ enum BridgeInjection {
             // { title, subtitle, elapsed, duration, isPlaying, ended }
             setNowPlaying: function (json) { post('setNowPlaying', json); },
             openTvLink: function () { post('openTvLink', null); },
+            openExternal: function (url) { post('openExternal', url); },
             // Offline downloads. list/get are synchronous reads of a native-pushed cache.
             // #243: a tab or Offline Books pass that ran before this push read an empty cache,
             // so the push re-renders; an older PWA without the function is skipped. Only when the

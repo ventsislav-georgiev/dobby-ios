@@ -14,6 +14,7 @@ enum BridgeInjectionCheck {
             ("setOfflineSkipsAPageWithoutTheRefresh", setOfflineSkipsAPageWithoutTheRefresh),
             ("setOfflineRefreshesOnlyWhenTheDoneSetChanges", setOfflineRefreshesOnlyWhenTheDoneSetChanges),
             ("appBoundDomainsReachThePageOnIOSOnly", appBoundDomainsReachThePageOnIOSOnly),
+            ("externalURLOpensOnlyHttpsFromTheMainFrame", externalURLOpensOnlyHttpsFromTheMainFrame),
         ]
         let only = Set(CommandLine.arguments.dropFirst())
         for (name, run) in checks where only.isEmpty || only.contains(name) { run() }
@@ -24,6 +25,19 @@ enum BridgeInjectionCheck {
         guard condition else {
             FileHandle.standardError.write(Data("FAIL: \(what) (#243)\n".utf8))
             exit(1)
+        }
+    }
+
+    /// #486: the openExternal gate, the one decision between a page message and the system browser.
+    static func externalURLOpensOnlyHttpsFromTheMainFrame() {
+        let ok = "https://sign-in.example.test/login?p=fake-pickup"
+        check(BridgeInjection.externalURL(ok, mainFrame: true)?.absoluteString == ok, "#486: an https link from the main frame opens")
+        check(BridgeInjection.externalURL("HTTPS://sign-in.example.test/x", mainFrame: true) != nil, "#486: the scheme is case-insensitive")
+        check(BridgeInjection.externalURL(ok, mainFrame: false) == nil, "#486: a sub-frame's link is refused")
+        for bad: Any? in ["http://sign-in.example.test/login", "javascript:alert(1)", "file:///etc/hosts", "data:text/html,x",
+                          "dobby-api://streaming/x", "https:///no-host", "https:no-host", "sign-in.example.test/login", "", nil, 42,
+                          ["url": ok]] {
+            check(BridgeInjection.externalURL(bad, mainFrame: true) == nil, "#486: refused: \(String(describing: bad))")
         }
     }
 
