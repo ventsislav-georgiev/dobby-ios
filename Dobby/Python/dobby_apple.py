@@ -153,3 +153,23 @@ def download(params_json):
     import a4k_subs
     filepath, error = a4k_subs.download(params_json)
     return json.dumps({"file": filepath, "error": error})
+
+
+if __name__ == "__main__":
+    # Self-check on the host (`python3 Dobby/Python/dobby_apple.py`): libarchive reads a zip the
+    # same way it reads a RAR, so a zip fixture covers the hostile-name and size-cap guards.
+    import tempfile
+    import zipfile
+    tmp = tempfile.mkdtemp()
+    fixture, dest = os.path.join(tmp, "fixture.zip"), os.path.join(tmp, "out", "dest")
+    with zipfile.ZipFile(fixture, "w") as z:
+        z.writestr("../escape.srt", "outside")
+        z.writestr("Season 1\\ep1.srt", "nested")
+        z.writestr("big.srt", "x" * 2048)
+    _MAX_ENTRY_BYTES = 1024
+    written = sorted(os.path.basename(p) for p in RarExtractor.extract(fixture, dest))
+    assert written == ["ep1.srt", "escape.srt"], written
+    assert not os.path.exists(os.path.join(tmp, "out", "escape.srt")), "an archive name escaped dest"
+    assert not os.path.exists(os.path.join(dest, "big.srt")), "an entry over the cap was kept"
+    assert open(os.path.join(dest, "escape.srt")).read() == "outside"
+    print("dobby_apple self-check: OK", written)
