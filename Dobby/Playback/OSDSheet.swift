@@ -35,7 +35,10 @@ struct OSDSheetContent {
 /// 60 % of the player's height, sheet fill, 1 pt accent hairline at 0x4D, title in bold accent,
 /// optional tab strip, rows filled `row`, the focused row filled `accent` with `onAccent` text.
 /// Keyboard focus is `focusIndex` (owned by PlayerControls); hover moves the same index, a
-/// click focuses and picks. A click outside the card calls `onDismiss`.
+/// click focuses and picks. macOS: a click outside the card calls `onDismiss`. iOS (#487): no
+/// dismiss layer, so the control bar and the close X stay tappable under an open sheet (#466 QA
+/// N1); a tap on the picture lands on ControlBar.swift's touchRegions, which closes the top
+/// layer. Rows, tabs and chevrons are at least 44 pt on iOS (`touchMin`); macOS keeps its sizes.
 struct OSDSheetView: View {
     let content: OSDSheetContent
     let tint: OsdTint
@@ -47,7 +50,9 @@ struct OSDSheetView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
+                #if os(macOS)
                 Color.clear.contentShape(Rectangle()).onTapGesture(perform: onDismiss)
+                #endif
                 card
                     .frame(width: min(420, geo.size.width - 32))
                     .frame(maxHeight: geo.size.height * 0.6)
@@ -93,6 +98,7 @@ struct OSDSheetView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(active ? tint.onAccent : tint.tabText)
                     .padding(.horizontal, 8).padding(.vertical, 3)
+                    .frame(minHeight: Self.touchMin)
                     .background(active ? tint.accent : tint.row)
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     .contentShape(Rectangle())
@@ -121,6 +127,7 @@ struct OSDSheetView: View {
         .font(.system(size: 13))
         .foregroundStyle(fg)
         .padding(.horizontal, 7).padding(.vertical, 4)
+        .frame(minHeight: Self.touchMin)
         .background(focused ? tint.accent : tint.row)
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .contentShape(Rectangle())
@@ -129,6 +136,17 @@ struct OSDSheetView: View {
     }
 
     private func chevron(_ glyph: String, _ tap: @escaping () -> Void) -> some View {
-        Text(glyph).contentShape(Rectangle()).onTapGesture(perform: tap)
+        Text(glyph)
+            .frame(minWidth: Self.touchMin, minHeight: Self.touchMin)
+            .contentShape(Rectangle()).onTapGesture(perform: tap)
+    }
+
+    /// The touch target floor (Apple HIG 44 pt) on iOS; nil leaves the macOS sizes untouched.
+    private static var touchMin: CGFloat? {
+        #if os(iOS)
+        44
+        #else
+        nil
+        #endif
     }
 }
