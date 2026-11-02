@@ -363,7 +363,20 @@ final class OfflineStore: NSObject, ObservableObject {
         if let js = try? jsonString(d) { reportProgress?(js) }
     }
 
+    /// #483: an a4k row's sidecar URL on `dobby-api:` (the on-device lane) to the lane's cached file,
+    /// set by WebContainer (A4kLane.sidecarFile). A hook so this file still compiles alone in its check.
+    static var a4kSidecar: ((URL) -> URL?)?
+
     private func downloadSidecar(_ url: URL, to dest: URL, completion: @escaping (Bool) -> Void) {
+        // #483: URLSession cannot fetch the custom scheme; the lane already holds the file, or nothing
+        // can produce it from here (the row carries no a4k args), and the row is skipped.
+        if url.scheme == AppConfig.apiScheme {
+            try? FileManager.default.removeItem(at: dest)
+            let ok = Self.a4kSidecar?(url).map { (try? FileManager.default.copyItem(at: $0, to: dest)) != nil } ?? false
+            if !ok { NSLog("Dobby offline: a4k subtitle not in the lane cache, skipped") }
+            DispatchQueue.main.async { completion(ok) }
+            return
+        }
         let t = session.downloadTask(with: url) { tmp, _, _ in
             guard let tmp else { DispatchQueue.main.async { completion(false) }; return }
             try? FileManager.default.removeItem(at: dest)

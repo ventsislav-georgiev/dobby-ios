@@ -277,7 +277,7 @@ xcrun swiftc -o "$OUT5" \
 
 # #466: the Mac OSD's pure-logic files (no SwiftUI / KSPlayer import), one check each. The
 # entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
-for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference; do
+for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference A4kRouting; do
   OUTP="$(mktemp -d)/$PURE-check"
   xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
@@ -2518,8 +2518,6 @@ PWA_CALLS_NOT_DECLARED = {
                            "installed before #158 would silently lose book removal. Drop the "
                            "else-branch there and this entry together once every installed "
                            "build carries removeNativeOffline.",
-    "a4k": "#484: the PWA reads window.Dobby.a4k (a flag, not a call) to send the a4k lanes to "
-           "dobby-api://. #483 declares it in BridgeInjection.swift; drop this entry with it.",
 }
 
 def read(path):

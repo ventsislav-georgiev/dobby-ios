@@ -3,7 +3,8 @@ import Foundation
 /// Embedded CPython for the a4k lanes (#482), the Apple counterpart of Android's Chaquopy
 /// `PythonRuntime.java`. scripts/copy-python.sh puts Python.framework, the standard library and
 /// the a4k tree into the bundle at build time; this starts the interpreter once and calls the
-/// three functions of `dobby_apple.py` (search, subs, download), one JSON string in, one out.
+/// functions of `dobby_apple.py` (search, search_partial, subs, download), one JSON string in, one
+/// out. The a4k lanes (Dobby/Web/A4kLane.swift, #483) are the callers.
 ///
 /// The framework is dlopen'd, not linked: a build without the a4k tree (CI checks out this repo
 /// alone) carries no Python, `shared` is nil and nothing else changes. That is also why the C API
@@ -14,7 +15,24 @@ import Foundation
 /// works on a background queue). Any background thread may call; the GIL serialises them.
 final class PythonRuntime {
     /// nil when this build has no Python or it failed to start (the reason is logged once).
+    /// The first touch STARTS the interpreter (0.1 to 0.6 s): never from the main thread.
     static let shared: PythonRuntime? = PythonRuntime()
+
+    /// #483: this bundle carries the a4k tree. A file check that starts nothing, so the main thread
+    /// may ask it (the window.Dobby.a4k literal is built there).
+    static var bundled: Bool {
+        Bundle.main.resourceURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(appGlue).path) } ?? false
+    }
+
+    private static let appGlue = "python/app/dobby_apple.py"
+
+    /// #483: pays the start off the main thread before the page's first a4k call, and runs `failed`
+    /// on main when the interpreter would not start, so the advertised flag can be taken back.
+    static func warmUp(failed: @escaping () -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            if shared == nil { DispatchQueue.main.async(execute: failed) }
+        }
+    }
 
     /// Wall time of dlopen plus interpreter start, for the cold-start figure.
     let startSeconds: Double
@@ -37,7 +55,7 @@ final class PythonRuntime {
               let resources = bundle.resourceURL,
               let executable = bundle.executablePath else { return nil }
         let python = resources.appendingPathComponent("python")
-        guard FileManager.default.fileExists(atPath: python.appendingPathComponent("app/dobby_apple.py").path) else {
+        guard FileManager.default.fileExists(atPath: resources.appendingPathComponent(Self.appGlue).path) else {
             NSLog("PythonRuntime: this build carries no Python (scripts/copy-python.sh found no a4k tree)")
             return nil
         }
@@ -120,61 +138,3 @@ final class PythonRuntime {
         return String(cString: utf8)
     }
 }
-
-#if DEBUG
-/// The #482 spike, run instead of the app when DOBBY_PYTHON_SPIKE is set (PythonSpikeHook.c):
-/// one full search and one subtitle search with no credentials, three subs.sab.bz downloads
-/// (the RAR route), counts to stdout, then exit. Debug builds only.
-@_cdecl("dobby_python_spike")
-func dobbyPythonSpike() {
-    func log(_ line: String) { print("PYSPIKE " + line); fflush(stdout) }
-    func json(_ object: Any) -> String { String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
-    func parse(_ text: String?) -> [String: Any] {
-        text.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } ?? [:]
-    }
-    func tally(_ rows: [[String]], _ key: (([String]) -> String)) -> String {
-        Dictionary(grouping: rows, by: key).map { "\($0.key)=\($0.value.count)" }.sorted().joined(separator: " ")
-    }
-    let done = DispatchSemaphore(value: 0)
-    DispatchQueue.global(qos: .userInitiated).async {
-        defer { done.signal() }
-        let launched = Date()
-        guard let py = PythonRuntime.shared else { log("FAIL no interpreter"); return }
-        log(String(format: "interpreter start %.3fs", py.startSeconds))
-        var t = Date()
-        let info = parse(py.call("info", "{}"))
-        log(String(format: "ready %.3fs (imports %.3fs) python=%@ openssl=%@", Date().timeIntervalSince(launched),
-                   Date().timeIntervalSince(t), "\(info["version"] ?? "?")", "\(info["openssl"] ?? "?")"))
-
-        t = Date()
-        let search = parse(py.call("search", json(["type": "movie", "imdb": "tt0063350", "title": "Night of the Living Dead",
-                                                   "year": "1968", "timeout": 40])))
-        let searchRows = search["rows"] as? [[String]] ?? []
-        log(String(format: "search %.1fs providers=%@ rows=%d by provider: %@", Date().timeIntervalSince(t),
-                   "\(search["providers"] ?? "?")", searchRows.count, tally(searchRows) { $0.count > 4 ? $0[4] : "?" }))
-
-        let profile = NSTemporaryDirectory() + "a4k-subs-spike"
-        // No credentials: OpenSubtitles, subdl and subsource stay off (SubtitlesLane.settingsJson).
-        let settings = ["general.timeout": "20", "general.results_limit": "200", "general.auto_search": "false",
-                        "general.auto_download": "false", "bsplayer.enabled": "false", "podnadpisi.enabled": "true",
-                        "addic7ed.enabled": "true", "subssabbz.enabled": "true", "subsunacs.enabled": "true",
-                        "opensubtitles.enabled": "false", "subdl.enabled": "false", "subsource.enabled": "false"]
-        t = Date()
-        let subs = parse(py.call("subs", json(["profileDir": profile, "settings": settings, "type": "movie", "imdb": "tt0133093",
-                                               "title": "The Matrix", "year": "1999", "filename": "", "languages": "bg,en"])))
-        let subRows = subs["rows"] as? [[String]] ?? []
-        log(String(format: "subs %.1fs rows=%d by service/lang: %@", Date().timeIntervalSince(t), subRows.count,
-                   tally(subRows) { "\($0[0])/\($0[1])" }))
-
-        for row in subRows.filter({ $0[0] == "subssabbz" }).prefix(3) {
-            let result = parse(py.call("download", json(["profileDir": profile, "settings": settings,
-                                                         "serviceName": row[0], "actionArgs": row[3]])))
-            let file = result["file"] as? String ?? ""
-            let size = (try? FileManager.default.attributesOfItem(atPath: file)[.size] as? Int) ?? 0
-            log("download subssabbz bytes=\(size) file=\((file as NSString).lastPathComponent) error=\(result["error"] ?? "")")
-        }
-    }
-    done.wait()
-    exit(0)
-}
-#endif
