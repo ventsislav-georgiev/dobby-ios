@@ -19,19 +19,37 @@ extension PlayerView {
                                        layerOpen: controls.anyLayerOpen, smartTube: req.playbackKind == "smarttube")
                 // Kept in the tree while hidden (Android INVISIBLE, not GONE) so the still is
                 // fetched once per title, not on every pause.
-                VStack(spacing: 0) {
-                    Spacer()
-                    PauseInfoCardsRow(model: model, tint: controls.tint)
-                        .padding(.horizontal, 22)   // the bar's own horizontal padding: same edges
-                    // An invisible twin of the bar so the cards sit right on top of it whatever
-                    // its height (E2 owns it, and portrait iOS wraps it to a tighter row). The
-                    // bar's 14 pt top padding is Android's 14 dp gap.
-                    if controls.visible { controlBar.hidden() }
+                PauseInfoCardsLayer(model: model, tint: controls.tint) {
+                    if controls.visible { controlBar }
                 }
                 .opacity(show ? 1 : 0)
                 .allowsHitTesting(false)
                 .accessibilityHidden(!show)
             }
+        }
+    }
+}
+
+/// The cards sized to the bar: an invisible twin of the bar (E2 owns it; its width follows the
+/// tile row, capped and centred) is measured, and the cards take its card width and sit 14 pt
+/// (Android's 14 dp) above it, whatever its height.
+struct PauseInfoCardsLayer<Bar: View>: View {
+    let model: PauseInfoModel
+    let tint: OsdTint
+    @ViewBuilder let bar: Bar
+    @State private var barWidth: CGFloat = 0
+
+    /// ControlBarLook pads its card 44 pt off each side; the twin's measured width includes that.
+    private static var barSideInset: CGFloat { 44 }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            PauseInfoCardsRow(model: model, tint: tint)
+                .frame(width: max(0, barWidth - 2 * Self.barSideInset))
+                .padding(.bottom, 14)
+            bar.hidden()
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { w in if w > 0 { barWidth = w } }
         }
     }
 }
