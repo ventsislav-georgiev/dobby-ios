@@ -61,7 +61,7 @@ struct PlayerView: View {
                     controls.playbackTick(current: cur)
                 }
                 .onFinish { _, err in playback.onFinish(error: err) }
-                .aspectTransform(controls.aspect)                  // AspectSheet.swift (E7)
+                .aspectTransform(controls)                         // AspectSheet.swift (E7, #477 reset)
                 .ignoresSafeArea()
                 .clipped()
 

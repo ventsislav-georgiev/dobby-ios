@@ -92,6 +92,60 @@ enum AspectModelCheck {
         r = AspectModel()
         check(r.restore(autoRow) == nil, "Off ignores an auto row")
 
+        // #477 letterbox detector (Android LetterboxDetector): a 128 x 216 luma frame, bars dark.
+        func frame(top: Int, bottom: Int, picture: UInt8 = 200, rows: [Int: UInt8] = [:]) -> [UInt8] {
+            let w = Letterbox.sampleW, h = Letterbox.sampleH
+            var f = [UInt8](repeating: 0, count: w * h)
+            for y in top..<(h - bottom) { for x in 0..<w { f[y * w + x] = rows[y] ?? picture } }
+            for (y, v) in rows where y < top || y >= h - bottom { for x in 0..<w { f[y * w + x] = v } }
+            return f
+        }
+        func bars(_ f: [UInt8]) -> (top: Int, bottom: Int)? {
+            Letterbox.detectBars(f, width: Letterbox.sampleW, height: Letterbox.sampleH)
+        }
+        check(bars(frame(top: 28, bottom: 28))! == (28, 28), "clean 2.39 bars in a 16:9 frame are found")
+        check(bars(frame(top: 0, bottom: 0))! == (0, 0), "a full frame has no bars")
+        check(bars(frame(top: 28, bottom: 28, rows: [28: 40]))! == (29, 28), "a dirty boundary row belongs to the bar")
+        check(bars(frame(top: 28, bottom: 28, rows: [28: 40, 29: 40, 30: 40])) == nil,
+              "a picture fading into the bar is unreliable")
+        check(bars(frame(top: 28, bottom: 28, picture: 50)) == nil, "a dark scene is unreliable")
+        check(bars(frame(top: 28, bottom: 10)) == nil, "lopsided bars are rejected")
+        check(bars(frame(top: 60, bottom: 60)) == nil, "bars covering half the frame are rejected")
+
+        // #477 sampler fold: apply on the first sample with bars, then only ever correct down.
+        var l = AspectModel(); l.autoLevel = 100; l.videoWidth = 1920; l.videoHeight = 1080
+        check(l.startLetterbox(token: 7) && !l.startLetterbox(token: 8), "the sampler starts once per playback")
+        guard case .applied(135, let fills) = l.foldLetterbox((28, 28), screenAspect: tv), abs(fills - 2.4) < 1e-9
+        else { check(false, "the first sample with bars applies the fill"); return }
+        check(l.stretchV == 135 && l.stretchFromAuto && l.autoApplied, "the applied fill is an auto stretch")
+        check(l.foldLetterbox((20, 20), screenAspect: tv) == .corrected(122) && l.stretchV == 122,
+              "smaller bars correct the fill down")
+        check(l.foldLetterbox((28, 28), screenAspect: 1.6) == .none && l.stretchV == 122,
+              "the fill never grows back, not even for a narrower window")
+        _ = l.foldLetterbox(nil, screenAspect: tv); _ = l.foldLetterbox((28, 28), screenAspect: tv)
+        check(!l.lbDone, "an unreliable frame does not count as accepted")
+        check(l.foldLetterbox((28, 28), screenAspect: tv) == .none && l.lbDone, "five accepted samples end the sampler")
+        l = AspectModel(); l.autoLevel = 100; l.videoWidth = 1920; l.videoHeight = 1080
+        for _ in 0..<4 { _ = l.foldLetterbox((0, 0), screenAspect: tv) }
+        check(l.foldLetterbox((0, 0), screenAspect: tv) == .noFill && l.autoNeed == 1 && l.stretchV == 100,
+              "no bars: the sampler remembers no stretch needed")
+        l = AspectModel(); l.autoLevel = 100
+        for _ in 0..<19 { _ = l.foldLetterbox(nil, screenAspect: tv) }
+        check(l.foldLetterbox(nil, screenAspect: tv) == .none && l.lbDone, "twenty rounds without a frame give up silently")
+        l = AspectModel(); l.autoLevel = 100; _ = l.autoStretch(videoAspect: 2.39, screenAspect: tv)
+        check(!l.startLetterbox(token: 1), "the metadata fill keeps the sampler off")
+        l = AspectModel(); l.autoLevel = 0
+        check(!l.startLetterbox(token: 1), "Off does not start the sampler")
+        l.lbToken = 1; l.videoWidth = 1920; l.videoHeight = 1080
+        check(l.foldLetterbox((28, 28), screenAspect: tv) == .none && l.stretchV == 100 && abs(l.autoNeed - 1.35) < 1e-9,
+              "at Off the sampler measures but applies nothing (#275)")
+        l.autoLevel = 10
+        check(l.reapplyLevel() == .remember && l.stretchV == 110 && l.lbApplied == 110,
+              "a level step re-picks from the measured bars")
+        l = AspectModel(); l.autoLevel = 0; l.videoWidth = 1920; l.videoHeight = 1080
+        _ = l.foldLetterbox((0, 0), screenAspect: tv); l.autoLevel = 100
+        check(l.reapplyLevel() == .none && !l.autoApplied, "measured without bars, a level step applies nothing")
+
         print("AspectModelCheck: all checks passed")
     }
 }
