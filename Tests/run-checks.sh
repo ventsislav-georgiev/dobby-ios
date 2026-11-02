@@ -279,7 +279,7 @@ xcrun swiftc -o "$OUT5" \
 # entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
 for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference; do
   OUTP="$(mktemp -d)/$PURE-check"
-  xcrun swiftc -o "$OUTP" "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
+  xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
 done
 
