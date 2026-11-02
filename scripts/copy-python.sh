@@ -7,7 +7,7 @@
 #                                 python-support/ (gitignored) and checked against its sha256.
 #   <Resources>/python/app        The a4k tree (a4k_search.py, a4k_subs.py, a4kScrapers,
 #                                 a4kSubtitles, a4k_bg_services), copied from the private sibling
-#                                 checkout plus Dobby/Python/dobby_apple.py. Never committed here:
+#                                 dobby checkout (scripts/python) plus Dobby/Python/dobby_apple.py. Never committed here:
 #                                 this repo is public.
 #   <Resources>/python/app_packages  requests and beautifulsoup4 with their deps: exact pure-Python
 #                                 wheels from PyPI, sha256-pinned, unzipped (no pip needed).
@@ -17,7 +17,7 @@
 # the App Store requires: no loose .so outside Frameworks/).
 #
 # The framework is NOT a link-time dependency. PythonRuntime.swift dlopens it, so a build without
-# the a4k tree (CI checks out this repo alone) gets a WARNING, no Python, and an app that works
+# the a4k tree (no dobby checkout beside this one) gets a WARNING, no Python, and an app that works
 # exactly as before: the same degrade-don't-fail rule as scripts/copy-app-shell.sh.
 #
 # By hand, with no Xcode environment, it only fetches and verifies the cache.
@@ -38,8 +38,8 @@ WHEELS=(
   "soupsieve/soupsieve-3.0.4-py3-none-any.whl 8412826614f9c632227067d0985aeb9f584bd15efc852955430e097a9fe7afbf"
   "typing_extensions/typing_extensions-4.16.0-py3-none-any.whl 481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
 )
-# Until #485 moves the canonical tree into dobby, Android's vendored copy is the source.
-A4K_DIR="${A4K_PYTHON_DIR:-$PWD/../dobby-android/app/src/main/python}"
+# The canonical tree lives in the private dobby repo (#485), which CI checks out beside this one.
+A4K_DIR="${A4K_PYTHON_DIR:-$PWD/../dobby/scripts/python}"
 CACHE="$PWD/python-support"
 
 fetch() {  # url sha256 dest
