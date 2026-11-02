@@ -78,7 +78,7 @@ targets:
         # they are deliberately NOT defined here: xcodebuild takes them from the environment
         # scripts/mac-release.sh sets (a target value would override it), and everywhere else
         # they expand empty. A build missing any of the three starts no updater (Updater.swift).
-        DOBBY_SPARKLE_ED_KEY: ""
+        DOBBY_SPARKLE_ED_KEY: "FDGYa9u6ip6f93IilJhHfof0DgQnggdXx5Ow/LhbBVs="
         SWIFT_VERSION: "5.0"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
     preBuildScripts:
