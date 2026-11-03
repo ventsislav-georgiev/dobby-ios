@@ -2,10 +2,12 @@ import Foundation
 
 /// Static app configuration. The web app and this native app are both Dobby.
 enum AppConfig {
-    /// Web app origin (served from the Pi over Tailscale, valid TLS via `tailscale serve`).
+    /// Web app origin: the Pi's https name, once served over Tailscale.
     /// #491: the Pi's https name is not in this public repo. DOBBY_PI_HOST is expanded at
     /// build time into Info.plist's WKAppBoundDomains (the one place iOS needs it), and the
-    /// default address is read back from there. Unset means no default: Settings adds one.
+    /// default address is read back from there. Unset means no default.
+    /// #508: the Pi is retired and this is never contacted; it is the origin the bundled shell's
+    /// data lives under on a device that stored no other (ServerAddresses.origin()).
     static let serverURL = piURL(Bundle.main.object(forInfoDictionaryKey: "WKAppBoundDomains") as? [String] ?? [])
 
     static func piURL(_ appBoundDomains: [String]) -> URL? {

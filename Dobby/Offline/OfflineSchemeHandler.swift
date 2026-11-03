@@ -117,8 +117,7 @@ final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// Every WebKit call on a `WKURLSchemeTask` goes through here, on the MAIN THREAD.
     ///
-    /// Measured on an iPhone (iOS 18.7, Debug build, `DOBBY_NO_SERVER=1
-    /// DOBBY_AUTO_OFFLINE=1`): serving the bundled shell from `queue`,
+    /// Measured on an iPhone (iOS 18.7, Debug build, Pi-less start): serving the bundled shell from `queue`,
     /// `task.didReceive(response)` for the FIRST subresource never returned. It was
     /// holding `lock`, so the main thread wedged on the next `webView(_:start:)`, the
     /// remaining 26 scripts were never requested, and the app was a black screen with

@@ -45,20 +45,9 @@ struct BookEntityQuery: EntityStringQuery {
         Array(try await allBooks().prefix(20))
     }
 
-    /// The library list the web app uses. Fetched fresh: Siri asks rarely, and a
-    /// stale cache would offer books that are no longer there.
-    private func allBooks() async throws -> [BookEntity] {
-        // #181: the library lives on the Pi; with the Pi turned off there is none to offer.
-        guard ServerAddresses.piEnabled() else { return [] }
-        guard let pi = ServerAddresses.candidates().first else { return [] } // #491: no baked default
-        let url = pi.appendingPathComponent("api/books")
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let raw = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
-        return raw.compactMap { entry in
-            guard let id = entry["id"] as? String, let title = entry["title"] as? String else { return nil }
-            return BookEntity(id: id, title: title, author: entry["author"] as? String ?? "")
-        }
-    }
+    /// #181, #508: the library lived on the Pi, which is retired, so there is none to offer.
+    /// Audiobooks are hidden; how they come back is a later decision.
+    private func allBooks() async throws -> [BookEntity] { [] }
 }
 
 // MARK: - Intents

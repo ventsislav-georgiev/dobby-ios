@@ -7,9 +7,8 @@
 	<!-- No custom/proprietary crypto → skip TestFlight's per-build export-compliance prompt. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<!-- #504: the launch screen is the loader's D mark, static, 120 pt centred on black
-	     (LaunchMark.pdf is ContentView's DobbyMark drawn without the trace), so the hand-off
-	     to the loader does not jump. -->
+	<!-- #504: the launch screen is the D mark, static, 120 pt centred on black (LaunchMark.pdf).
+	     #508: no loader follows it; the bundled shell loads straight away. -->
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIImageName</key>
@@ -42,16 +41,15 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
-	<!-- The LAN address of the server is plain HTTP (only the Tailscale name is
-	     fronted by `tailscale serve`), so cleartext to local hosts must be allowed
-	     or the app can never use the direct home-network address. -->
+	<!-- Type on TV talks to the TV over plain HTTP on the LAN, so cleartext to local
+	     hosts must be allowed (#508: the Pi it was first allowed for is retired). -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Dobby connects directly to your home server when you are on the same network, and finds Dobby on your TV so you can type on it from this device.</string>
+	<string>Dobby finds Dobby on your TV on the same network, so you can type on it from this device.</string>
 	<!-- #248 Type on TV: the in-app scan of the QR the TV's Settings guide shows (iOS only). -->
 	<key>NSCameraUsageDescription</key>
 	<string>Dobby uses the camera to scan the QR code on your TV, so this phone can send Settings to it.</string>
@@ -84,7 +82,9 @@
 	     Only domains are accepted here, so a LAN address can't be listed — the
 	     opt-in is applied conditionally, see WebContainer.isAppBound.
 	     #491: DOBBY_PI_HOST (the Pi's https name) comes from the build
-	     environment, never this repo; AppConfig.serverURL reads it back. -->
+	     environment, never this repo; AppConfig.serverURL reads it back.
+	     #508: the Pi is retired, but this name is still the ORIGIN the bundled
+	     shell and its data live under; it is never contacted. Never change it. -->
 	<key>WKAppBoundDomains</key>
 	<array>
 		<string>$(DOBBY_PI_HOST)</string>

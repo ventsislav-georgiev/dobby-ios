@@ -15,11 +15,10 @@ import os
 /// worker at all — `fetch` events only fire for http(s) — which is exactly what we
 /// want for the credential lane.
 ///
-/// `dobby-api://settings` — mirror-first, the rule Android landed in #044: a
-/// mirrored body is answered immediately and the Pi is asked again behind the
-/// answer; only an empty mirror waits on the Pi. The mirror is one Keychain item
-/// holding the whole `/api/settings` payload, secrets included (owner decision
-/// #045), so the credential lane below has a token with the Pi unreachable.
+/// `dobby-api://settings` — the mirror: one Keychain item holding the whole
+/// `/api/settings` payload, secrets included (owner decision #045), so the credential
+/// lane below has a token. #508: the Pi is retired, so the mirror is the only copy; it is
+/// never pulled from or pushed to anything.
 ///
 /// Since #149 (M5-F) it also takes `POST`, so a phone whose Pi is off has
 /// somewhere for a settings write to land. The body is merged one key deep into
@@ -42,35 +41,16 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     static let defaultImageCacheControl = "public, max-age=604800, immutable"
     private static let log = Logger(subsystem: "eu.illegible.dobbyios", category: "api-scheme")
 
-    /// The origin the WebView actually loaded — the Tailscale name or the LAN
-    /// address, whichever `ServerAddresses.resolve()` picked. Not `AppConfig.serverURL`:
-    /// on the home network the page is on plain http and a refresh aimed at the
-    /// Tailscale name would be a second, slower link to the same box.
-    private let server: URL
-
-    /// `server` as an `Origin` header spells it. The only value the secret-carrying
-    /// lanes will ever answer `Access-Control-Allow-Origin` with.
+    /// The page's origin (ServerAddresses.origin(), #508: never fetched) as an `Origin`
+    /// header spells it. The only value the secret-carrying lanes will ever answer
+    /// `Access-Control-Allow-Origin` with.
     private let serverOrigin: String?
 
     private let queue = DispatchQueue(label: "com.solarflare.dobby.api-scheme", qos: .userInitiated)
     private var active = Set<ObjectIdentifier>()
     private let lock = NSLock()
 
-    /// One refresh in flight at a time; a boot that reads settings twice must not
-    /// hit the Pi twice.
-    private let refreshing = NSLock()
-    private var refreshInFlight = false
-
-    /// #152: the same single-flight rule for the write-back push. A boot that reads
-    /// settings twice must not POST the user's secrets twice either. Its own flag
-    /// rather than `refreshInFlight`, because the drain runs BEFORE the ahead guard
-    /// and the pull runs only after it — the two are never in flight for the same
-    /// reason, so sharing one flag would make a running drain silently skip a
-    /// legitimate pull.
-    private var drainInFlight = false
-
     init(server: URL) {
-        self.server = server
         self.serverOrigin = Self.normalizedOrigin(server.absoluteString)
         super.init()
     }
@@ -273,17 +253,10 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
                     extra: ["Cache-Control": "no-store"])
             return
         }
-        // #193: with its status. A refused read (logged by the store) still falls to the Pi and
-        // is answered with the Pi's body, but does not seed: the mirror it could not see may be
-        // ahead of the Pi with an unpushed patch. No item seeds as before.
-        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()
-        source = (mirror?.isEmpty == false) ? "mirror" : "network"
-        let outcome = Self.settingsOutcome(mirror: mirror) {
-            Self.fetchSettings(from: server)
-        }
-        // #185: a refused seed of the mirror is logged by the store and does not change
-        // this answer — the page is handed the Pi's own body either way.
-        if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }
+        // #508: the mirror is the only copy; nothing is fetched behind it.
+        let mirror = SettingsMirrorStore.loadWithStatus().data
+        source = "mirror"
+        let outcome = Self.settingsOutcome(mirror: mirror)
         status = outcome.status
         length = outcome.body.count
         // no-store: this body carries every secret since #045, so nothing that
@@ -291,23 +264,15 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         respond(task, id, status: outcome.status, contentType: "application/json",
                 body: outcome.body, origin: origin, secret: true,
                 extra: ["Cache-Control": "no-store"])
-        if outcome.status == 200 && !outcome.store { refreshSettingsInBackground() }
     }
 
-    /// Mirror-first as values, so the rule is checkable without a WebView.
+    /// The mirror as the answer, so the rule is checkable without a WebView.
     ///
-    /// A mirrored body answers on the spot and `fetch` is never called — the read
-    /// the page makes at boot must not hold on a slow-but-reachable Pi (#044). Only
-    /// an empty mirror waits, and a cold start with the Pi down has nothing to say.
-    ///
-    /// #184: both 200 bodies go through `withPresenceFlags` here, so there is no settings
-    /// document `serveSettings` can hand the page without its has* flags re-derived. The
-    /// mirror hit is the one that needs it; the Pi's own body already carries the flags it
-    /// computed, and passes through unchanged.
-    static func settingsOutcome(mirror: Data?, fetch: () -> Data?) -> (status: Int, body: Data, store: Bool) {
-        if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror), false) }
-        if let fresh = fetch(), !fresh.isEmpty { return (200, withPresenceFlags(fresh), true) }
-        return (503, Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8), false)
+    /// #184: the 200 body goes through `withPresenceFlags` here, so there is no settings
+    /// document `serveSettings` can hand the page without its has* flags re-derived.
+    static func settingsOutcome(mirror: Data?) -> (status: Int, body: Data) {
+        if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror)) }
+        return (503, Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8))
     }
 
     /// The settings POST's answer from the Keychain's status, as values (#185).
@@ -486,160 +451,6 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         for (key, value) in patchObject { document[key] = value }
         return try? JSONSerialization.data(withJSONObject: document)
-    }
-
-    private func refreshSettingsInBackground() {
-        // #149: the mirror is AHEAD of the Pi once a write has landed here, and a
-        // pull now would be carrying the Pi's pre-write body — the same direction
-        // Android's `MirrorWriteBack` class doc spells out ("while a write is
-        // queued, the mirror wins"). Without this, the sequence the milestone is
-        // actually about — Pi off, key saved on the phone, Pi comes back — loses
-        // the key on the next GET.
-        //
-        // #152 made it "drain, then pull". #149 landed only the "mirror wins"
-        // half: the bit below was set at write time and nothing could clear it, so
-        // one save made with the Pi off stopped this phone auto-refreshing from the
-        // Pi for the life of the install — a change made on the Pi, on the Shield
-        // or in a browser never reached it again. The drain is what releases it.
-        //
-        // The push runs behind this call, so the guard is still true on the way
-        // past and THIS refresh is still skipped; the next mirror-served GET finds
-        // the hold released and pulls. That is the same convergence step as
-        // Android's `dirty` flag, which also only makes the *next* read go to the
-        // Pi rather than re-reading inside the push.
-        drainPendingSettings()
-        if SettingsMirrorStore.isAheadOfServer { return }
-        refreshing.lock()
-        if refreshInFlight { refreshing.unlock(); return }
-        refreshInFlight = true
-        refreshing.unlock()
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            // #185: nothing waits on this pull; a refused write is logged by the store,
-            // the mirror keeps its last body and the next mirror-served GET pulls again.
-            if let fresh = Self.fetchSettings(from: self.server) { _ = SettingsMirrorStore.save(fresh) }
-            self.refreshing.lock(); self.refreshInFlight = false; self.refreshing.unlock()
-        }
-    }
-
-    /// The half #149 did not build: push what this device wrote while the Pi was
-    /// unreachable, and release the hold the moment the Pi takes it.
-    ///
-    /// **Only the queued patch bytes are ever sent.** The mirrored *document*
-    /// cannot stand in for them at any point — `POST /api/settings` applies
-    /// `preferredSubtitleLanguage` and `preferredAudioLanguage` by body presence
-    /// (`SettingsRoutes.swift:86-90`), so a stale mirror's explicit nulls would
-    /// clear both on the Pi for a device that never touched them. That is the
-    /// whole reason a queue exists here rather than a re-POST of what is stored.
-    ///
-    /// Reachability is an answer from the Pi, never a probe of our own — the same
-    /// rule as Android's `drain()`. This runs off a mirror-served GET, which the
-    /// page makes at every boot and after every save, so a phone that has been
-    /// holding a patch pushes it on the first page load the Pi answers.
-    private func drainPendingSettings() {
-        guard SettingsMirrorStore.isAheadOfServer else { return }
-        let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()
-        guard let pending = queued else {
-            // Held with nothing to push. Every phone already running the #149 build
-            // is in exactly this state — the bit was set at write time and there was
-            // no queue behind it — and so is the sliver between `markAheadOfServer()`
-            // and `queuePatch(_:)` in the POST leg. Nothing to send and nothing to
-            // protect, so let the Pi win again rather than hold forever.
-            //
-            // #193: only when the read found no item. A refused read (logged by the store)
-            // pushes nothing and keeps the hold: released, the next pull overwrote the mirror
-            // and every later drain returned above, so the queued patch was never pushed.
-            if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }
-            return
-        }
-        refreshing.lock()
-        if drainInFlight { refreshing.unlock(); return }
-        drainInFlight = true
-        refreshing.unlock()
-
-        queue.async { [weak self] in
-            guard let self else { return }
-            switch Self.pushSettings(pending, to: self.server) {
-            case .landed, .refused:
-                // Landed: the Pi applied the patch to its whole document, which is
-                // more than was sent, so the Pi is now the fresher of the two and
-                // the next GET's refresh goes and takes that body.
-                //
-                // Refused shares the branch on purpose. A 4xx that is not 408 or 429
-                // is not "cannot reach the Pi" but "the Pi will never take this
-                // body", and no number of retries changes that; holding it would pin
-                // the mirror for the life of the install, which is exactly the
-                // permanent degradation this entry exists to close. The change is
-                // already lost — what is left is to stop holding the mirror hostage
-                // to it. Android drops a 4xx and marks the path dirty for the same
-                // reason; releasing the hold IS "ask the Pi" on this side.
-                SettingsMirrorStore.clearPending(ifStill: pending)
-            case .held:
-                // No answer, a 5xx, or a 408/429. The patch stays queued, the mirror
-                // stays ahead and keeps answering, and the next mirror-served GET
-                // runs this again. The queue is in the Keychain, so it also survives
-                // the app being killed.
-                break
-            }
-            self.refreshing.lock(); self.drainInFlight = false; self.refreshing.unlock()
-        }
-    }
-
-    enum PushOutcome { case landed, refused, held }
-
-    /// What a push attempt means for the queue, as a pure rule so the decision is
-    /// checkable without a socket.
-    ///
-    /// `nil` is "the Pi never answered". 408 and 429 are the two 4xx that are about
-    /// timing rather than about the body, so they hold like a 5xx does instead of
-    /// throwing the user's change away.
-    static func pushOutcome(status: Int?) -> PushOutcome {
-        guard let status else { return .held }
-        if (200...299).contains(status) { return .landed }
-        if (400...499).contains(status) && status != 408 && status != 429 { return .refused }
-        return .held
-    }
-
-    /// Blocking on purpose: this runs on `queue`, never on the WebView's thread.
-    /// The queued patch bytes, with the method and content type the page would have
-    /// sent, to the Pi's own settings route.
-    private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {
-        // #149 device round: DOBBY_NO_SERVER removes the Pi from this leg too, not only
-        // from the probe, so a Pi-off round cannot push its test patch to a real Pi the
-        // phone can still reach. Held, exactly as a Pi that never answered.
-        #if DEBUG
-        if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: push held (DOBBY_NO_SERVER seam)"); return .held }
-        #endif
-        // #181: the user setting, in every configuration. Held, not refused: the patch
-        // stays queued and the first mirror-served GET after the Pi is turned back on
-        // pushes it (Android's MirrorWriteBack.run, same rule). The settings document is
-        // the credential store, so "no Pi" means it never leaves the device.
-        if !ServerAddresses.piEnabled() { log.info("pi leg skipped: push held (Pi disabled by the user setting)"); return .held }
-        var request = URLRequest(url: server.appendingPathComponent("api/settings"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = patch
-        request.timeoutInterval = 8
-        let (_, http) = Transport.sendSync(request)
-        return pushOutcome(status: http?.statusCode)
-    }
-
-    /// Blocking on purpose: this runs on `queue`, never on the WebView's thread.
-    private static func fetchSettings(from server: URL) -> Data? {
-        // #149 device round: same seam, same reason as pushSettings above. Nil is a Pi
-        // that never answered.
-        #if DEBUG
-        if ServerAddresses.noServerSeamActive() { log.info("pi leg skipped: fetch (DOBBY_NO_SERVER seam)"); return nil }
-        #endif
-        // #181: same setting, same reason as pushSettings above.
-        if !ServerAddresses.piEnabled() { log.info("pi leg skipped: fetch (Pi disabled by the user setting)"); return nil }
-        var request = URLRequest(url: server.appendingPathComponent("api/settings"))
-        request.httpMethod = "GET"
-        request.timeoutInterval = 8
-        let (data, http) = Transport.sendSync(request)
-        guard let http, (200...299).contains(http.statusCode), let data, !data.isEmpty else { return nil }
-        return data
     }
 
     // MARK: - dobby-api://proxy
@@ -993,7 +804,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// normalised `scheme://host[:port]`, and answer no ACAO at all otherwise —
     /// no `*`, no echo. The image lane carries no secret (allowlisted artwork,
     /// nothing injected), so it keeps the permissive header and images still load
-    /// for a page on whichever address `ServerAddresses.resolve()` picked.
+    /// for a page on whichever origin `ServerAddresses.origin()` picked.
     static func acao(origin: String?, serverOrigin: String?, secret: Bool) -> String? {
         guard secret else { return origin ?? "*" }
         guard let serverOrigin, let origin = normalizedOrigin(origin),
