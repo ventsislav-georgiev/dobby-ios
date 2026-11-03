@@ -137,11 +137,11 @@ else
   # The helper reads lib-$ARCHS, one slice only; a generic simulator build lists two.
   # ponytail: binary modules for the native arch only, an x86_64 simulator on Apple silicon misses them.
   case " $ARCHS " in *" ${NATIVE_ARCH:-arm64} "*) export ARCHS="${NATIVE_ARCH:-arm64}" ;; esac
-  # shellcheck source=/dev/null
   # #509: the module binaries are dylibs, but utils.sh copies a template that types every module
   # framework APPL, and altool took the first APPL Info.plist in the ipa (Frameworks/_zstd.framework)
   # for the app. FMWK leaves the app the only APPL bundle; set before install_python signs them.
   /usr/bin/plutil -replace CFBundlePackageType -string FMWK "$CACHE/iOS/Python.xcframework/build/iOS-dylib-Info-template.plist"
+  # shellcheck source=/dev/null
   source "$CACHE/iOS/Python.xcframework/build/utils.sh"
   install_python python-support/iOS/Python.xcframework python/app_packages >/dev/null
 fi
