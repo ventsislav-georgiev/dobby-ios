@@ -676,7 +676,7 @@ controls_path = "Dobby/Playback/PlayerControls.swift"
 with open(controls_path) as f:
     controls_src = f.read()
 
-if "guard !anyLayerOpen, !showInfo, isPlaying, !scrubbing else { return }" not in controls_src:
+if "guard !anyLayerOpen, !showInfo, playing ?? isPlaying, !scrubbing else { return }" not in controls_src:
     sys.stderr.write("FAIL: PlayerControls.scheduleHide() no longer guards on scrubbing (#129)\n")
     sys.exit(1)
 
