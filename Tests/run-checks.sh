@@ -823,6 +823,71 @@ print("PASS: PlayerControls holds the coordinator from PlayerView.init, so the p
       "and tint are there on the first frame, and it runs the launch trace (#525)")
 PREPARINGTITLEPY
 
+# #538: every player layer sat in one ZStack with the picture, so every layer took part in sizing
+# the root. With the bar up, the hidden pause cards over the bar's twin pushed it, and on a
+# landscape iPhone the picture shrank and rode up with a black band below it. The picture is the
+# layout base now and the OSD an overlay of it. Pin both ends: the picture is the video over black,
+# full window, reading no OSD state; the body hangs every OSD layer over it and nothing else.
+python3 - <<'PICTUREBASEPY'
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+path = "Dobby/Playback/PlayerView.swift"
+view = strip_swift(open(path).read(), path)
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#538)\n" % msg)
+    sys.exit(1)
+
+def member(head):
+    if view.count(head) != 1:
+        fail("PlayerView has no single %r" % head.strip())
+    start = view.index(head)
+    return view[start:view.index("\n    }\n", start)]
+
+def block(src, opener):
+    start = src.index(opener) + len(opener)
+    depth = 1
+    for i in range(start, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[i], 0)
+        if depth == 0:
+            return src[start:i]
+    fail("unbalanced braces after %r" % opener)
+
+body = member("    var body: some View {\n")
+picture = member("    private var picture: some View {\n")
+layers = ["touchRegions", "pictureClicks", "subtitleOverlay", "playerLoaders", "infoOverlay", "pauseInfoCards",
+          "controlBarLayer", "closeButton", "moreMenu", "shortcutsOverlay", "OSDSheetView(", "subsDelayPill",
+          "OSDToast(", "WindowAccessor", "HardwareKeys"]
+
+if view.count("KSVideoPlayer(") != 1 or "KSVideoPlayer(" not in picture:
+    fail("the video is no longer made once, inside PlayerView.picture")
+if not re.match(r"\s*var picture: some View \{\s*ZStack \{\s*Color\.black\.ignoresSafeArea\(\)\s*KSVideoPlayer\(",
+                picture.split("private", 1)[1]):
+    fail("PlayerView.picture is no longer a ZStack of Color.black.ignoresSafeArea() and the video")
+if not re.search(r"\.aspectTransform\(controls\)\s*\.ignoresSafeArea\(\)\s*\.clipped\(\)\s*\}\s*$", picture):
+    fail("the video chain no longer ends .aspectTransform(controls).ignoresSafeArea().clipped() and closes the picture")
+if re.search(r"controls\.(visible|loaded|sheet)|\.padding\(|\.frame\(|safeAreaInset|\.offset\(", picture):
+    fail("PlayerView.picture reads OSD state or sizes or moves itself")
+if any(l in picture for l in layers):
+    fail("an OSD layer is inside PlayerView.picture, where it sizes the picture again")
+
+if not re.match(r"\s*var body: some View \{\s*picture\.overlay \{", body):
+    fail("PlayerView.body no longer starts with picture.overlay {, so the OSD can size the picture again")
+osd = block(body, "picture.overlay {")
+if "ZStack" in body or re.search(r"\bpicture\b", osd):
+    fail("PlayerView.body stacks the picture with the OSD again instead of overlaying it")
+missing = [l for l in layers if osd.count(l) != 1]
+if missing:
+    fail("these OSD layers are not exactly once in the picture's overlay: %s" % ", ".join(missing))
+if len(re.findall(r"\bpicture\b", body)) != 1:
+    fail("PlayerView.body uses the picture more than once")
+print("PASS: PlayerView's picture is the video over black, full window, reading no OSD state, and the body "
+      "hangs all %d OSD layers over it as one overlay, so showing the bar never resizes the picture (#538)" % len(layers))
+PICTUREBASEPY
+
 # #130: project.yml pinned KSPlayer to a revision instead of `branch: main` so every
 # checkout/CI run resolves the same commit (Dobby.xcodeproj and its Package.resolved
 # are gitignored, so nothing else pins it). Catch a regression back to a branch ref.
