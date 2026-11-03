@@ -2025,7 +2025,7 @@ need('Text("This build has no offline shell — Continue offline will be blank."
 # switch, and would satisfy an unscoped ordering check without the caption existing
 # in the right branch at all). The caption must sit in the not-resolving branch,
 # after the "Continue offline" button — a mutant that hoists the BundledShell.root
-# check above `if resolving` would show it on the "Finding Dobby…" screen too,
+# check above `if resolving` would show it on the resolving loader too,
 # before the app has even decided offline mode is in play.
 view_at = src.index("struct ServerUnreachableView")
 scoped = src[view_at:]

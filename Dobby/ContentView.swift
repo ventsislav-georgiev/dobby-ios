@@ -99,8 +99,7 @@ private struct ServerUnreachableView: View {
     var body: some View {
         VStack(spacing: 16) {
             if resolving {
-                ProgressView()
-                Text("Finding Dobby…").foregroundStyle(.secondary)
+                DobbyMark(trace: true).frame(width: 120, height: 120)
             } else {
                 Text("Can't reach Dobby").font(.headline)
                 Text(ServerAddresses.candidates().map(\.absoluteString).joined(separator: "\n"))
@@ -126,7 +125,71 @@ private struct ServerUnreachableView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
+        // #504: the launch screen centres the mark on the whole screen, so the loader does too.
+        .ignoresSafeArea(edges: resolving ? .all : [])
     }
+}
+
+/// #504: the Android TV launch mark, in its 108 viewport: the glass plate at 12 %, the D outline at
+/// 32 %, the play glyph opaque, and while loading a bright trace (28 % of the outline) running round
+/// it every 1.6 s. The launch screen's LaunchMark.pdf is this view drawn without the trace.
+struct DobbyMark: View {
+    let trace: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let k = min(geo.size.width, geo.size.height) / 108
+            let line = StrokeStyle(lineWidth: 11 * k, lineCap: .round, lineJoin: .round)
+            ZStack {
+                DobbyOutline().fill(Color.white.opacity(0.12))
+                DobbyOutline().stroke(Color.white.opacity(0.32), style: line)
+                DobbyPlay().fill(Color.white)
+                if trace {
+                    TimelineView(.animation) { tl in
+                        let o = CGFloat(tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6)
+                        // The segment [o, o + 0.28], split in two where it wraps past the path's start.
+                        ZStack {
+                            DobbyOutline().trim(from: o, to: min(o + 0.28, 1)).stroke(Color.white, style: line)
+                            DobbyOutline().trim(from: 0, to: max(o + 0.28 - 1, 0)).stroke(Color.white, style: line)
+                        }
+                    }
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+}
+
+/// M29,23 H49 A31,31 0 0 1 49,85 H29 Z
+private struct DobbyOutline: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: 29, y: 23))
+        p.addLine(to: CGPoint(x: 49, y: 23))
+        p.addRelativeArc(center: CGPoint(x: 49, y: 54), radius: 31, startAngle: .degrees(-90), delta: .degrees(180))
+        p.addLine(to: CGPoint(x: 29, y: 85))
+        p.closeSubpath()
+        return p.applying(viewport(rect))
+    }
+}
+
+/// The play glyph: the triangle (43,38) (70,54) (43,70) with 3.5 corners, as Android's arcs draw it.
+private struct DobbyPlay: Shape {
+    func path(in rect: CGRect) -> Path {
+        let a = CGPoint(x: 43, y: 38), b = CGPoint(x: 70, y: 54), c = CGPoint(x: 43, y: 70)
+        var p = Path()
+        p.move(to: CGPoint(x: 43, y: 54))
+        p.addArc(tangent1End: a, tangent2End: b, radius: 3.5)
+        p.addArc(tangent1End: b, tangent2End: c, radius: 3.5)
+        p.addArc(tangent1End: c, tangent2End: a, radius: 3.5)
+        p.closeSubpath()
+        return p.applying(viewport(rect))
+    }
+}
+
+private func viewport(_ rect: CGRect) -> CGAffineTransform {
+    let k = min(rect.width, rect.height) / 108
+    return CGAffineTransform(translationX: rect.midX - 54 * k, y: rect.midY - 54 * k).scaledBy(x: k, y: k)
 }
 
 /// Native escape hatch for the address list. Normally the web app's Settings page
