@@ -7,7 +7,7 @@ import os
 /// `dobby-api://subtitles/{search, fetch, file/<key>/<name>}` once `window.Dobby.onDeviceSearch`
 /// is true, and reads the same bodies and status codes the Pi and Android give it. Decisions and
 /// bodies are OnDeviceRouting (pure); the rows are shaped by the bundled Python entry; this file is
-/// the I/O: the settings mirror, Python, Premiumize and the cache directories.
+/// the I/O: the settings mirror, Python and the cache directories.
 ///
 /// Threading: `answer` blocks (a full search waits up to a minute) and runs only on
 /// ApiSchemeHandler's concurrent lane queue, never on main, so `PythonRuntime.shared` is never
@@ -24,9 +24,6 @@ enum OnDeviceLane {
     static var settings: () -> [String: Any] = {
         SettingsMirrorStore.load().flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
     }
-
-    /// Premiumize's cache/check, one flag per hash. A seam for the same reason.
-    static var cacheCheck: ([String], String) -> [Bool] = premiumizeCacheCheck
 
     /// One subtitle download at a time across every row (#105): the downloader shares one scratch
     /// directory and empties it at the start of every download.
@@ -77,25 +74,24 @@ enum OnDeviceLane {
     // MARK: - Full search
 
     private static func fullSearch(_ query: [String: String]) -> Answer {
+        guard let python = PythonRuntime.shared else { return .error(503, "Full search is not in this build") }
         let settings = settings()
-        let apiKey = settings["premiumizeApiKey"] as? String
+        if let refused = split(python, settings, []).refused { return refused }
         let cacheKey: String, params: [String: String], refresh: Bool
-        switch OnDeviceRouting.fullSearchPlan(query, apiKey: apiKey) {
+        switch OnDeviceRouting.fullSearchPlan(query) {
         case .answer(let refused): return refused
         case let .search(k, p, r): (cacheKey, params, refresh) = (k, p, r)
         }
-        let key = apiKey ?? ""
-        // Only the slow search is cached; the Premiumize split is recomputed on every answer.
+        // Only the slow search is cached; the split is recomputed on every answer.
         let cacheFile = searchCache.appendingPathComponent(OnDeviceRouting.cacheFileName(cacheKey))
         if !refresh, let text = try? String(contentsOf: cacheFile, encoding: .utf8) {
             let hit = OnDeviceRouting.parseTsv(text)
             if !hit.isEmpty {
                 // LRU by mtime: a hit is touched so the trim keeps it.
                 try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: cacheFile.path)
-                return .json(200, OnDeviceRouting.streamsJson(hit, cacheCheck(hashes(hit), key), fromCache: true))
+                return .json(200, OnDeviceRouting.streamsJson(hit, split(python, settings, hit).flags, fromCache: true))
             }
         }
-        guard let python = PythonRuntime.shared else { return .error(503, "Full search is not in this build") }
         var call: [String: Any] = params
         call["timeout"] = OnDeviceRouting.budgetSeconds
         call["wait"] = OnDeviceRouting.waitSeconds
@@ -106,10 +102,10 @@ enum OnDeviceLane {
         log.info("lane fullsearch sources=\(progress(result["progress"])?.last ?? 0) results=\(found.count) timedOut=\(result["timedOut"] as? Bool ?? false)")
         guard !found.isEmpty else { return .json(200, "{\"streams\":[]}") }
         writeCache(cacheFile, found, limit: OnDeviceRouting.cacheLimit(result["cacheSize"]))
-        return .json(200, OnDeviceRouting.streamsJson(found, cacheCheck(hashes(found), key), fromCache: false))
+        return .json(200, OnDeviceRouting.streamsJson(found, split(python, settings, found).flags, fromCache: false))
     }
 
-    /// Live progress of the running (or last) search; with `cache=1` its rows split by Premiumize.
+    /// Live progress of the running (or last) search; with `cache=1` its rows split as the search's are.
     private static func partial(_ query: [String: String]) -> Answer {
         guard let python = PythonRuntime.shared else { return .json(200, "{\"exists\":false}") }
         let snapshot = parse(python.call("search_partial", "{}"))
@@ -117,10 +113,9 @@ enum OnDeviceLane {
         let found = streams(snapshot["streams"])
         var cached: [Bool]?
         if query["cache"] == "1" {
-            guard let key = settings()["premiumizeApiKey"] as? String, !key.isEmpty else {
-                return .error(401, "Premiumize API key not configured")
-            }
-            cached = cacheCheck(hashes(found), key)
+            let answer = split(python, settings(), found)
+            if let refused = answer.refused { return refused }
+            cached = answer.flags
         }
         return .json(200, OnDeviceRouting.partialJson(found, progress: progress(snapshot["progress"]), cached: cached))
     }
@@ -139,25 +134,14 @@ enum OnDeviceLane {
         for old in files.sorted(by: { mtime($0) > mtime($1) }).dropFirst(limit) { try? fm.removeItem(at: old) }
     }
 
-    /// PremiumizeCacheCheck: all false on any failure, so a result just lands on the uncached side.
-    /// The key never reaches a log line.
-    static func premiumizeCacheCheck(_ hashes: [String], _ apiKey: String) -> [Bool] {
-        guard !hashes.isEmpty, !apiKey.isEmpty,
-              let key = apiKey.addingPercentEncoding(withAllowedCharacters: .alphanumerics),
-              let url = URL(string: "https://www.premiumize.me/api/cache/check?apikey=" + key) else {
-            return [Bool](repeating: false, count: hashes.count)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(hashes.map { "items%5B%5D=" + $0 }.joined(separator: "&").utf8)
-        let (data, response) = Transport.sendSync(request)
-        guard let status = response?.statusCode, (200..<300).contains(status) else {
-            log.info("premiumize cache/check \(response?.statusCode ?? 0), treating all as uncached")
-            return [Bool](repeating: false, count: hashes.count)
-        }
-        return OnDeviceRouting.cachedFlags(data, count: hashes.count)
+    /// The cache split, from the Python entry: one flag per row, or the refusal it answers (401
+    /// without the key it needs; the lane asks with no rows first). An unreadable answer is all
+    /// uncached, so a row just lands on the uncached side.
+    private static func split(_ python: PythonRuntime, _ settings: [String: Any],
+                              _ found: [OnDeviceRouting.Found]) -> (flags: [Bool], refused: Answer?) {
+        let result = parse(python.call("split", json(["settings": settings, "hashes": found.map(\.hash)])))
+        if let status = result["status"] as? Int { return ([], .error(status, result["error"] as? String ?? "Refused")) }
+        return ((result["cached"] as? [Any] ?? []).map { $0 as? Bool ?? false }, nil)
     }
 
     // MARK: - Subtitles
@@ -262,8 +246,6 @@ enum OnDeviceLane {
         box.lock(); defer { box.unlock() }
         return out
     }
-
-    private static func hashes(_ found: [OnDeviceRouting.Found]) -> [String] { found.map { $0.hash.lowercased() } }
 
     private static func streams(_ rows: Any?) -> [OnDeviceRouting.Found] {
         (rows as? [[Any]] ?? []).compactMap { OnDeviceRouting.Found(row: $0) }

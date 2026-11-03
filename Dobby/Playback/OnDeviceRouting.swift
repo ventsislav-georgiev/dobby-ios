@@ -33,7 +33,7 @@ enum OnDeviceRouting {
     static let waitSeconds = 60.0
     static let defaultCacheSize = 20
 
-    /// One search result: its hash (the Premiumize cache key) and the stream object the page
+    /// One search result: its hash (what the cache split checks) and the stream object the page
     /// renders, shaped by the Python entry and passed through untouched.
     struct Found: Equatable {
         let hash: String
@@ -56,9 +56,9 @@ enum OnDeviceRouting {
         case search(cacheKey: String, params: [String: String], refresh: Bool)
     }
 
-    /// Android's full-search checks, in its order: the key first (401), then the query (400).
-    static func fullSearchPlan(_ query: [String: String], apiKey: String?) -> FullSearchPlan {
-        guard let apiKey, !apiKey.isEmpty else { return .answer(.error(401, "Premiumize API key not configured")) }
+    /// Android's full-search query checks (400). Its key check (401) comes first and is the
+    /// Python entry's, asked by the lane before this.
+    static func fullSearchPlan(_ query: [String: String]) -> FullSearchPlan {
         let imdbId = query["imdbId"] ?? "", type = query["type"] ?? "", title = query["title"] ?? ""
         if imdbId.isEmpty || type.isEmpty || title.isEmpty {
             return .answer(.error(400, "Missing imdbId, type or title parameter"))
@@ -75,7 +75,7 @@ enum OnDeviceRouting {
         return .search(cacheKey: cacheKey, params: params, refresh: query["refresh"] == "1")
     }
 
-    /// The rows on one side of the Premiumize split. A missing flag reads as not cached.
+    /// The rows on one side of the cache split. A missing flag reads as not cached.
     static func shapes(_ found: [Found], _ cached: [Bool], wantCached: Bool) -> String {
         let picked = found.indices.filter { (($0 < cached.count) && cached[$0]) == wantCached }
         return "[" + picked.map { found[$0].json }.joined(separator: ",") + "]"
@@ -134,16 +134,6 @@ enum OnDeviceRouting {
             let p = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
             return p.count == 2 ? Found(row: p) : nil
         }
-    }
-
-    /// Premiumize's cache/check answer, one flag per hash in order; all false on anything odd,
-    /// and a short answer padded rather than trusted.
-    static func cachedFlags(_ data: Data?, count: Int) -> [Bool] {
-        var out = [Bool](repeating: false, count: count)
-        guard let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let flags = object["response"] as? [Any] else { return out }
-        for i in 0..<min(count, flags.count) { out[i] = flags[i] as? Bool ?? false }
-        return out
     }
 
     // MARK: - Subtitles

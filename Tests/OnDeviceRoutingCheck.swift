@@ -15,35 +15,30 @@ enum OnDeviceRoutingCheck {
     typealias R = OnDeviceRouting
 
     static func main() {
-        // Full search: the key is checked before the query, then the query, then the series pair.
+        // Full search: the query, then the series pair (the key gate before both is the Python entry's).
         let full = ["imdbId": "tt1", "type": "movie", "title": "T"]
-        check(R.fullSearchPlan([:], apiKey: nil) == .answer(.error(401, "Premiumize API key not configured")),
-              "no key is a 401 even when the query is bad too")
-        check(R.fullSearchPlan(["imdbId": "tt1", "type": "movie"], apiKey: "k")
+        check(R.fullSearchPlan(["imdbId": "tt1", "type": "movie"])
               == .answer(.error(400, "Missing imdbId, type or title parameter")), "no title is a 400")
-        check(R.fullSearchPlan(["imdbId": "tt1", "type": "series", "title": "T", "season": "1"], apiKey: "k")
+        check(R.fullSearchPlan(["imdbId": "tt1", "type": "series", "title": "T", "season": "1"])
               == .answer(.error(400, "Missing season or episode for series")), "a series needs season and episode")
         guard case let .search(key, params, refresh) = R.fullSearchPlan(
             ["imdbId": "tt1", "type": "series", "title": "T", "season": "1", "episode": "2",
-             "episodeTitle": "E", "noSeasons": "3", "refresh": "1"], apiKey: "k") else { return check(false, "a series plan") }
+             "episodeTitle": "E", "noSeasons": "3", "refresh": "1"]) else { return check(false, "a series plan") }
         check(key == "tt1-series-s1e2" && refresh, "series cache key and refresh")
         check(params["imdb"] == "tt1" && params["episode_title"] == "E" && params["no_seasons"] == "3" && params["year"] == "",
               "the Pi script's argv names, absent as empty")
-        guard case .search(_, _, false) = R.fullSearchPlan(full, apiKey: "k") else { return check(false, "a movie plan") }
+        guard case .search(_, _, false) = R.fullSearchPlan(full) else { return check(false, "a movie plan") }
 
         // Rows are the Python entry's [hash, streamJson], passed through untouched.
-        let big = R.Found(row: ["abc", "{\"infoHash\":\"abc\",\"title\":\"Rel\\n👤 12\"}"])!
-        let bare = R.Found(hash: "def", json: "{\"infoHash\":\"def\"}")
+        let big = R.Found(row: ["abc", "{\"id\":\"abc\",\"title\":\"Rel\\n👤 12\"}"])!
+        let bare = R.Found(hash: "def", json: "{\"id\":\"def\"}")
         check(R.Found(row: ["a"]) == nil && R.Found(row: ["a", ""]) == nil && R.Found(row: [1, "{}"]) == nil,
               "a short, empty or non-string Python row is dropped")
 
-        // The Premiumize split: a missing flag is uncached; a cache hit says so.
+        // The cache split: a missing flag is uncached; a cache hit says so.
         let split = R.streamsJson([big, bare], [true], fromCache: true)
         check(split == "{\"streams\":[\(big.json)],\"uncached\":[\(bare.json)],\"cached\":true}", "split: \(split)")
         check(!R.streamsJson([big], [false], fromCache: false).contains("\"cached\""), "a fresh search carries no cached key")
-        check(R.cachedFlags(Data("{\"response\":[true,false]}".utf8), count: 3) == [true, false, false], "short answer padded")
-        check(R.cachedFlags(Data("{\"response\":[\"yes\",true]}".utf8), count: 2) == [false, true], "a non-bool flag is false")
-        check(R.cachedFlags(Data("<html>".utf8), count: 2) == [false, false], "garbage is all false")
 
         // /partial: counters before the first report, done flag, rows split only with cache=1.
         check(R.partialJson([], progress: nil, cached: nil)

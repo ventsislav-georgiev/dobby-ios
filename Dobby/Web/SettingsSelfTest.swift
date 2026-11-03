@@ -27,10 +27,11 @@ import WebKit
 ///   (`setPiEnabledOnWrapper`, then `probeNetworkStates`), without posting the form. The
 ///   flag is the one value these steps print: it is the wrapper's switch, not settings data.
 /// - `cred-write` / `cred-read` / `cred-restore` (#184): the same Pi-off write lane for a
-///   credential-shaped field, `premiumizeApiKey`, whose Settings badge is drawn from
-///   `hasPremiumizeApiKey` alone. `cred-write` first takes a byte-exact Keychain backup of
-///   the mirror, the queued patch and the ahead bit (refusing if one is already held), then
-///   saves a throwaway key it generates together with `hasPremiumizeApiKey: false` — the flag
+///   credential-shaped field, `imdbAuthToken` (since #503; a service key before), whose
+///   Settings badge is drawn from `hasImdbAuthToken` alone. `cred-write` first takes a
+///   byte-exact Keychain backup of the mirror, the queued patch and the ahead bit (refusing
+///   if one is already held), then
+///   saves a throwaway token it generates together with `hasImdbAuthToken: false` — the flag
 ///   a Pi pull leaves when the key was unset there — and reports the flag and the badge.
 ///   `cred-read` reports them after a force-stop. `cred-restore` puts the backup back
 ///   natively, so the value it held never passes through the page, then reports them. Only
@@ -153,18 +154,18 @@ enum SettingsSelfTest {
         const r = await fetch(apiUrlFor('/api/settings'), { cache: 'no-store' });
         meta[label + 'Status'] = r.status;
         const doc = r.ok ? await r.json() : {};
-        const key = doc.premiumizeApiKey;
+        const key = doc.imdbAuthToken;
         meta[label + 'KeyShape'] = key === undefined ? 'absent' : key === null ? 'null'
           : typeof key !== 'string' ? 'non-string' : key === '' ? 'empty' : 'string';
         meta[label + 'KeyLen'] = typeof key === 'string' ? key.length : null;
         meta[label + 'KeyIsPlaceholder'] = typeof key === 'string' && key.indexOf(PREFIX) === 0;
-        meta[label + 'HasFlag'] = 'hasPremiumizeApiKey' in doc ? doc.hasPremiumizeApiKey : 'absent';
+        meta[label + 'HasFlag'] = 'hasImdbAuthToken' in doc ? doc.hasImdbAuthToken : 'absent';
       };
       const badge = async () => {
         settingsLoadedPromise = null;
         openSettings();
         await pause(2000);
-        const text = (document.getElementById('settings-pm-state') || {}).textContent || '';
+        const text = (document.getElementById('settings-imdb-state') || {}).textContent || '';
         meta.badge = text.indexOf('Configured') === 0 ? 'Configured'
           : text.indexOf('Not configured') === 0 ? 'Not configured' : 'other';
       };
@@ -178,8 +179,8 @@ enum SettingsSelfTest {
         mirroredWrite('/api/settings', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            premiumizeApiKey: PREFIX + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''),
-            hasPremiumizeApiKey: false
+            imdbAuthToken: PREFIX + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''),
+            hasImdbAuthToken: false
           })
         }, fetchWithRetry).then(
           (r) => { meta.saveOutcome = (r && r.ok ? 'saved ' : 'not-ok ') + (r && r.status); },

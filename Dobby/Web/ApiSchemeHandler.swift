@@ -117,8 +117,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     private static let laneQueue = DispatchQueue(label: "com.solarflare.dobby.lane", qos: .userInitiated,
                                                  attributes: .concurrent)
 
-    /// Exact-origin ACAO (`secret: true`): these lanes spend the Premiumize key and the subtitle
-    /// credentials. The answer goes out through `respond`, so on the main thread (#169).
+    /// Exact-origin ACAO (`secret: true`): these lanes spend the stored service keys and the
+    /// subtitle credentials. The answer goes out through `respond`, so on the main thread (#169).
     private func serveLane(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
                            _ url: URL, _ method: String, _ origin: String?, _ body: Data?) {
         guard let lane = Self.onDeviceLane else { fail(task, id, 404, "Unknown dobby-api route", origin); return }
@@ -333,14 +333,14 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// the Pi off.
     static let secretSuffixes = ["Token", "ApiKey", "Username", "Password"]
 
-    /// A secret key under `secretSuffixes`, never a has* flag itself (`hasPremiumizeApiKey`
-    /// ends in ApiKey too).
+    /// A secret key under `secretSuffixes`, never a has* flag itself (`hasImdbAuthToken`
+    /// ends in Token too).
     static func isPresenceFlagged(_ key: String) -> Bool {
         if key.hasPrefix("has"), key.dropFirst(3).first?.isUppercase == true { return false }
         return secretSuffixes.contains { key.hasSuffix($0) && key.count > $0.count }
     }
 
-    /// `premiumizeApiKey` -> `hasPremiumizeApiKey`, the server's pairing rule.
+    /// `imdbAuthToken` -> `hasImdbAuthToken`, the server's pairing rule.
     static func presenceFlag(_ key: String) -> String {
         "has" + key.prefix(1).uppercased() + key.dropFirst()
     }
@@ -377,14 +377,15 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// The field names `GET /api/settings` always sends as an explicit JSON `null`
     /// when unset, so a client can tell "unset" apart from "field absent" —
     /// `SettingsRoutes.swift:37-44` in the server repo (dobby, main @ c8a504f) —
-    /// that this side seeds: four of the server's eight. Android holds all eight in
+    /// that this side seeds: three of the server's eight. Android holds all eight in
     /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #174 @ c6525be13).
     ///
-    /// The other four are the subtitle-site credentials, left out since #503 (this
-    /// repo is public and names no service). Nothing is lost: the page stopped
-    /// editing them in #175, so this device never writes one, and absent reads the
-    /// same as null for them everywhere it is read — no has* flag (Not configured)
-    /// and an empty value to the Python entry. A document pulled from the Pi still
+    /// The other five are service keys, left out since #503 (this repo is public and
+    /// names no service). Nothing is lost: absent reads the same as null for each of
+    /// them everywhere it is read — no has* flag (Not configured), an empty value to
+    /// the Python entry, and the page takes only a string as a key. What the seed is
+    /// for is `preferredAudioLanguage`, which tells a complete document from the
+    /// one-key mirror seed (`applyServerSettings`). A document pulled from the Pi still
     /// carries all eight, and the merge keeps them.
     ///
     /// Transcribed rather than read at build time, because the two repos build
@@ -393,7 +394,6 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// every literal so a future edit has to touch this comment too.
     static let settingsNullKeys = [
         "imdbAuthToken",
-        "premiumizeApiKey",
         "preferredSubtitleLanguage",
         "preferredAudioLanguage",
     ]
@@ -434,7 +434,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// only sets a key when its field is non-empty) and `savePreferredSubtitleLanguage`
     /// posts a single key on its own (`js/17-video-playback.js:123-127`), so a POST
     /// body is a patch, never a document. Storing one whole would drop
-    /// `imdbAuthToken` and `premiumizeApiKey` out of the mirror precisely while the
+    /// `imdbAuthToken` and every other secret out of the mirror precisely while the
     /// Pi is unreachable and the mirror is the only copy of them. The Pi's own
     /// `POST /api/settings` applies keys by presence for the same reason
     /// (`SettingsRoutes.swift:83-106`), so this matches the server it stands in for.
@@ -1324,7 +1324,7 @@ private final class StreamDelegate: NSObject, URLSessionDataDelegate {
 /// The last body the Pi gave for `GET /api/settings`, in one Keychain item.
 ///
 /// The Keychain rather than `UserDefaults` because since #045 that payload carries
-/// every secret — `imdbAuthToken` and `premiumizeApiKey` included — and secrets may
+/// every secret — `imdbAuthToken` and the service keys included — and secrets may
 /// persist on clients but not in a plist an iTunes backup hands over in the clear.
 /// `AfterFirstUnlock` so a launch into a locked phone (background audio, a Live
 /// Activity tap) can still read it.
