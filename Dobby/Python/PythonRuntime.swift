@@ -1,12 +1,12 @@
 import Foundation
 
-/// Embedded CPython for the a4k lanes (#482), the Apple counterpart of Android's Chaquopy
+/// Embedded CPython for the on-device lanes (#482), the Apple counterpart of Android's Chaquopy
 /// `PythonRuntime.java`. scripts/copy-python.sh puts Python.framework, the standard library and
-/// the a4k tree into the bundle at build time; this starts the interpreter once and calls the
-/// functions of `dobby_apple.py` (search, search_partial, subs, download), one JSON string in, one
-/// out. The a4k lanes (Dobby/Web/A4kLane.swift, #483) are the callers.
+/// the private Python tree into the bundle at build time; this starts the interpreter once and
+/// calls the functions of the tree's entry module (search, search_partial, subs, download), one
+/// JSON string in, one out. The on-device lanes (Dobby/Web/OnDeviceLane.swift, #483) are the callers.
 ///
-/// The framework is dlopen'd, not linked: a build without the a4k tree (CI checks out this repo
+/// The framework is dlopen'd, not linked: a build without the Python tree (CI checks out this repo
 /// alone) carries no Python, `shared` is nil and nothing else changes. That is also why the C API
 /// is reached through dlsym with PEP 741's opaque `PyInitConfig` calls (Python 3.14), so no
 /// header and no struct layout is compiled in.
@@ -18,15 +18,17 @@ final class PythonRuntime {
     /// The first touch STARTS the interpreter (0.1 to 0.6 s): never from the main thread.
     static let shared: PythonRuntime? = PythonRuntime()
 
-    /// #483: this bundle carries the a4k tree. A file check that starts nothing, so the main thread
-    /// may ask it (the window.Dobby.a4k literal is built there).
+    /// #483: this bundle carries the Python tree. A file check that starts nothing, so the main thread
+    /// may ask it (the window.Dobby.onDeviceSearch literal is built there).
     static var bundled: Bool {
         Bundle.main.resourceURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(appGlue).path) } ?? false
     }
 
-    private static let appGlue = "python/app/dobby_apple.py"
+    /// The entry module, `<entryModule>.py` at the top of the tree (scripts/copy-python.sh checks for it).
+    private static let entryModule = "apple_entry"
+    private static let appGlue = "python/app/\(entryModule).py"
 
-    /// #483: pays the start off the main thread before the page's first a4k call, and runs `failed`
+    /// #483: pays the start off the main thread before the page's first lane call, and runs `failed`
     /// on main when the interpreter would not start, so the advertised flag can be taken back.
     static func warmUp(failed: @escaping () -> Void) {
         DispatchQueue.global(qos: .utility).async {
@@ -56,7 +58,7 @@ final class PythonRuntime {
               let executable = bundle.executablePath else { return nil }
         let python = resources.appendingPathComponent("python")
         guard FileManager.default.fileExists(atPath: resources.appendingPathComponent(Self.appGlue).path) else {
-            NSLog("PythonRuntime: this build carries no Python (scripts/copy-python.sh found no a4k tree)")
+            NSLog("PythonRuntime: this build carries no Python (scripts/copy-python.sh found no Python tree)")
             return nil
         }
         let framework = frameworks.appendingPathComponent("Python.framework")
@@ -107,7 +109,7 @@ final class PythonRuntime {
             NSLog("PythonRuntime: start failed: %@", message.map { String(cString: $0) } ?? "unknown")
             return nil
         }
-        // The a4k tree and its packages go first on sys.path (`pythonpath_env` is ignored once the
+        // The Python tree and its packages go first on sys.path (`pythonpath_env` is ignored once the
         // environment is). A JSON array of strings is a valid Python list literal, quotes escaped.
         let paths = ["app", "app_packages"].map { python.appendingPathComponent($0).path }
         guard let literal = try? JSONSerialization.data(withJSONObject: paths, options: .withoutEscapingSlashes),
@@ -121,12 +123,12 @@ final class PythonRuntime {
         startSeconds = Date().timeIntervalSince(started)
     }
 
-    /// `dobby_apple.<function>(json)`. nil when Python raised; the traceback goes to stderr.
+    /// `<entry module>.<function>(json)`. nil when Python raised; the traceback goes to stderr.
     func call(_ function: String, _ json: String) -> String? {
         dispatchPrecondition(condition: .notOnQueue(.main))
         let gil = ensureGIL()
         defer { releaseGIL(gil) }
-        guard let module = importModule("dobby_apple") else { printError(); return nil }
+        guard let module = importModule(Self.entryModule) else { printError(); return nil }
         defer { decRef(module) }
         guard let callable = getAttr(module, function) else { printError(); return nil }
         defer { decRef(callable) }

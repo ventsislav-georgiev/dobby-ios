@@ -19,10 +19,10 @@ enum SubtitleOrderingCheck {
 
         // A mixed list as the sheet builds it: name, language, SDH, source rank.
         let rows: [(String, SubtitleSortKey)] = [
-            ("a4k en", SubtitleSortKey(lang: "en", sdh: false, rank: 2)),
-            ("stremio fr", SubtitleSortKey(lang: "fr", sdh: false, rank: 1)),
+            ("secondary en", SubtitleSortKey(lang: "en", sdh: false, rank: 2)),
+            ("online fr", SubtitleSortKey(lang: "fr", sdh: false, rank: 1)),
             ("embedded en", SubtitleSortKey(lang: "en", sdh: false, rank: 0)),
-            ("stremio bg", SubtitleSortKey(lang: "bg", sdh: false, rank: 1)),
+            ("online bg", SubtitleSortKey(lang: "bg", sdh: false, rank: 1)),
             ("embedded none", SubtitleSortKey(lang: nil, sdh: false, rank: 0)),
             ("embedded en sdh", SubtitleSortKey(lang: "en", sdh: true, rank: 0)),
             ("embedded es", SubtitleSortKey(lang: "es", sdh: false, rank: 0)),
@@ -30,9 +30,9 @@ enum SubtitleOrderingCheck {
             ("embedded ar", SubtitleSortKey(lang: "ar", sdh: false, rank: 0)),
         ]
         let order = SubtitleOrdering.order(rows.map(\.1), priority: ["bg", "en"]).map { rows[$0].0 }
-        check(order == ["embedded bg", "embedded en sdh", "embedded en", "stremio bg", "a4k en",
-                        "embedded ar", "embedded es", "embedded none", "stremio fr"],
-              "Android order: preferred first, embedded < Stremio < a4k, preference order, "
+        check(order == ["embedded bg", "embedded en sdh", "embedded en", "online bg", "secondary en",
+                        "embedded ar", "embedded es", "embedded none", "online fr"],
+              "Android order: preferred first, embedded < online < secondary, preference order, "
               + "others by name with unknown last, SDH first; got \(order)")
 
         let tabs = SubtitleOrdering.tabs(priority: ["bg", "en"])
@@ -45,7 +45,7 @@ enum SubtitleOrderingCheck {
               && SubtitleOrdering.tabIndex(of: "en", priority: ["bg", "en"]) == 1,
               "the sheet opens on the playing subtitle's tab")
         check(SubtitleOrdering.flag("bul") == "🇧🇬", "flag from a three-letter code")
-        check(SubtitleOrdering.languageFromLabel("Stremio - 🇧🇬 Bulgarian · x", priority: ["en", "bg"]) == "bg",
+        check(SubtitleOrdering.languageFromLabel("Online - 🇧🇬 Bulgarian · x", priority: ["en", "bg"]) == "bg",
               "a sideloaded label's flag names its language")
         check(SubtitleOrdering.catalogLabel(lang: "en", id: "abc12345", fileName: nil) == "🇬🇧 EN · #2345",
               "unlabelled catalog row: flag, code, id tail")

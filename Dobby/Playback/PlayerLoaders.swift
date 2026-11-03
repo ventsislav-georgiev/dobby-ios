@@ -1,11 +1,11 @@
 import SwiftUI
 
 // E11 (#476) owns this file: the preparing screen and the buffering loader (Android
-// buildPreparingOverlay :1137-1212, the comet :1544-1555). The Mac keeps its instant close.
+// buildPreparingOverlay :1137-1212, the launch trace :1544-1555). The Mac keeps its instant close.
 
 extension PlayerView {
     /// Always in the tree, above the subtitles; decides itself when to draw. Until the first
-    /// ready state: the preparing screen. After it, a rebuffer runs the launch comet.
+    /// ready state: the preparing screen. After it, a rebuffer runs the launch trace.
     var playerLoaders: some View {
         ZStack {
             if !controls.loaded {
@@ -13,7 +13,7 @@ extension PlayerView {
                                 accent: controls.tint.accent)
                     .transition(.opacity)
             } else if controls.buffering {
-                CometLoader(color: controls.tint.accent)
+                TraceLoader(color: controls.tint.accent)
             }
         }
         .allowsHitTesting(false)
@@ -54,9 +54,9 @@ private struct PreparingScreen: View {
     }
 }
 
-/// The launch comet (Android launch_trace.xml, #396/#445): 28 % of the D outline in the accent,
+/// The launch trace (Android launch_trace.xml, #396/#445): 28 % of the D outline in the accent,
 /// one lap per 1.6 s, no D mark under it, in the launch loader's 120 pt frame (#444).
-private struct CometLoader: View {
+private struct TraceLoader: View {
     let color: Color
 
     /// launch_trace pathData "M29,23H49A31,31 0 0 1 49,85H29Z" in its 108 viewport, traced twice

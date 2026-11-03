@@ -127,8 +127,8 @@ enum ApiSchemeHandlerCheck {
     // MARK: mirror-first
 
     static func mirrorFallback() {
-        let mirrored = Data(#"{"premiumizeApiKey":"fake-key"}"#.utf8)
-        let fresh = Data(#"{"premiumizeApiKey":"fake-key-2"}"#.utf8)
+        let mirrored = Data(#"{"serviceApiKey":"fake-key"}"#.utf8)
+        let fresh = Data(#"{"serviceApiKey":"fake-key-2"}"#.utf8)
 
         var fetches = 0
         let hit = ApiSchemeHandler.settingsOutcome(mirror: mirrored) { fetches += 1; return fresh }
@@ -136,15 +136,15 @@ enum ApiSchemeHandlerCheck {
         // the fixture has no flag, so a hit answered verbatim reads Not configured.
         check(hit.status == 200 && hit.body == ApiSchemeHandler.withPresenceFlags(mirrored),
               "a mirrored body is answered as stored plus its derived has* flags")
-        check(object(hit.body)["hasPremiumizeApiKey"] as? Bool == true,
-              "a mirror hit answered a saved premiumizeApiKey without hasPremiumizeApiKey true")
+        check(object(hit.body)["hasServiceApiKey"] as? Bool == true,
+              "a mirror hit answered a saved serviceApiKey without hasServiceApiKey true")
         check(!hit.store, "a mirror hit does not rewrite the mirror")
         check(fetches == 0, "a mirror hit never waits on the Pi")
 
         let cold = ApiSchemeHandler.settingsOutcome(mirror: nil) { fetches += 1; return fresh }
         check(cold.status == 200 && cold.body == ApiSchemeHandler.withPresenceFlags(fresh),
               "an empty mirror waits on the Pi")
-        check(object(cold.body)["hasPremiumizeApiKey"] as? Bool == true,
+        check(object(cold.body)["hasServiceApiKey"] as? Bool == true,
               "the Pi-fetched answer is not run through the has* derivation")
         check(cold.store, "the fetched body becomes the mirror")
         check(fetches == 1, "the empty mirror is the only case that fetches")
@@ -358,16 +358,11 @@ enum ApiSchemeHandlerCheck {
         // this repo shows up as a failure rather than as a silently blanked field.
         let expected = [
             "imdbAuthToken",
-            "premiumizeApiKey",
-            "openSubtitlesUsername",
-            "openSubtitlesPassword",
-            "subdlApiKey",
-            "subsourceApiKey",
             "preferredSubtitleLanguage",
             "preferredAudioLanguage",
         ]
-        check(ApiSchemeHandler.settingsNullKeys.count == 8,
-              "SettingsRoutes.swift:37-44 declares eight null keys; this side has "
+        check(ApiSchemeHandler.settingsNullKeys.count == 3,
+              "this side seeds three of SettingsRoutes.swift:37-44's null keys; it has "
                   + "\(ApiSchemeHandler.settingsNullKeys.count)")
         check(ApiSchemeHandler.settingsNullKeys == expected,
               "the transcribed null-key list drifted from the one named in this check")
@@ -378,55 +373,55 @@ enum ApiSchemeHandlerCheck {
             check(isNull(seed, key), "the seed carries \(key) as something other than an explicit null")
         }
         check(seed.count == expected.count,
-              "the seed carries \(seed.count) keys, not the eight declared ones — it must be the null keys and nothing else")
+              "the seed carries \(seed.count) keys, not the three declared ones — it must be the null keys and nothing else")
     }
 
     static func settingsPatchMergesShallowly() {
-        let patch = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
+        let patch = Data(#"{"serviceApiKey":"fixture-key"}"#.utf8)
 
-        // (a) into the first-run seed: the key lands AND its seven siblings survive
+        // (a) into the first-run seed: the key lands AND its three siblings survive
         //     as explicit nulls. Both halves — a merge that stored the patch whole
         //     would pass the first and fail the second.
         let ontoSeed = object(ApiSchemeHandler.mergedSettings(base: ApiSchemeHandler.seedSettingsJson(),
                                                               patch: patch))
-        check(ontoSeed["premiumizeApiKey"] as? String == "fixture-key",
+        check(ontoSeed["serviceApiKey"] as? String == "fixture-key",
               "a one-key POST did not apply its own key")
-        check(ontoSeed.count == 8, "the merge onto the seed lost or invented keys (\(ontoSeed.count) of 8)")
-        for key in ApiSchemeHandler.settingsNullKeys where key != "premiumizeApiKey" {
+        check(ontoSeed.count == 4, "the merge onto the seed lost or invented keys (\(ontoSeed.count) of 4)")
+        for key in ApiSchemeHandler.settingsNullKeys {
             check(isNull(ontoSeed, key), "the merge blanked the sibling \(key) out of the document entirely")
         }
 
         // (b) with no mirror at all — the empty-Keychain-on-a-loaded-page case —
         //     the seed is what the patch lands on, not `{}`.
         let ontoNothing = object(ApiSchemeHandler.mergedSettings(base: nil, patch: patch))
-        check(ontoNothing["premiumizeApiKey"] as? String == "fixture-key",
+        check(ontoNothing["serviceApiKey"] as? String == "fixture-key",
               "a POST with no mirror did not apply its key")
-        check(ontoNothing.count == 8,
+        check(ontoNothing.count == 4,
               "a POST with no mirror was stored as a partial document (\(ontoNothing.count) keys), "
                   + "which the page cannot tell from a complete one")
         let ontoEmpty = object(ApiSchemeHandler.mergedSettings(base: Data(), patch: patch))
-        check(ontoEmpty.count == 8, "an empty mirror is not treated as no mirror")
+        check(ontoEmpty.count == 4, "an empty mirror is not treated as no mirror")
 
         // (c) into a real document: the patched key changes and EVERY other key
         //     keeps its own value. This is the property the entry is about.
         let existing = Data("""
-        {"imdbAuthToken":"fixture-token","premiumizeApiKey":"fixture-old",
-         "openSubtitlesUsername":"fixture-user","openSubtitlesPassword":"fixture-pass",
-         "subdlApiKey":null,"subsourceApiKey":null,
+        {"imdbAuthToken":"fixture-token","serviceApiKey":"fixture-old",
+         "fixtureUsername":"fixture-user","fixturePassword":"fixture-pass",
+         "fixtureApiKey":null,"otherApiKey":null,
          "preferredSubtitleLanguage":"bg,en","preferredAudioLanguage":null,
-         "a4kDefault":true,"maxSourceSizeGiB":20,"serverAddresses":["one","two"]}
+         "showAudiobooksOnTv":true,"maxSourceSizeGiB":20,"serverAddresses":["one","two"]}
         """.utf8)
         let merged = object(ApiSchemeHandler.mergedSettings(base: existing, patch: patch))
-        check(merged["premiumizeApiKey"] as? String == "fixture-key", "the patched key did not change")
+        check(merged["serviceApiKey"] as? String == "fixture-key", "the patched key did not change")
         check(merged["imdbAuthToken"] as? String == "fixture-token", "the merge blanked imdbAuthToken")
-        check(merged["openSubtitlesUsername"] as? String == "fixture-user", "the merge blanked openSubtitlesUsername")
-        check(merged["openSubtitlesPassword"] as? String == "fixture-pass", "the merge blanked openSubtitlesPassword")
+        check(merged["fixtureUsername"] as? String == "fixture-user", "the merge blanked a key the seed does not carry")
+        check(merged["fixturePassword"] as? String == "fixture-pass", "the merge blanked a second key the seed does not carry")
         check(merged["preferredSubtitleLanguage"] as? String == "bg,en",
               "the merge blanked preferredSubtitleLanguage")
-        check(isNull(merged, "subdlApiKey"), "the merge turned an explicit null into an absent key")
+        check(isNull(merged, "fixtureApiKey"), "the merge turned an explicit null into an absent key")
         // Keys the seed does not know about are carried too: the seed is a floor,
-        // not an allowlist, and the Pi's document is wider than the eight.
-        check(merged["a4kDefault"] as? Bool == true, "the merge dropped a non-secret key the seed does not declare")
+        // not an allowlist, and the Pi's document is wider than the three.
+        check(merged["showAudiobooksOnTv"] as? Bool == true, "the merge dropped a non-secret key the seed does not declare")
         check(merged["maxSourceSizeGiB"] as? Int == 20, "the merge dropped maxSourceSizeGiB")
         check((merged["serverAddresses"] as? [String]) == ["one", "two"], "the merge dropped serverAddresses")
 
@@ -438,7 +433,7 @@ enum ApiSchemeHandlerCheck {
         // (e) a mirror captured before preferredAudioLanguage joined the null keys
         //     (1766dd2 in dobby) gets the key back from the seed rather than staying
         //     absent — absent is what applyServerSettings reads as "say nothing".
-        let preAudio = Data(#"{"imdbAuthToken":"fixture-token","premiumizeApiKey":"fixture-old"}"#.utf8)
+        let preAudio = Data(#"{"imdbAuthToken":"fixture-token","serviceApiKey":"fixture-old"}"#.utf8)
         let healed = object(ApiSchemeHandler.mergedSettings(base: preAudio, patch: patch))
         check(healed["imdbAuthToken"] as? String == "fixture-token",
               "the seed overwrote a real value instead of sitting under it")
@@ -451,7 +446,7 @@ enum ApiSchemeHandlerCheck {
                                                              patch: Data(#"{"imdbAuthToken":null}"#.utf8)))
         check(cleared["imdbAuthToken"] != nil, "an explicit null in the patch removed the key instead of clearing it")
         check(isNull(cleared, "imdbAuthToken"), "an explicit null in the patch did not clear the value")
-        check(cleared["premiumizeApiKey"] as? String == "fixture-old",
+        check(cleared["serviceApiKey"] as? String == "fixture-old",
               "a clearing patch blanked a sibling it never mentioned")
     }
 
@@ -466,7 +461,7 @@ enum ApiSchemeHandlerCheck {
         check(ApiSchemeHandler.mergedSettings(base: nil, patch: Data("{}".utf8)) != nil,
               "an empty JSON object is a legal (no-op) patch and must still be accepted")
         check(ApiSchemeHandler.mergedSettings(base: nil,
-                                              patch: Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)) != nil,
+                                              patch: Data(#"{"serviceApiKey":"fixture-key"}"#.utf8)) != nil,
               "a well-formed patch was refused")
     }
 
@@ -477,10 +472,10 @@ enum ApiSchemeHandlerCheck {
     /// The queue accumulates PATCHES, never documents. This is the half that makes
     /// the push safe to send at all.
     static func settingsQueueAccumulatesPatchesOnly() {
-        let one = Data(#"{"premiumizeApiKey":"fixture-key"}"#.utf8)
+        let one = Data(#"{"serviceApiKey":"fixture-key"}"#.utf8)
 
         // (a) THE trap. A one-key write queues one key. Building the queue on
-        //     `settingsSeed` — i.e. reusing `mergedSettings` here — would queue eight,
+        //     `settingsSeed` — i.e. reusing `mergedSettings` here — would queue more than one,
         //     and the Pi applies `preferredSubtitleLanguage` and
         //     `preferredAudioLanguage` by body PRESENCE (SettingsRoutes.swift:80-84,
         //     `rawObject?.keys.contains(...)`, and `sanitizedLanguage(nil)` is nil),
@@ -491,37 +486,36 @@ enum ApiSchemeHandlerCheck {
         let queued = object(ApiSchemeHandler.mergedPatch(pending: nil, patch: one))
         check(queued.count == 1,
               "a one-key write queued \(queued.count) keys — the queue is built on the "
-                  + "eight-key seed, and its nulls would clear the Pi's language fields")
-        check(queued["premiumizeApiKey"] as? String == "fixture-key", "the queued patch lost its own key")
+                  + "seed, and its nulls would clear the Pi's language fields")
+        check(queued["serviceApiKey"] as? String == "fixture-key", "the queued patch lost its own key")
         for language in ["preferredSubtitleLanguage", "preferredAudioLanguage"] {
             check(queued[language] == nil,
                   "the queued patch carries \(language) the device never wrote; the Pi keys that "
                       + "field off body presence and would clear it")
         }
-        // The other six are the opposite convention (SettingsRoutes.swift:59-70,
+        // The seed's secrets are the opposite convention (SettingsRoutes.swift:59-70,
         // each inside an `if let sanitizedSecret(...)`, so a null no-ops) — but they
         // must not be sent either, because a device that never set one has nothing to
         // say about it. Not a class, key by key.
-        for secret in ["imdbAuthToken", "openSubtitlesUsername", "openSubtitlesPassword",
-                       "subdlApiKey", "subsourceApiKey"] {
+        for secret in ["imdbAuthToken"] {
             check(queued[secret] == nil, "the queued patch carries \(secret) the device never wrote")
         }
 
         // (b) two saves across two Pi-less sessions BOTH reach the Pi. A queue that
         //     replaced instead of accumulating would lose the first one silently —
         //     the mirror has both merged in, so nothing else on the device notices.
-        let two = Data(#"{"subdlApiKey":"fixture-subdl"}"#.utf8)
+        let two = Data(#"{"imdbAuthToken":"fixture-token"}"#.utf8)
         let both = object(ApiSchemeHandler.mergedPatch(pending: ApiSchemeHandler.mergedPatch(pending: nil, patch: one),
                                                        patch: two))
         check(both.count == 2, "the queue replaced the earlier patch instead of accumulating it (\(both.count) keys)")
-        check(both["premiumizeApiKey"] as? String == "fixture-key", "the queue dropped the first save's key")
-        check(both["subdlApiKey"] as? String == "fixture-subdl", "the queue dropped the second save's key")
+        check(both["serviceApiKey"] as? String == "fixture-key", "the queue dropped the first save's key")
+        check(both["imdbAuthToken"] as? String == "fixture-token", "the queue dropped the second save's key")
 
         // (c) the same key written twice: the later value is what the user meant.
-        let older = ApiSchemeHandler.mergedPatch(pending: nil, patch: Data(#"{"premiumizeApiKey":"fixture-old"}"#.utf8))
+        let older = ApiSchemeHandler.mergedPatch(pending: nil, patch: Data(#"{"serviceApiKey":"fixture-old"}"#.utf8))
         let newer = object(ApiSchemeHandler.mergedPatch(pending: older, patch: one))
         check(newer.count == 1, "re-writing one key grew the queue to \(newer.count) keys")
-        check(newer["premiumizeApiKey"] as? String == "fixture-key",
+        check(newer["serviceApiKey"] as? String == "fixture-key",
               "the queue kept the earlier value of a key the user wrote twice")
 
         // (d) a null the USER put in a patch is a clear they asked for, and has to
@@ -543,7 +537,7 @@ enum ApiSchemeHandlerCheck {
         }
         // ...and an unreadable queue is not allowed to swallow the new patch with it.
         let overJunk = object(ApiSchemeHandler.mergedPatch(pending: Data("not json at all".utf8), patch: one))
-        check(overJunk["premiumizeApiKey"] as? String == "fixture-key",
+        check(overJunk["serviceApiKey"] as? String == "fixture-key",
               "a corrupt queue swallowed the patch being written into it")
     }
 
@@ -602,13 +596,20 @@ enum ApiSchemeHandlerCheck {
     /// device carries none (or a stale one from the last pull), so the rule is
     /// re-derived on every answer. Fixture values are placeholders.
     static func presenceFlags() {
-        let keys = ApiSchemeHandler.presenceFlaggedKeys
-        check(keys == ["imdbAuthToken", "premiumizeApiKey", "openSubtitlesUsername",
-                       "openSubtitlesPassword", "subdlApiKey", "subsourceApiKey"],
-              "presenceFlaggedKeys is not the six secrets the Pi's GET flags")
-        check(Set(keys).isSubset(of: Set(ApiSchemeHandler.settingsNullKeys)),
-              "a flagged key is not a seed key, so a seeded document could never derive its flag")
-        check(ApiSchemeHandler.presenceFlag("premiumizeApiKey") == "hasPremiumizeApiKey",
+        // The rule, by name: the server's secrets and placeholder ones in the same families flag;
+        // the flags themselves and every other setting do not (run-checks holds it to the server's GET).
+        let keys = ["imdbAuthToken", "serviceApiKey", "fixtureUsername", "fixturePassword", "fixtureApiKey"]
+        check(ApiSchemeHandler.secretSuffixes == ["Token", "ApiKey", "Username", "Password"], "the secret families changed")
+        check(keys.allSatisfy(ApiSchemeHandler.isPresenceFlagged), "a secret is not flagged")
+        for plain in ["hasServiceApiKey", "hasImdbAuthToken", "preferredSubtitleLanguage", "preferredAudioLanguage",
+                      "maxSourceSizeGiB", "serverAddresses", "sourceOrder", "showAudiobooksOnTv", "ApiKey", "Token",
+                      "apiKeyHint", "tokens"] {
+            check(!ApiSchemeHandler.isPresenceFlagged(plain), "\(plain) is flagged but is not a secret")
+        }
+        check(ApiSchemeHandler.isPresenceFlagged("hashToken"), "a key that merely starts with has is still a secret")
+        check(ApiSchemeHandler.settingsNullKeys.filter(ApiSchemeHandler.isPresenceFlagged) == ["imdbAuthToken"],
+              "the seed's secret is not the one the rule flags, so a seeded document could not derive its flag")
+        check(ApiSchemeHandler.presenceFlag("serviceApiKey") == "hasServiceApiKey",
               "presenceFlag does not follow the server's pairing rule")
 
         func flags(_ json: String) -> [String: Any] {
@@ -628,42 +629,42 @@ enum ApiSchemeHandlerCheck {
         }
 
         // An empty string is not configured, and a stale true is corrected, not kept.
-        let emptied = flags(#"{"premiumizeApiKey":"","hasPremiumizeApiKey":true}"#)
-        check(emptied["hasPremiumizeApiKey"] as? Bool == false,
-              "an empty premiumizeApiKey answered hasPremiumizeApiKey true")
+        let emptied = flags(#"{"serviceApiKey":"","hasServiceApiKey":true}"#)
+        check(emptied["hasServiceApiKey"] as? Bool == false,
+              "an empty serviceApiKey answered hasServiceApiKey true")
         let cleared = flags(#"{"imdbAuthToken":null,"hasImdbAuthToken":true}"#)
         check(cleared["hasImdbAuthToken"] as? Bool == false, "a cleared imdbAuthToken kept a stale true flag")
-        let stale = flags(#"{"subdlApiKey":"fixture","hasSubdlApiKey":false}"#)
-        check(stale["hasSubdlApiKey"] as? Bool == true, "a saved subdlApiKey kept a stale false flag")
-        let number = flags(#"{"subsourceApiKey":7}"#)
-        check(number["hasSubsourceApiKey"] as? Bool == false, "a non-string value counted as configured")
+        let stale = flags(#"{"fixtureApiKey":"fixture","hasFixtureApiKey":false}"#)
+        check(stale["hasFixtureApiKey"] as? Bool == true, "a saved fixtureApiKey kept a stale false flag")
+        let number = flags(#"{"fixturePassword":7}"#)
+        check(number["hasFixturePassword"] as? Bool == false, "a non-string value counted as configured")
 
         // Absent is not unset: a document without the raw key keeps its flag as sent.
-        let absent = Data(#"{"hasPremiumizeApiKey":true,"a4kDefault":false}"#.utf8)
+        let absent = Data(#"{"hasServiceApiKey":true,"showAudiobooksOnTv":false}"#.utf8)
         check(ApiSchemeHandler.withPresenceFlags(absent) == absent, "an absent field changed its flag")
 
         // Nothing to change, or nothing readable: the exact bytes come back.
-        let shaped = Data(#"{"premiumizeApiKey":"fixture","hasPremiumizeApiKey":true}"#.utf8)
+        let shaped = Data(#"{"serviceApiKey":"fixture","hasServiceApiKey":true}"#.utf8)
         check(ApiSchemeHandler.withPresenceFlags(shaped) == shaped, "a document already in GET shape was rewritten")
-        for junk in [#"{"premiumizeApiKey":"#, "[]", "null", "", "not json"] {
+        for junk in [#"{"serviceApiKey":"#, "[]", "null", "", "not json"] {
             check(ApiSchemeHandler.withPresenceFlags(Data(junk.utf8)) == Data(junk.utf8),
                   "an unreadable body was not answered as-is: \(junk)")
         }
 
         // Every other value survives.
-        let rich = flags(#"{"sourceValueOrder":{"a":["x,y","}"]},"serverAddresses":["h"],"maxSourceSizeGiB":12.5,"a4kDefault":true,"premiumizeApiKey":"k\"q"}"#)
-        check(rich["premiumizeApiKey"] as? String == "k\"q", "an escaped value did not survive")
+        let rich = flags(#"{"sourceValueOrder":{"a":["x,y","}"]},"serverAddresses":["h"],"maxSourceSizeGiB":12.5,"showAudiobooksOnTv":true,"serviceApiKey":"k\"q"}"#)
+        check(rich["serviceApiKey"] as? String == "k\"q", "an escaped value did not survive")
         check((rich["sourceValueOrder"] as? [String: Any])?["a"] as? [String] == ["x,y", "}"], "a nested value did not survive")
         check(rich["serverAddresses"] as? [String] == ["h"], "an array did not survive")
         check(rich["maxSourceSizeGiB"] as? Double == 12.5, "a number did not survive")
-        check(rich["a4kDefault"] as? Bool == true, "a bool did not survive")
-        check(rich["hasPremiumizeApiKey"] as? Bool == true, "the rich document got no flag")
+        check(rich["showAudiobooksOnTv"] as? Bool == true, "a bool did not survive")
+        check(rich["hasServiceApiKey"] as? Bool == true, "the rich document got no flag")
 
         // The Pi-less symptom end to end, through the answer rule: seed, one device
         // write, answered from the mirror.
-        let written = ApiSchemeHandler.mergedSettings(base: nil, patch: Data(#"{"premiumizeApiKey":"fixture"}"#.utf8))!
+        let written = ApiSchemeHandler.mergedSettings(base: nil, patch: Data(#"{"serviceApiKey":"fixture"}"#.utf8))!
         let answered = object(ApiSchemeHandler.settingsOutcome(mirror: written) { nil }.body)
-        check(answered["hasPremiumizeApiKey"] as? Bool == true, "a device-written key answers Not configured")
+        check(answered["hasServiceApiKey"] as? Bool == true, "a device-written key answers Not configured")
         check(answered["hasImdbAuthToken"] as? Bool == false, "a seeded null imdbAuthToken answered without a false flag")
     }
 }
