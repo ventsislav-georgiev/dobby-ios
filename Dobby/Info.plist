@@ -7,6 +7,16 @@
 	<!-- No custom/proprietary crypto → skip TestFlight's per-build export-compliance prompt. -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- #504: the launch screen is the loader's D mark, static, 120 pt centred on black
+	     (LaunchMark.pdf is ContentView's DobbyMark drawn without the trace), so the hand-off
+	     to the loader does not jump. -->
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIImageName</key>
+		<string>LaunchMark</string>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
