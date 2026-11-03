@@ -3179,7 +3179,7 @@ start = text.index("\nfunction playStreamUrl(url) {\n") + 1
 end = text.find("\n}\n", start)
 body = text[start:end].split("\n")
 GUARD = ["  if (isOfflineVideoUrl(url) && isDobbyWrapper() && !getPiEnabled()) {",
-         "    showToast('This offline copy lives in the Pi web cache. Turn on Use a Pi server to play it.', true);",
+         "    showToast('This offline copy was saved from the Dobby Pi, which is no longer used.', true);",
          "    return;",
          "  }"]
 at = [i for i in range(len(body)) if body[i:i + len(GUARD)] == GUARD]
