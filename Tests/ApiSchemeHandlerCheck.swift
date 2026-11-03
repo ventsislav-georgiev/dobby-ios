@@ -32,7 +32,6 @@ enum ApiSchemeHandlerCheck {
         settingsPatchMergesShallowly()
         settingsPatchIsRefusedWhenItIsNotAnObject()
         settingsQueueAccumulatesPatchesOnly()
-        settingsPushOutcomeRule()
         settingsWriteAnswerRule()
         presenceFlags()
         print("ApiSchemeHandlerCheck: all checks passed")
@@ -128,34 +127,19 @@ enum ApiSchemeHandlerCheck {
 
     static func mirrorFallback() {
         let mirrored = Data(#"{"serviceApiKey":"fake-key"}"#.utf8)
-        let fresh = Data(#"{"serviceApiKey":"fake-key-2"}"#.utf8)
 
-        var fetches = 0
-        let hit = ApiSchemeHandler.settingsOutcome(mirror: mirrored) { fetches += 1; return fresh }
+        let hit = ApiSchemeHandler.settingsOutcome(mirror: mirrored)
         // #184: as stored plus the has* flags derived from it, never the bytes alone —
         // the fixture has no flag, so a hit answered verbatim reads Not configured.
         check(hit.status == 200 && hit.body == ApiSchemeHandler.withPresenceFlags(mirrored),
               "a mirrored body is answered as stored plus its derived has* flags")
         check(object(hit.body)["hasServiceApiKey"] as? Bool == true,
               "a mirror hit answered a saved serviceApiKey without hasServiceApiKey true")
-        check(!hit.store, "a mirror hit does not rewrite the mirror")
-        check(fetches == 0, "a mirror hit never waits on the Pi")
 
-        let cold = ApiSchemeHandler.settingsOutcome(mirror: nil) { fetches += 1; return fresh }
-        check(cold.status == 200 && cold.body == ApiSchemeHandler.withPresenceFlags(fresh),
-              "an empty mirror waits on the Pi")
-        check(object(cold.body)["hasServiceApiKey"] as? Bool == true,
-              "the Pi-fetched answer is not run through the has* derivation")
-        check(cold.store, "the fetched body becomes the mirror")
-        check(fetches == 1, "the empty mirror is the only case that fetches")
-
-        let dead = ApiSchemeHandler.settingsOutcome(mirror: nil) { nil }
-        check(dead.status == 503, "empty mirror plus no Pi is a 503")
-        check(!dead.store, "a 503 body is never mirrored")
-
-        let empty = ApiSchemeHandler.settingsOutcome(mirror: Data()) { fresh }
-        check(empty.status == 200 && empty.body == ApiSchemeHandler.withPresenceFlags(fresh),
-              "an empty mirror entry counts as no mirror")
+        // #508: no Pi behind an empty mirror, so nothing to wait on.
+        let dead = ApiSchemeHandler.settingsOutcome(mirror: nil)
+        check(dead.status == 503, "an empty mirror is a 503")
+        check(ApiSchemeHandler.settingsOutcome(mirror: Data()).status == 503, "an empty mirror entry counts as no mirror")
         check(dead.body == Data(#"{"error":"Settings unavailable and nothing mirrored"}"#.utf8),
               "the 503 body is not a settings document and gains no has* flag")
     }
@@ -541,28 +525,6 @@ enum ApiSchemeHandlerCheck {
               "a corrupt queue swallowed the patch being written into it")
     }
 
-    /// When a push may release the hold, and when it must not. Getting `.held`
-    /// wrong in either direction is the whole entry: too eager and the mirror stops
-    /// protecting a change the Pi never took, too reluctant and the phone is held
-    /// forever — which is the #149 behaviour this replaces.
-    static func settingsPushOutcomeRule() {
-        for landed in [200, 201, 202, 204, 299] {
-            check(ApiSchemeHandler.pushOutcome(status: landed) == .landed, "\(landed) is not a landed push")
-        }
-        // A body the Pi will never take. Held instead, these pin the mirror for the
-        // life of the install and re-create exactly the bug this entry closes.
-        for refused in [400, 401, 403, 404, 409, 413, 422, 499] {
-            check(ApiSchemeHandler.pushOutcome(status: refused) == .refused, "\(refused) is not a refusal")
-        }
-        // Not about the body: timing, or the Pi being unwell. The patch stays queued
-        // and the mirror keeps winning. `nil` is "the Pi never answered at all",
-        // which is the normal case here — the Pi being off is why there is a queue.
-        for held: Int? in [nil, 0, 408, 429, 500, 502, 503, 504, 100, 301, 302] {
-            check(ApiSchemeHandler.pushOutcome(status: held) == .held,
-                  "\(held.map(String.init) ?? "no answer") did not hold the queued patch")
-        }
-    }
-
     // MARK: #185 — a save the Keychain refused is not answered 200
 
     /// `fetchWithRetry`'s default retryStatuses in the page (dobby js/03-storage-net.js).
@@ -663,7 +625,7 @@ enum ApiSchemeHandlerCheck {
         // The Pi-less symptom end to end, through the answer rule: seed, one device
         // write, answered from the mirror.
         let written = ApiSchemeHandler.mergedSettings(base: nil, patch: Data(#"{"serviceApiKey":"fixture"}"#.utf8))!
-        let answered = object(ApiSchemeHandler.settingsOutcome(mirror: written) { nil }.body)
+        let answered = object(ApiSchemeHandler.settingsOutcome(mirror: written).body)
         check(answered["hasServiceApiKey"] as? Bool == true, "a device-written key answers Not configured")
         check(answered["hasImdbAuthToken"] as? Bool == false, "a seeded null imdbAuthToken answered without a false flag")
     }

@@ -11,11 +11,8 @@ enum OfflineStoreCheck {
             FileHandle.standardError.write(Data("FAIL: OfflineStoreCheck needs CFFIXED_USER_HOME set to a scratch home (#243)\n".utf8))
             exit(1)
         }
-        // Registration domain only (in memory): the Pi setting on, so startBookDownload gets past
-        // its #213 refusals to the payload decode. Nothing is persisted.
-        UserDefaults.standard.register(defaults: ["dobby.piEnabled": true])
         let checks: [(String, @MainActor () -> Void)] = [
-            ("badBookPayloadGetsAnErrorEvent", badBookPayloadGetsAnErrorEvent),
+            ("everyBookStartGetsAnErrorEvent", everyBookStartGetsAnErrorEvent),
             ("lateChapterAfterCancelIsDropped", lateChapterAfterCancelIsDropped),
             ("ownedChapterIsKeptUnlistedOneDropped", ownedChapterIsKeptUnlistedOneDropped),
             ("lateVideoAfterCancelIsDroppedOwnedOneKept", lateVideoAfterCancelIsDroppedOwnedOneKept),
@@ -117,29 +114,25 @@ enum OfflineStoreCheck {
         ev.all.filter { $0["videoId"] as? String == id && $0["status"] as? String == "error" }
     }
 
-    /// D1: a book payload startBookDownload cannot use was dropped with an NSLog, so the page's
-    /// Download button waited on an answer that never came. Both shapes get refuseBookDownload's
-    /// book error event: a chapter row that fails the typed decode (bookId still readable) and
-    /// an empty chapter list. Nothing is written for either.
-    @MainActor static func badBookPayloadGetsAnErrorEvent() {
+    /// The one answer a book start gets since #508: books only ever came from the Pi.
+    static let noPi = "Books came from the Dobby Pi, which is no longer used."
+
+    /// D1: a book start the store does not carry out still answers, or the page's Download
+    /// button waits on an answer that never comes. #508: that is every book start, a usable
+    /// payload included. One book error event each, nothing written.
+    @MainActor static func everyBookStartGetsAnErrorEvent() {
         let (s, ev) = store()
         s.startBookDownload("{\"bookId\":\"fake-book-1\",\"title\":\"Fake Book\",\"chapters\":[{\"fileName\":\"01.mp3\"}]}")
         s.startBookDownload("{\"bookId\":\"fake-book-1b\",\"chapters\":[]}")
-        for id in ["fake-book-1", "fake-book-1b"] {
+        s.startBookDownload(bookPayload("fake-book-1c"))
+        for id in ["fake-book-1", "fake-book-1b", "fake-book-1c"] {
             let e = errors(ev, id)
-            check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == "invalid book request",
-                  "D1: a bad book payload for \(id) must get one book error event, got \(ev.all)")
-            check(!exists(id), "D1: a bad book payload must not create the book's folder")
+            check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == noPi,
+                  "D1: a book start for \(id) must get one book error event, got \(ev.all)")
+            check(!exists(id), "D1: a book start must not create the book's folder")
         }
-        check(s.indexJSON() == "[]", "D1: a bad book payload must not write an index entry")
-        // #243 r3: every chapter must be contained, not just one.
-        s.startBookDownload("{\"bookId\":\"fake-book-1c\",\"title\":\"Fake Book\",\"chapters\":[{\"fileName\":\"01.mp3\",\"url\":\"\"},{\"fileName\":\"../fake-book-10/01.mp3\",\"url\":\"\"}]}")
-        let e2 = errors(ev, "fake-book-1c")
-        check(e2.count == 1 && e2[0]["kind"] as? String == "book" && e2[0]["error"] as? String == "invalid book request",
-              "a book start with one escaping chapter must be refused, got \(ev.all)")
-        check(!ev.all.contains { $0["videoId"] as? String == "fake-book-1c" && $0["status"] as? String == "downloading" },
-              "a book start with one escaping chapter must not report downloading")
-        check(!exists("fake-book-1c"), "a book start with one escaping chapter must not create the folder")
+        check(!ev.all.contains { $0["status"] as? String == "downloading" }, "D1: no book start may report downloading")
+        check(s.indexJSON() == "[]", "D1: a book start must not write an index entry")
     }
 
     /// D2, orphan side: cancel removed the entry and the folder, then the chapter's transfer
@@ -230,7 +223,7 @@ enum OfflineStoreCheck {
         for id in [".", "..", "../x", "a/../..", "../Offline-evil", "x/../fake-book-10", "fake-book-10/."] {
             s.startBookDownload(bookPayload(id))
             let e = errors(ev, id)
-            check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == "invalid book request",
+            check(e.count == 1 && e[0]["kind"] as? String == "book" && e[0]["error"] as? String == noPi,
                   "a book start with the id \(id.debugDescription) must be refused with its error event, got \(ev.all)")
             s.startDownload("{\"videoId\":\"\(id)\",\"subsOnly\":true}")
             for key in ["book\t\(id)\t01.mp3", "video\t\(id)"] {
@@ -282,22 +275,15 @@ enum OfflineStoreCheck {
     /// The containment must not refuse a real book id, which is an author and a title.
     @MainActor static func nestedBookIdStillWorks() {
         let id = "Fake Author/Fake Title"
-        let (s, ev) = store()
-        s.startBookDownload(bookPayload(id))
-        check(exists(id) && entry(s, id) != nil && errors(ev, id).allSatisfy { $0["error"] as? String != "invalid book request" },
-              "a nested book id must start: \(ev.all)")
-        s.cancel(id)
-        check(!exists(id) && entry(s, id) == nil && ev.all.contains { $0["videoId"] as? String == id && $0["status"] as? String == "cancelled" },
-              "a nested book id must cancel: \(ev.all)")
-        finish(s, key: "book\t\(id)\t01.mp3")
-        check(!exists(id), "a late chapter after a nested book's cancel must be dropped")
-
+        // #508: no book starts any more; a nested book saved earlier still completes and deletes.
         let (s2, _) = store(seed: bookSeed(id, chapters: ["01.mp3"]))
         finish(s2, key: "book\t\(id)\t01.mp3")
         finish(s2, key: "book\t\(id)\t99.mp3")
         check(exists("\(id)/01.mp3") && !exists("\(id)/99.mp3"),
               "a nested book keeps its listed chapter and drops an unlisted one")
         check(entry(s2, id)?["status"] as? String == "complete", "a nested book's chapter must complete: \(s2.indexJSON())")
+        s2.delete(id)
+        check(!exists(id) && entry(s2, id) == nil, "a nested book must delete: \(s2.indexJSON())")
         try? FileManager.default.removeItem(at: root)
     }
 }

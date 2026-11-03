@@ -44,11 +44,9 @@ enum BundledShell {
               let html = try? String(contentsOf: root.appendingPathComponent("index.html"), encoding: .utf8)
         else {
             // Android logs the same line for the same reason. A build made without the
-            // sibling dobby checkout (today: every CI/TestFlight build — see
-            // scripts/copy-app-shell.sh) has no shell, and the only difference the user
-            // sees is a blank "Continue offline" on a never-paired box. Say so, or a
-            // device round spends itself deciding whether the feature or the build is
-            // what is missing.
+            // sibling dobby checkout (scripts/copy-app-shell.sh) has no shell, and
+            // ContentView says so on screen (#508). Say so here too, or a device round
+            // spends itself deciding whether the feature or the build is what is missing.
             log.warning("No bundled app shell in this build")
             return nil
         }

@@ -20,9 +20,8 @@
 # Absent sibling checkout: a WARNING and exit 0, not a failure — .github/workflows/testflight.yml
 # checks out this repo alone, and failing there would break every release for a feature that
 # degrades cleanly. Such a build carries no shell, `BundledShell.root` is nil, and
-# `WebContainer.load` falls back to the plain load that "Continue offline" has always done —
-# Android's `hasBundledShell()` returning false, one platform over. A Pi-less cold start is
-# therefore a locally built app until that workflow gains a dobby checkout. Every OTHER
+# ContentView says "This build has no app shell." instead of starting (#508: there is no Pi
+# to fall back on). The workflow checks dobby out for exactly this reason (#155). Every OTHER
 # failure — a Public dir that is there but wrong — is still fatal, because that one is drift.
 set -euo pipefail
 # SRCROOT when Xcode runs this as a build phase (xcodegen inlines the script, so $0 is

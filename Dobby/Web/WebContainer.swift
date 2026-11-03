@@ -4,10 +4,8 @@ import WebKit
 /// Cross-platform WKWebView host. Native macOS + iOS share this; only the
 /// representable conformance differs.
 struct WebContainer {
+    /// #508: the origin the bundled shell is synthesized under (ServerAddresses.origin()), never fetched.
     let url: URL
-    /// #151: no address answered, so the app comes up out of its own bundle instead of
-    /// off the Pi — the analogue of Android's `loadBundledShell()`. See `load(_:in:)`.
-    var offlineShell = false
     @EnvironmentObject var playback: PlaybackCoordinator
     @EnvironmentObject var offline: OfflineStore
 
@@ -17,7 +15,7 @@ struct WebContainer {
 
     /// True when `url`'s host is covered by WKAppBoundDomains (the entry matches the
     /// host or a suffix of it). LAN IPs never are — that list only takes domains.
-    /// #245: the one predicate, shared with the iOS Server addresses guard.
+    /// #245: the one predicate, shared with ServerAddresses' iOS origin rule.
     static func isAppBound(_ url: URL) -> Bool {
         ServerAddresses.AppBound.current.covers(url)
     }
@@ -49,9 +47,8 @@ struct WebContainer {
         // Serve natively-downloaded offline files (the https page can't load file://).
         config.setURLSchemeHandler(OfflineSchemeHandler(), forURLScheme: OfflineSchemeHandler.scheme)
         // The page addresses this one explicitly (js/01-state-init.js, `apiUrlFor`) for
-        // GET /api/settings and /api/proxy — the two paths that must survive the Pi
-        // being off. `url` and not AppConfig.serverURL: the refresh belongs on whichever
-        // address actually answered.
+        // GET /api/settings and /api/proxy. `url` only names the page's origin for its
+        // Access-Control-Allow-Origin answers; nothing is fetched from it (#508).
         config.setURLSchemeHandler(ApiSchemeHandler(server: url), forURLScheme: ApiSchemeHandler.scheme)
         // #483: the on-device lanes on that scheme, and the offline sidecars they cache.
         ApiSchemeHandler.onDeviceLane = OnDeviceLane.answer
@@ -66,8 +63,7 @@ struct WebContainer {
         // #151, same SPI and the same reason, for the other scheme an https document has to
         // address: the bundled shell's `<script src="dobby-offline://shell/js/…">` tags are
         // blockable mixed content until this lands, and a blocked classic script is a blank
-        // page with nothing logged. Harmless when the Pi is up — nothing addresses the
-        // scheme until `offlineShell` puts a simulated document on the screen.
+        // page with nothing logged.
         ApiSchemeHandler.registerAsSecureScheme(in: config, scheme: OfflineSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -93,13 +89,8 @@ struct WebContainer {
         // (see AppConfig.startURL) so a series detail page can be reached headlessly.
         loadURL = AppConfig.startURL(origin: url)
         #endif
-        // #181: Android's ApiInterceptor refuses every request to the server origin while
-        // the Pi is disabled; the iOS lever is a content rule list, and it has to be in
-        // place before the first byte of the page asks for anything.
-        guard !ServerAddresses.piEnabled() else {
-            load(loadURL, in: webView)
-            return webView
-        }
+        // #181, #508: nothing the page asks for may reach its origin, which is the retired Pi's
+        // name. The lever is a content rule list, in place before the page asks for anything.
         Task { @MainActor in
             await PiRequestBlock.install(in: ucc, origin: url)
             load(loadURL, in: webView)
@@ -107,8 +98,7 @@ struct WebContainer {
         return webView
     }
 
-    /// Pi-backed: an ordinary request to the origin that answered. Pi-less: the bundled
-    /// shell, *synthesized under that same origin* by `loadSimulatedRequest`.
+    /// The bundled shell, *synthesized under the origin* by `loadSimulatedRequest`.
     ///
     /// The origin is the whole point and is why this is not `loadHTMLString` or a
     /// `file://` load. #150 measured that the simulated document lands in the REAL
@@ -117,24 +107,17 @@ struct WebContainer {
     /// a previous *networked* load of the Pi wrote read back inside it. So progress,
     /// bookmarks, the gallery cache and the service worker are the ones the app already
     /// has, and no cross-origin migration is needed (§9 option (b) is off the table for
-    /// iOS because of this).
-    ///
-    /// No shell in this build → the ordinary load, which is exactly what "Continue
-    /// offline" did before #151 and still the right behaviour on a box that has paired:
-    /// nothing answers, but the service worker's cache is keyed to this origin.
-    /// Same three-outcome shape as Android's `loadBundledShell()` returning false.
+    /// iOS because of this). #508: ContentView shows WebContainer only when the build has
+    /// a shell, so there is no network fallback here.
     private func load(_ loadURL: URL, in webView: WKWebView) {
-        guard offlineShell, let html = BundledShell.indexHTML() else {
-            webView.load(URLRequest(url: loadURL))
-            return
-        }
+        guard let html = BundledShell.indexHTML() else { return }
         webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)
     }
 }
 
-/// #181: with the Pi turned off, nothing the page asks for may reach the origin it is
-/// on — the probe, `/sw.js`, `/api/…`, the icons. The Pi-less shell itself is a simulated
-/// document and its scripts come over `dobby-offline:`, so neither is a load this rule sees.
+/// #181, #508: nothing the page asks for may reach the origin it is on (the retired Pi's name)
+/// — `/sw.js`, `/api/…`, the icons. The shell itself is a simulated document and its
+/// scripts come over `dobby-offline:`, so neither is a load this rule sees.
 enum PiRequestBlock {
     /// url-filter is a regex over the whole URL: this host, any scheme, any port.
     static func rules(for origin: URL) -> String? {
@@ -154,7 +137,7 @@ enum PiRequestBlock {
             return
         }
         ucc.add(list)
-        NSLog("%@", "Dobby: Pi disabled by the user setting; requests to the page origin blocked")
+        NSLog("%@", "Dobby: requests to the page origin blocked")
     }
 }
 

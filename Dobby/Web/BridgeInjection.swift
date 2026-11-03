@@ -16,14 +16,6 @@ enum BridgeInjection {
     static let edgeBack = false
     #endif
 
-    /// #245: the WKAppBoundDomains list the iOS Server addresses guard keeps entries on
-    /// (ServerAddresses.AppBound), as a JS literal, so the PWA's Settings row can say that the
-    /// other entries are ignored on this device. `null` where the guard is off (macOS): no note.
-    static func appBoundDomainsJS(_ rule: ServerAddresses.AppBound = .current) -> String {
-        guard rule.enforced, let data = try? JSONSerialization.data(withJSONObject: rule.domains) else { return "null" }
-        return String(decoding: data, as: UTF8.self)
-    }
-
     /// #483: `window.Dobby.onDeviceSearch`, the PWA's switch for the on-device lanes (`apiUrlFor`,
     /// #484). WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes
     /// it back through `withdrawOnDeviceSearch` if the interpreter then fails to start, so it stays
@@ -48,19 +40,12 @@ enum BridgeInjection {
         webView.evaluateJavaScript("if (window.Dobby) window.Dobby.onDeviceSearch = false;")
     }
 
-    /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
-    /// the Pi setting, so a reload reads the new value rather than the launch one.
+    /// What `WebContainer` installs, and what `withdrawOnDeviceSearch` re-installs.
     static func userScript() -> WKUserScript {
-        WKUserScript(source: script(piEnabled: ServerAddresses.piEnabled()),
-                     injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        WKUserScript(source: script(), injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 
-    /// #181: `piEnabled` is the "Use a Pi server" answer at injection time. WKWebView has
-    /// no synchronous JS-to-native call and the PWA's gate (`piEnabledBridge()` in
-    /// js/12-service-worker-offline.js) calls `piEnabled()` synchronously, so the value
-    /// rides in the literal; `setPiEnabled` updates it in place before posting, so the
-    /// page's own re-probe right after the save already reads the new answer.
-    static func script(piEnabled: Bool) -> String {
+    static func script() -> String {
         """
         (function () {
           if (window.Dobby) return;
@@ -81,15 +66,11 @@ enum BridgeInjection {
             // #197: the wrapper's left-edge swipe sends Back itself (WebBridge.edgeBack), so
             // the PWA's own flick handler leaves touches that start at the edge alone.
             edgeBack: \(edgeBack ? "true" : "false"),
-            setServerAddresses: function (json) { post('setServerAddresses', json); },
-            // #245: iOS only, the domains setServerAddresses keeps (https on one of them); every
-            // other entry is dropped on this device. null off iOS, where every entry is kept.
-            appBoundDomains: \(appBoundDomainsJS()),
-            // #181 "Use a Pi server". The PWA shows its settings row only when BOTH of
-            // these are functions; piEnabled() must answer synchronously.
-            _piEnabled: \(piEnabled ? "true" : "false"),
-            piEnabled: function () { return this._piEnabled === true; },
-            setPiEnabled: function (on) { this._piEnabled = on === true; post('setPiEnabled', this._piEnabled); },
+            // #181, #508: the Pi is retired, so the answer is always no. The PWA reads it
+            // (piEnabledBridge in js/12-service-worker-offline.js) to keep every Pi route closed.
+            // The no-op setter keeps the pair the PWA requires (both, or it reads no bridge as Pi on).
+            piEnabled: function () { return false; },
+            setPiEnabled: function () {},
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
             setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },
