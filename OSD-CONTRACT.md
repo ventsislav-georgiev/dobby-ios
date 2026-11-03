@@ -95,6 +95,8 @@ E9) and arms the 550 ms hold that opens the shortcuts card, `?` shortcuts, `,` `
 `subsDelayGlobalKey` (E6, return false to pass), b `bookmark()`, s/a/q/w/d the subtitles /
 audio / quality / aspect / speed sheets, f fullscreen, i info, Esc leaves fullscreen then closes
 the player. A click on the picture is `okPress()`, a double-click fullscreen.
+iOS: a tap on the picture is `okPress()`; a double tap on the middle third `togglePlay()`, on
+the left or right third `seekKey(∓1)` (#510).
 
 ## Sheets
 
