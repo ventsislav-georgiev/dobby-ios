@@ -4021,3 +4021,16 @@ for u in 'https:///v1/mac/appcast.xml' 'http://h.example/a.xml' 'https://h.examp
 done
 [[ 'https://h.example/v1/mac/appcast.xml' =~ ^https://[^/]+/.+\.xml$ ]] || { echo "FAIL: the mac-release.sh feed check refuses a valid URL (#517)" >&2; exit 1; }
 echo "PASS: mac-release.sh refuses a feed URL with an empty host, a non-https scheme or a non-.xml path (#517)"
+
+# #520: mac-release.sh must refuse an empty or non-bare DOBBY_PI_HOST before the build (a release without it
+# shows only the no-origin caption), and check the built app's WKAppBoundDomains is exactly that host.
+HOSTLINE='[[ ${DOBBY_PI_HOST:-} =~ ^[A-Za-z0-9.-]+$ ]] || die '
+BOUNDLINE='[ "$(plist WKAppBoundDomains:0)" = "$DOBBY_PI_HOST" ] && [ -z "$(plist WKAppBoundDomains:1)" ] || die '
+/usr/bin/grep -qF "$HOSTLINE" scripts/mac-release.sh || { echo "FAIL: mac-release.sh no longer requires a bare DOBBY_PI_HOST (#520)" >&2; exit 1; }
+/usr/bin/grep -qF 'export DOBBY_PI_HOST' scripts/mac-release.sh || { echo "FAIL: mac-release.sh no longer exports DOBBY_PI_HOST (#520)" >&2; exit 1; }
+/usr/bin/grep -qF "$BOUNDLINE" scripts/mac-release.sh || { echo "FAIL: mac-release.sh no longer checks the app's WKAppBoundDomains (#520)" >&2; exit 1; }
+for h in '' 'https://h.example' 'h.example/x'; do
+  [[ $h =~ ^[A-Za-z0-9.-]+$ ]] && { echo "FAIL: the mac-release.sh host check accepts '$h' (#520)" >&2; exit 1; }
+done
+[[ 'h.example' =~ ^[A-Za-z0-9.-]+$ ]] || { echo "FAIL: the mac-release.sh host check refuses a bare host (#520)" >&2; exit 1; }
+echo "PASS: mac-release.sh requires a bare DOBBY_PI_HOST and checks the app's WKAppBoundDomains is exactly it (#520)"

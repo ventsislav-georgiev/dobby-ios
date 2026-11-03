@@ -62,6 +62,9 @@ fi
 # The APK's token shape (43 characters of base64url); anything else locks every Mac out.
 [[ $DOBBY_UPDATE_TOKEN =~ ^[A-Za-z0-9_-]{43}$ ]] || die "the update token is not 43 characters of [A-Za-z0-9_-]"
 export DOBBY_MAC_FEED_URL="$FEED" DOBBY_UPDATE_TOKEN   # xcodebuild reads both from the environment
+# Info.plist's WKAppBoundDomains expands $(DOBBY_PI_HOST); without it the app has no origin (#520).
+[[ ${DOBBY_PI_HOST:-} =~ ^[A-Za-z0-9.-]+$ ]] || die "DOBBY_PI_HOST must be a bare host (no scheme, no slash)"
+export DOBBY_PI_HOST
 
 if [ "$UNSIGNED" = 0 ]; then
   [ -z "$("$GIT" -C "$REPO" status --porcelain)" ] || die "dobby-ios has uncommitted or untracked changes"
@@ -127,6 +130,7 @@ plist() { "$PB" -c "Print :$1" "$INFO" 2>/dev/null || true; }
 [ "$(plist CFBundleIdentifier)" = eu.illegible.dobbyios ] || die "bundle id is not eu.illegible.dobbyios"
 [ "$(plist CFBundleVersion)" = "$BUILD" ] || die "CFBundleVersion is not $BUILD"
 [ "$(plist SUFeedURL)" = "$FEED" ] || die "SUFeedURL in the app is not DOBBY_MAC_FEED_URL"
+[ "$(plist WKAppBoundDomains:0)" = "$DOBBY_PI_HOST" ] && [ -z "$(plist WKAppBoundDomains:1)" ] || die "WKAppBoundDomains in the app is not exactly DOBBY_PI_HOST"
 [ "$(plist DobbyUpdateToken)" = "$DOBBY_UPDATE_TOKEN" ] || die "the app does not carry the update token"
 ED_PUB="$(plist SUPublicEDKey)"
 [ -n "$ED_PUB" ] || die "no SUPublicEDKey in the app: commit the Sparkle public key as DOBBY_SPARKLE_ED_KEY in project.yml"
