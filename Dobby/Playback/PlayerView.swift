@@ -53,25 +53,11 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            KSVideoPlayer(coordinator: playback.player, url: url, options: playback.options)
-                .onStateChanged { _, state in
-                    playback.onStateChanged(state)
-                    isPlaying = state.isPlaying
-                    controls.syncState(state)
-                    if state == .readyToPlay { controls.wake() }
-                }
-                .onPlay { cur, total in
-                    playback.onProgress(current: cur, total: total)
-                    controls.playbackTick(current: cur)
-                }
-                .onFinish { _, err in playback.onFinish(error: err) }
-                .aspectTransform(controls)                         // AspectSheet.swift (E7, #477 reset)
-                .ignoresSafeArea()
-                .clipped()
-
+        // #538: the picture is the layout base and every OSD layer an overlay of it (the overlay
+        // stacks them as a ZStack would), so no layer can size or move the picture. In one
+        // ZStack every layer took part in sizing the root, and with the bar up the hidden pause
+        // cards over the bar's twin pushed it: on a landscape iPhone the picture shrank and rode up.
+        picture.overlay {
             #if os(iOS)
             touchRegions                                           // ControlBar.swift (E2)
             #else
@@ -149,6 +135,29 @@ struct PlayerView: View {
             if case .active = phase { controls.wake() }
         }
         #endif
+    }
+
+    /// The video, full window, under everything. Its size comes from the window alone (#538).
+    private var picture: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            KSVideoPlayer(coordinator: playback.player, url: url, options: playback.options)
+                .onStateChanged { _, state in
+                    playback.onStateChanged(state)
+                    isPlaying = state.isPlaying
+                    controls.syncState(state)
+                    if state == .readyToPlay { controls.wake() }
+                }
+                .onPlay { cur, total in
+                    playback.onProgress(current: cur, total: total)
+                    controls.playbackTick(current: cur)
+                }
+                .onFinish { _, err in playback.onFinish(error: err) }
+                .aspectTransform(controls)                         // AspectSheet.swift (E7, #477 reset)
+                .ignoresSafeArea()
+                .clipped()
+        }
     }
 
     // MARK: Picture clicks (macOS; iOS taps are ControlBar.swift's touchRegions)
