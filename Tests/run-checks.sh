@@ -277,7 +277,7 @@ xcrun swiftc -o "$OUT5" \
 
 # #466: the Mac OSD's pure-logic files (no SwiftUI / KSPlayer import), one check each. The
 # entries that own them (E3 #468, E6 #471, E7 #472) fill the files and their checks.
-for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference A4kRouting; do
+for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleSheet MoreMenuModel PauseInfoModel TrackPreference OnDeviceRouting; do
   OUTP="$(mktemp -d)/$PURE-check"
   xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
@@ -1026,14 +1026,25 @@ if "withPresenceFlags(" in serve:
 if src.count("static func withPresenceFlags(") != 1 or src.count("withPresenceFlags(") != 3:
     fail("withPresenceFlags must be defined once and called only from settingsOutcome's two answers")
 
-m = re.search(r"static let presenceFlaggedKeys = \[(.*?)\]", src, re.S)
-if not m:
-    fail("presenceFlaggedKeys is gone")
-swift_keys = re.findall(r'"(\w+)"', m.group(1))
+# #503: the secrets are a suffix rule (isPresenceFlagged), not a list: this repo names no
+# service. The rule must pick out of the server's GET exactly its has* family.
+m = re.search(r"static let secretSuffixes = \[(.*?)\]", src, re.S)
+if not m or "static func isPresenceFlagged(" not in src:
+    fail("secretSuffixes or isPresenceFlagged is gone")
+suffixes = tuple(re.findall(r'"(\w+)"', m.group(1)))
+withflags = body("static func withPresenceFlags(", "withPresenceFlags")
+if "where isPresenceFlagged(key)" not in withflags:
+    fail("withPresenceFlags no longer derives flags for exactly the keys isPresenceFlagged picks")
+
+def flagged(k):
+    # isPresenceFlagged, transcribed: a has* flag never; else a key ending in a suffix, longer than it.
+    if re.match(r"has[A-Z]", k):
+        return False
+    return any(k.endswith(x) and len(k) > len(x) for x in suffixes)
 
 routes = "../dobby/Sources/DobbyServer/SettingsRoutes.swift"
 if not os.path.isfile(routes):
-    print("SKIP: no sibling dobby checkout, the has* key list is not compared with the server (#184)")
+    print("SKIP: no sibling dobby checkout, the secret rule is not compared with the server (#184)")
 else:
     server_src = strip_swift(open(routes).read(), routes)
     get = server_src[locate(server_src, 'router.get("api/settings")', "SettingsRoutes"):locate(server_src, 'router.post("api/settings")', "SettingsRoutes")]
@@ -1042,16 +1053,18 @@ else:
         fail("found no has* in the server's GET route; the pattern no longer matches the source")
     if len(server) != len(re.findall(r"\bhas[A-Z]\w*:", get)):
         fail("a has* line in the server's GET route is not one this guard understands")
+    fields = set(re.findall(r"\b(\w+):\s*settings\.\w+", get))
+    ours = {k for k in fields if flagged(k)}
     # The rule re-derives each flag from the raw field, so it is only right while the GET
     # sends that field unmasked: a server that masked a secret but kept computing its flag
     # from the real value would flip every Configured badge on the mirror path.
-    for k in swift_keys:
+    for k in ours:
         if get.count("%s: settings.%s," % (k, k)) != 1:
-            fail("the server's GET no longer passes %s: settings.%s verbatim; re-deriving has* from a masked field would read Not configured" % (k, k))
-    ours = {"has" + k[0].upper() + k[1:]: k for k in swift_keys}
-    if len(ours) != len(swift_keys) or ours != server:
-        fail("presenceFlaggedKeys %r is not the server's has* family %r" % (sorted(swift_keys), sorted(server.values())))
-    print("PASS: presenceFlaggedKeys equals the %d has* flags the server's GET computes (#184)" % len(server))
+            fail("the server's GET no longer passes one secret verbatim; re-deriving has* from a masked field would read Not configured")
+    if {"has" + k[0].upper() + k[1:]: k for k in ours} != server:
+        fail("isPresenceFlagged picks %d of the server's GET fields, which are not its %d has* secrets; adjust secretSuffixes"
+             % (len(ours), len(server)))
+    print("PASS: isPresenceFlagged picks exactly the %d has* secrets the server's GET computes (#184)" % len(server))
 
 # The simulator seam's byte-exact Keychain backup copies secrets into sibling items, so it
 # must never exist in a Release build: both definitions sit inside one #if DEBUG block,
@@ -3910,7 +3923,7 @@ print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startBo
 PIOFFBOOKDOWNLOADPY
 
 # #217: the video half of #213. startDownload (downloadNativeOffline) started URLSession work
-# with no Pi check either. A video need not come from the Pi (a debrid or direct link downloads
+# with no Pi check either. A video need not come from the Pi (a hosted or direct link downloads
 # with it off), so only the Pi-origin parts are refused: ServerAddresses.isPiOrigin compares the
 # URL's host with every candidate's host (hostless = page-relative = the Pi); its rows are
 # ServerAddressesCheck's piOriginRule. Pinned:
@@ -4036,7 +4049,7 @@ if len([l for l in js["12-service-worker-offline.js"] if re.search(r"^function i
     fail("12-service-worker-offline.js must define isPiOriginUrl once")
 print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startDownload refuses a "
       "Pi-origin video URL first, with an error event and no URLSession, and skips a Pi-origin "
-      "subtitle row, from its one caller; a debrid or direct link still downloads; the page holds "
+      "subtitle row, from its one caller; a hosted or direct link still downloads; the page holds "
       "back the same two before posting (#217)")
 PIOFFVIDEODOWNLOADPY
 

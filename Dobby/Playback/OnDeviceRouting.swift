@@ -1,12 +1,12 @@
 import Foundation
 
-/// #483: the pure half of the a4k lanes (Dobby/Web/A4kLane.swift): every decision, JSON body and
-/// file name, with no WebKit, no Python and no disk, so Tests/A4kRoutingCheck.swift runs it alone.
-/// A port of dobby-android's FullSearchLane and SubtitlesLane (themselves ports of the Pi's
-/// StreamingRoutes/SubtitleRoutes), so the page reads the same bodies and status codes whichever
-/// side answers. Here and not in Dobby/Web because run-checks.sh compiles pure checks from
-/// Dobby/Playback.
-enum A4kRouting {
+/// #483: the pure half of the on-device lanes (Dobby/Web/OnDeviceLane.swift): every decision, JSON
+/// body and file name, with no WebKit, no Python and no disk, so Tests/OnDeviceRoutingCheck.swift
+/// runs it alone. A port of dobby-android's full-search and subtitle lanes (themselves ports of the
+/// Pi's routes), so the page reads the same bodies and status codes whichever side answers. The
+/// rows themselves are shaped by the bundled Python entry and stay opaque here. Here and not in
+/// Dobby/Web because run-checks.sh compiles pure checks from Dobby/Playback.
+enum OnDeviceRouting {
     struct Answer: Equatable {
         let status: Int
         let contentType: String
@@ -19,40 +19,35 @@ enum A4kRouting {
         }
 
         static func error(_ status: Int, _ message: String) -> Answer {
-            json(status, "{\"error\":" + A4kRouting.quote(message) + "}")
+            json(status, "{\"error\":" + OnDeviceRouting.quote(message) + "}")
         }
 
         static let notFound = Answer(status: 404, contentType: "text/plain", body: Data())
     }
 
-    // MARK: - Full search (FullSearchLane)
+    // MARK: - Full search
 
-    /// The scrape's own budget handed to Python, and how long the lane waits for it: 40 s plus
-    /// FullSearchLane's 20 s slack for the first import and the hand-back.
+    /// The search's own budget handed to Python, and how long the lane waits for it: 40 s plus
+    /// Android's 20 s slack for the first import and the hand-back.
     static let budgetSeconds = 40.0
     static let waitSeconds = 60.0
     static let defaultCacheSize = 20
 
-    /// One scraped torrent, normalised as FullSearchLane.Found normalises it.
-    struct Torrent: Equatable {
+    /// One search result: its hash (the Premiumize cache key) and the stream object the page
+    /// renders, shaped by the Python entry and passed through untouched.
+    struct Found: Equatable {
         let hash: String
-        let title: String
-        let seeds: String
-        let sizeMb: Double
-        let provider: String
+        let json: String
 
-        init(hash: String, title: String, seeds: String, sizeMb: Double, provider: String) {
+        init(hash: String, json: String) {
             self.hash = hash
-            self.title = title
-            self.seeds = seeds.isEmpty ? "0" : seeds
-            self.sizeMb = sizeMb
-            self.provider = provider.isEmpty ? "a4k" : provider
+            self.json = json
         }
 
-        /// `[hash, title, seeds, sizeMb, provider]` as dobby_apple.py hands a row back.
-        init?(row: [String]) {
-            guard row.count >= 5 else { return nil }
-            self.init(hash: row[0], title: row[1], seeds: row[2], sizeMb: A4kRouting.number(row[3]), provider: row[4])
+        /// `[hash, streamJson]` as the Python entry hands a row back.
+        init?(row: [Any]) {
+            guard row.count >= 2, let hash = row[0] as? String, let json = row[1] as? String, !json.isEmpty else { return nil }
+            self.init(hash: hash, json: json)
         }
     }
 
@@ -61,7 +56,7 @@ enum A4kRouting {
         case search(cacheKey: String, params: [String: String], refresh: Bool)
     }
 
-    /// FullSearchLane.fullsearch's checks, in its order: the key first (401), then the query (400).
+    /// Android's full-search checks, in its order: the key first (401), then the query (400).
     static func fullSearchPlan(_ query: [String: String], apiKey: String?) -> FullSearchPlan {
         guard let apiKey, !apiKey.isEmpty else { return .answer(.error(401, "Premiumize API key not configured")) }
         let imdbId = query["imdbId"] ?? "", type = query["type"] ?? "", title = query["title"] ?? ""
@@ -80,32 +75,21 @@ enum A4kRouting {
         return .search(cacheKey: cacheKey, params: params, refresh: query["refresh"] == "1")
     }
 
-    /// Byte for byte FullSearchLane.shape (and the Pi's a4kStreamShape), emoji included: the
-    /// picker renders this title string.
-    static func shape(_ t: Torrent) -> String {
-        let sizeGb = t.sizeMb > 0 ? String(format: "%.2f", t.sizeMb / 1024) : ""
-        let title = t.title + (sizeGb.isEmpty
-            ? "\n👤 " + t.seeds + " ⚙️ a4k/" + t.provider
-            : "\n👤 " + t.seeds + " 💾 " + sizeGb + " GB ⚙️ a4k/" + t.provider)
-        return "{\"name\":" + quote("[A4K+] " + t.provider) + ",\"title\":" + quote(title)
-            + ",\"infoHash\":" + quote(t.hash) + "}"
-    }
-
     /// The rows on one side of the Premiumize split. A missing flag reads as not cached.
-    static func shapes(_ found: [Torrent], _ cached: [Bool], wantCached: Bool) -> String {
+    static func shapes(_ found: [Found], _ cached: [Bool], wantCached: Bool) -> String {
         let picked = found.indices.filter { (($0 < cached.count) && cached[$0]) == wantCached }
-        return "[" + picked.map { shape(found[$0]) }.joined(separator: ",") + "]"
+        return "[" + picked.map { found[$0].json }.joined(separator: ",") + "]"
     }
 
-    static func streamsJson(_ found: [Torrent], _ cached: [Bool], fromCache: Bool) -> String {
+    static func streamsJson(_ found: [Found], _ cached: [Bool], fromCache: Bool) -> String {
         "{\"streams\":" + shapes(found, cached, wantCached: true)
             + ",\"uncached\":" + shapes(found, cached, wantCached: false)
             + (fromCache ? ",\"cached\":true" : "") + "}"
     }
 
-    /// FullSearchLane.partial. `progress` is `[done, providersDone, providersTotal]` (nil before
-    /// the first provider report); `cached` is nil without `cache=1`.
-    static func partialJson(_ found: [Torrent], progress: [Int]?, cached: [Bool]?) -> String {
+    /// Android's partial answer. `progress` is `[done, sourcesDone, sourcesTotal]` (nil before
+    /// the first report); `cached` is nil without `cache=1`.
+    static func partialJson(_ found: [Found], progress: [Int]?, cached: [Bool]?) -> String {
         let p = progress ?? [0, 0, 0]
         var out = "{\"exists\":true,\"done\":\(p.first == 1)"
             + ",\"providersDone\":\(p.count > 1 ? p[1] : 0),\"providersTotal\":\(p.count > 2 ? p[2] : 0)"
@@ -117,8 +101,8 @@ enum A4kRouting {
         return out + "}"
     }
 
-    /// `a4kCacheSize` from the settings document, string or number; 20 when unset or unreadable,
-    /// clamped to 0...500, and 0 turns the cache off.
+    /// The result-cache bound the Python entry reads out of the settings document, string or
+    /// number; 20 when unset or unreadable, clamped to 0...500, and 0 turns the cache off.
     static func cacheLimit(_ raw: Any?) -> Int {
         let text: String
         switch raw {
@@ -135,24 +119,25 @@ enum A4kRouting {
         String(key.map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "_" }) + ".tsv"
     }
 
-    static func tsv(_ found: [Torrent]) -> String {
+    /// One `hash<TAB>streamJson` line per row. The JSON carries no raw tab or line break (the
+    /// entry's encoder escapes them inside strings); a stray one is blanked rather than trusted.
+    static func tsv(_ found: [Found]) -> String {
         func clean(_ s: String) -> String {
             s.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ")
                 .replacingOccurrences(of: "\r", with: " ")
         }
-        return found.map { "\($0.hash)\t\($0.seeds)\t\($0.sizeMb)\t\(clean($0.provider))\t\(clean($0.title))\n" }.joined()
+        return found.map { clean($0.hash) + "\t" + clean($0.json) + "\n" }.joined()
     }
 
-    static func parseTsv(_ text: String) -> [Torrent] {
+    static func parseTsv(_ text: String) -> [Found] {
         text.split(separator: "\n").compactMap { line in
-            let p = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-            guard p.count >= 5 else { return nil }
-            return Torrent(hash: p[0], title: p[4], seeds: p[1], sizeMb: number(p[2]), provider: p[3])
+            let p = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            return p.count == 2 ? Found(row: p) : nil
         }
     }
 
     /// Premiumize's cache/check answer, one flag per hash in order; all false on anything odd,
-    /// and a short answer padded rather than trusted (PremiumizeCacheCheck.parse).
+    /// and a short answer padded rather than trusted.
     static func cachedFlags(_ data: Data?, count: Int) -> [Bool] {
         var out = [Bool](repeating: false, count: count)
         guard let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -161,28 +146,11 @@ enum A4kRouting {
         return out
     }
 
-    // MARK: - Subtitles (SubtitlesLane)
+    // MARK: - Subtitles
 
     static let filePrefix = "/api/subtitles/file/"
 
-    /// One a4kSubtitles result as the sink receives it.
-    struct Sub: Equatable {
-        let service: String
-        let lang: String
-        let name: String
-        let args: String
-
-        /// `[service, lang, name, actionArgsJson]` as dobby_apple.py hands a row back.
-        init?(row: [String]) {
-            guard row.count >= 4 else { return nil }
-            service = row[0]; lang = row[1]; name = row[2]; args = row[3]
-        }
-
-        /// The dedup, cache and remembered-pick key (SubtitleRoutes.swift:118 on the Pi).
-        var id: String { "a4k-" + A4kRouting.fnv1a(service + "|" + args) }
-    }
-
-    /// The query of an a4k subtitle search, or the 400 for a bad one.
+    /// The query of a subtitle search, or the 400 for a bad one.
     static func subSearchPlan(_ query: [String: String]) -> (answer: Answer?, type: String, languages: String) {
         guard let imdbId = query["imdbId"], imdbId.hasPrefix("tt"), let rawType = query["type"] else {
             return (.error(400, "Missing imdbId or type parameter"), "", "")
@@ -190,35 +158,17 @@ enum A4kRouting {
         return (nil, rawType == "series" ? "series" : "movie", query["languages"] ?? "en")
     }
 
-    /// `OnlineSubtitle` as the Pi encodes it: an empty name drops `fileName` and `release`.
-    static func subShape(_ s: Sub, cached: Bool) -> String {
-        let lang = normalizeLanguage(s.lang)
-        var out = "{\"provider\":\"a4k\",\"id\":" + quote(s.id) + ",\"lang\":" + quote(lang)
-            + ",\"label\":" + quote(label(s.service, s.name, lang))
-        if !s.name.isEmpty { out += ",\"fileName\":" + quote(s.name) }
-        out += ",\"url\":\"\""
-        if !s.name.isEmpty { out += ",\"release\":" + quote(s.name) }
-        return out + ",\"cached\":\(cached),\"a4kService\":" + quote(s.service) + ",\"a4kArgs\":" + quote(s.args) + "}"
-    }
-
-    static func label(_ service: String, _ name: String, _ language: String) -> String {
-        let svc = service.isEmpty ? "a4k" : service.prefix(1).uppercased() + service.dropFirst()
-        return svc + " - " + language.uppercased() + " · " + (name.isEmpty ? svc : name)
-    }
-
-    /// Which a4kSubtitles services run (SubtitlesLane.settingsJson, the Pi's _a4k_settings):
-    /// anonymous ones always, bsplayer never (filehash only), OpenSubtitles on both credentials,
-    /// subdl and subsource on their key. Apple builds carry no built-in credential defaults.
-    static func subSettings(osUser: String?, osPass: String?, subdl: String?, subsource: String?) -> [String: String] {
-        func trimmed(_ s: String?) -> String { (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
-        let user = trimmed(osUser), pass = trimmed(osPass), subdlKey = trimmed(subdl), subsourceKey = trimmed(subsource)
-        return ["general.timeout": "20", "general.results_limit": "200", "general.auto_search": "false",
-                "general.auto_download": "false", "bsplayer.enabled": "false", "podnadpisi.enabled": "true",
-                "addic7ed.enabled": "true", "subssabbz.enabled": "true", "subsunacs.enabled": "true",
-                "opensubtitles.enabled": "\(!user.isEmpty && !pass.isEmpty)",
-                "opensubtitles.username": user, "opensubtitles.password": pass,
-                "subdl.enabled": "\(!subdlKey.isEmpty)", "subdl.apikey": subdlKey,
-                "subsource.enabled": "\(!subsourceKey.isEmpty)", "subsource.apikey": subsourceKey]
+    /// The search answer: the Python entry's rows as it shaped them, each with `cached` set from
+    /// this device's subtitle cache by its `id`. A row without an id is dropped.
+    static func subtitlesJson(_ rows: [[String: Any]], cached: (String) -> Bool) -> String {
+        let shaped: [[String: Any]] = rows.compactMap { row in
+            guard let id = row["id"] as? String, !id.isEmpty else { return nil }
+            var out = row
+            out["cached"] = cached(id)
+            return out
+        }
+        let data = try? JSONSerialization.data(withJSONObject: ["subtitles": shaped], options: [.sortedKeys, .withoutEscapingSlashes])
+        return data.map { String(decoding: $0, as: UTF8.self) } ?? "{\"subtitles\":[]}"
     }
 
     /// The fetch's fields: the POST body as the Pi takes it, else the GET query (Android's
@@ -329,7 +279,7 @@ enum A4kRouting {
         return out
     }
 
-    /// Minimal JSON string literal, FullSearchLane.quote: UTF-8 raw, structural characters escaped.
+    /// Minimal JSON string literal: UTF-8 raw, structural characters escaped.
     static func quote(_ value: String) -> String {
         var out = "\""
         for scalar in value.unicodeScalars {
@@ -344,9 +294,5 @@ enum A4kRouting {
             }
         }
         return out + "\""
-    }
-
-    static func number(_ text: String) -> Double {
-        Double(text.trimmingCharacters(in: .whitespaces)) ?? 0
     }
 }

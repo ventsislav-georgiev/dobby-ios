@@ -426,7 +426,7 @@ final class PlaybackCoordinator: ObservableObject {
     // MARK: - Now Playing (lock screen, Control Center, car head unit)
 
     /// KSPlayer fills duration/elapsed and only takes a title when the *stream* carries one —
-    /// torrent and YouTube URLs carry none, so the car shows a blank card. Merge in the title
+    /// direct stream and YouTube URLs carry none, so the car shows a blank card. Merge in the title
     /// and poster the web app already sent us. Merging (never replacing) keeps KSPlayer's keys.
     private var nowPlayingArtwork: MPMediaItemArtwork?
 

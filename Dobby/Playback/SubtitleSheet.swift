@@ -65,7 +65,7 @@ extension PlayerControls {
             let shown = (subtitleSheet.pending.contains(entry.id) ? "⏳ " : "") + label
             rows.append(SubtitleRow(id: "cat-\(entry.id)", label: shown,
                                     key: SubtitleSortKey(lang: SubtitleOrdering.normalize(entry.lang), sdh: false,
-                                                         rank: entry.provider == "a4k" ? 2 : 1),
+                                                         rank: entry.rank ?? 1),
                                     selected: false, pick: { [weak self] in
                 self?.requestCatalogSubtitle(entry.id, p)
                 self?.flash("Loading: \(label)")

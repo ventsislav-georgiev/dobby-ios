@@ -6,7 +6,8 @@ import Foundation
 // Tests/SubtitleOrderingCheck.swift.
 
 /// What the order looks at for one subtitle row. `rank` is the source type within a language:
-/// 0 embedded or already attached, 1 Stremio (any online provider but a4k), 2 a4k.
+/// 0 embedded or already attached, then the page's own rank for an online row: 1 the primary
+/// online source, 2 the secondary one.
 struct SubtitleSortKey {
     let lang: String?
     let sdh: Bool
@@ -55,7 +56,7 @@ enum SubtitleOrdering {
     }
 
     /// Android orderedSubtitleEntries: indices of `keys` in sheet order. Preferred languages
-    /// first; then source type (embedded < Stremio < a4k); then preference order; other
+    /// first; then source type (embedded < primary online < secondary online); then preference order; other
     /// languages by English name, unknown last; SDH before plain; stable otherwise.
     static func order(_ keys: [SubtitleSortKey], priority: [String]) -> [Int] {
         let prefRank = keys.map { k in k.lang.flatMap { priority.firstIndex(of: $0) } ?? Int.max }
@@ -101,7 +102,7 @@ enum SubtitleOrdering {
     }
 
     /// A sideloaded subtitle keeps only its label on Apple (KSPlayer's URLSubtitleInfo has no
-    /// language), and the web's labels carry the language flag ("Stremio - 🇧🇬 Bulgarian ·
+    /// language), and the web's labels carry the language flag ("Online - 🇧🇬 Bulgarian ·
     /// ..."). The first priority language whose flag is in the label, else nil (Other).
     static func languageFromLabel(_ label: String, priority: [String]) -> String? {
         priority.first { let f = flag($0); return !f.isEmpty && label.contains(f) }

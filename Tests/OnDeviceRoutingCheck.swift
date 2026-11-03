@@ -1,10 +1,10 @@
 import Foundation
 
-// #483: the a4k lanes' decisions and bodies (Dobby/Playback/A4kRouting.swift), checked against what
-// dobby-android's FullSearchLane and SubtitlesLane answer for the same input, since the page reads
-// either side's bytes with the same code.
+// #483: the on-device lanes' decisions and bodies (Dobby/Playback/OnDeviceRouting.swift), checked
+// against what dobby-android's lanes answer for the same input, since the page reads either side's
+// bytes with the same code. The row shapes are the bundled Python entry's and are checked there.
 @main
-enum A4kRoutingCheck {
+enum OnDeviceRoutingCheck {
     static func check(_ condition: Bool, _ what: String) {
         guard condition else {
             FileHandle.standardError.write(Data("FAIL: \(what) (#483)\n".utf8))
@@ -12,7 +12,7 @@ enum A4kRoutingCheck {
         }
     }
 
-    typealias R = A4kRouting
+    typealias R = OnDeviceRouting
 
     static func main() {
         // Full search: the key is checked before the query, then the query, then the series pair.
@@ -31,19 +31,16 @@ enum A4kRoutingCheck {
               "the Pi script's argv names, absent as empty")
         guard case .search(_, _, false) = R.fullSearchPlan(full, apiKey: "k") else { return check(false, "a movie plan") }
 
-        // The Torrentio-shaped row, byte for byte FullSearchLane.shape.
-        let big = R.Torrent(hash: "abc", title: "Rel", seeds: "12", sizeMb: 2048, provider: "tpb")
-        check(R.shape(big) == "{\"name\":\"[A4K+] tpb\",\"title\":\"Rel\\n👤 12 💾 2.00 GB ⚙️ a4k/tpb\",\"infoHash\":\"abc\"}",
-              "shape with a size: \(R.shape(big))")
-        let bare = R.Torrent(row: ["def", "R2", "", "0", ""])!
-        check(R.shape(bare) == "{\"name\":\"[A4K+] a4k\",\"title\":\"R2\\n👤 0 ⚙️ a4k/a4k\",\"infoHash\":\"def\"}",
-              "shape without a size, empty seeds and provider defaulted: \(R.shape(bare))")
-        check(R.Torrent(row: ["a", "b", "c", "d"]) == nil, "a short Python row is dropped")
+        // Rows are the Python entry's [hash, streamJson], passed through untouched.
+        let big = R.Found(row: ["abc", "{\"infoHash\":\"abc\",\"title\":\"Rel\\n👤 12\"}"])!
+        let bare = R.Found(hash: "def", json: "{\"infoHash\":\"def\"}")
+        check(R.Found(row: ["a"]) == nil && R.Found(row: ["a", ""]) == nil && R.Found(row: [1, "{}"]) == nil,
+              "a short, empty or non-string Python row is dropped")
 
         // The Premiumize split: a missing flag is uncached; a cache hit says so.
         let split = R.streamsJson([big, bare], [true], fromCache: true)
-        check(split == "{\"streams\":[\(R.shape(big))],\"uncached\":[\(R.shape(bare))],\"cached\":true}", "split: \(split)")
-        check(!R.streamsJson([big], [false], fromCache: false).contains("\"cached\""), "a fresh scrape carries no cached key")
+        check(split == "{\"streams\":[\(big.json)],\"uncached\":[\(bare.json)],\"cached\":true}", "split: \(split)")
+        check(!R.streamsJson([big], [false], fromCache: false).contains("\"cached\""), "a fresh search carries no cached key")
         check(R.cachedFlags(Data("{\"response\":[true,false]}".utf8), count: 3) == [true, false, false], "short answer padded")
         check(R.cachedFlags(Data("{\"response\":[\"yes\",true]}".utf8), count: 2) == [false, true], "a non-bool flag is false")
         check(R.cachedFlags(Data("<html>".utf8), count: 2) == [false, false], "garbage is all false")
@@ -53,44 +50,35 @@ enum A4kRoutingCheck {
               == "{\"exists\":true,\"done\":false,\"providersDone\":0,\"providersTotal\":0,\"count\":0}", "partial before progress")
         let live = R.partialJson([big], progress: [1, 3, 5], cached: [false])
         check(live == "{\"exists\":true,\"done\":true,\"providersDone\":3,\"providersTotal\":5,\"count\":1"
-              + ",\"streams\":[],\"uncached\":[\(R.shape(big))]}", "partial with cache=1: \(live)")
+              + ",\"streams\":[],\"uncached\":[\(big.json)]}", "partial with cache=1: \(live)")
 
         // The result cache: bound, file name, round trip.
         check(R.cacheLimit(nil) == 20 && R.cacheLimit("x") == 20 && R.cacheLimit(" 0 ") == 0 && R.cacheLimit("999") == 500
-              && R.cacheLimit("-3") == 0 && R.cacheLimit(NSNumber(value: 7)) == 7, "a4kCacheSize read, defaulted and clamped")
+              && R.cacheLimit("-3") == 0 && R.cacheLimit(NSNumber(value: 7)) == 7, "cache size read, defaulted and clamped")
         check(R.cacheFileName("tt1-series-s1e2") == "tt1-series-s1e2.tsv" && R.cacheFileName("a/b:c") == "a_b_c.tsv",
               "cache file names keep letters, digits and dashes only")
-        let dirty = R.Torrent(hash: "h", title: "a\tb\nc", seeds: "4", sizeMb: 1.5, provider: "p")
-        check(R.parseTsv(R.tsv([dirty, big]) + "short\tline\n")
-              == [R.Torrent(hash: "h", title: "a b c", seeds: "4", sizeMb: 1.5, provider: "p"), big],
-              "tsv round trip, tabs and newlines cleaned, short lines skipped")
+        let dirty = R.Found(hash: "h", json: "{\"t\":\"a\tb\nc\"}")
+        check(R.parseTsv(R.tsv([dirty, big]) + "short\n")
+              == [R.Found(hash: "h", json: "{\"t\":\"a b c\"}"), big],
+              "tsv round trip, a stray tab or newline blanked, a line without a tab skipped")
 
-        // Subtitles: search query, row shape, provider gating.
+        // Subtitles: search query, rows with their cached flag.
         check(R.subSearchPlan(["imdbId": "123", "type": "movie"]).answer == .error(400, "Missing imdbId or type parameter"),
               "an imdb id without tt is a 400")
         check(R.subSearchPlan(["imdbId": "tt1"]).answer != nil, "no type is a 400")
         let plan = R.subSearchPlan(["imdbId": "tt1", "type": "episode"])
         check(plan.answer == nil && plan.type == "movie" && plan.languages == "en", "type normalised, languages default en")
-        let row = R.Sub(row: ["subssabbz", "bul", "Rel.srt", "{\"id\":1}"])!
-        check(row.id == "a4k-839020a88e6e95fe" && R.fnv1a("a") == "af63dc4c8601ec8c", "row id is FNV-1a 64 of service|args")
-        check(R.subShape(row, cached: true) == "{\"provider\":\"a4k\",\"id\":\"a4k-839020a88e6e95fe\",\"lang\":\"bg\""
-              + ",\"label\":\"Subssabbz - BG · Rel.srt\",\"fileName\":\"Rel.srt\",\"url\":\"\",\"release\":\"Rel.srt\""
-              + ",\"cached\":true,\"a4kService\":\"subssabbz\",\"a4kArgs\":\"{\\\"id\\\":1}\"}", "subtitle row shape")
-        let nameless = R.subShape(R.Sub(row: ["", "en", "", "{}"])!, cached: false)
-        check(!nameless.contains("fileName") && !nameless.contains("release") && nameless.contains("\"label\":\"a4k - EN · a4k\""),
-              "an empty name drops fileName and release: \(nameless)")
-        let anon = R.subSettings(osUser: "u", osPass: "  ", subdl: nil, subsource: "s")
-        check(anon["opensubtitles.enabled"] == "false" && anon["subdl.enabled"] == "false" && anon["subsource.enabled"] == "true"
-              && anon["bsplayer.enabled"] == "false" && anon["subssabbz.enabled"] == "true" && anon["subsunacs.enabled"] == "true",
-              "OpenSubtitles needs both credentials, keys gate their service, bsplayer stays off")
-        check(R.subSettings(osUser: "u", osPass: "p", subdl: nil, subsource: nil)["opensubtitles.enabled"] == "true",
-              "both OpenSubtitles credentials turn it on")
+        check(R.fnv1a("a") == "af63dc4c8601ec8c", "the cache key is FNV-1a 64")
+        let subs = R.subtitlesJson([["id": "x-1", "lang": "bg", "fileName": "a/b.srt"], ["lang": "en"], ["id": "x-2"]]) { $0 == "x-1" }
+        check(subs == "{\"subtitles\":[{\"cached\":true,\"fileName\":\"a/b.srt\",\"id\":\"x-1\",\"lang\":\"bg\"},"
+              + "{\"cached\":false,\"id\":\"x-2\"}]}", "rows keep their fields, gain cached by id, a row without an id is dropped: \(subs)")
+        check(R.subtitlesJson([]) { _ in true } == "{\"subtitles\":[]}", "no rows is an empty list")
 
         // /fetch fields: the POST body as the Pi takes it, the query otherwise.
         let posted = R.fetchFields(query: ["provider": "x"],
-                                   body: Data("{\"provider\":\"a4k\",\"id\":7,\"label\":null,\"a4kService\":\"s\"}".utf8))
-        check(posted == ["provider": "a4k", "id": "7", "a4kService": "s"], "POST body wins, null absent, number kept: \(posted)")
-        check(R.fetchFields(query: ["provider": "a4k"], body: nil) == ["provider": "a4k"], "GET reads the query")
+                                   body: Data("{\"provider\":\"y\",\"id\":7,\"label\":null,\"service\":\"s\"}".utf8))
+        check(posted == ["provider": "y", "id": "7", "service": "s"], "POST body wins, null absent, number kept: \(posted)")
+        check(R.fetchFields(query: ["provider": "y"], body: nil) == ["provider": "y"], "GET reads the query")
         check(R.cachedResponse("k1.srt", lang: "bg", label: nil, fromCache: false)
               == "{\"url\":\"/api/subtitles/file/k1/k1.srt\",\"fileName\":\"k1.srt\",\"lang\":\"bg\",\"cached\":false}",
               "fetch answer, label absent")
@@ -106,7 +94,7 @@ enum A4kRoutingCheck {
               "content types")
 
         // Offline sidecar URLs on the scheme.
-        check(R.sidecar(host: "subtitles", path: "/fetch", query: ["id": "a4k-1"]).id == "a4k-1", "fetch?id names a row")
+        check(R.sidecar(host: "subtitles", path: "/fetch", query: ["id": "x-1"]).id == "x-1", "fetch?id names a row")
         check(R.sidecar(host: "Subtitles", path: "/file/k1/k1.srt", query: [:]).fileName == "k1.srt", "file path names a file")
         check(R.sidecar(host: "streaming", path: "/fetch", query: ["id": "x"]) == (nil, nil), "another host names nothing")
 
@@ -116,6 +104,6 @@ enum A4kRoutingCheck {
         check(R.quote("a\"b\\c\u{1}") == "\"a\\\"b\\\\c\\u0001\"", "quote escapes structure and controls")
         check(R.normalizeLanguage(" ENG ") == "en" && R.normalizeLanguage("pt-BR") == "pt" && R.normalizeLanguage("bul") == "bg",
               "language codes normalised")
-        print("PASS: A4kRouting answers the Android lanes' status codes and bodies: full search, partial, cache, subtitle search, fetch and file (#483)")
+        print("PASS: OnDeviceRouting answers the Android lanes' status codes and bodies: full search, partial, cache, subtitle search, fetch and file (#483)")
     }
 }

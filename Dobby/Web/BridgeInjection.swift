@@ -24,11 +24,11 @@ enum BridgeInjection {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// #483: `window.Dobby.a4k`, the PWA's switch for the on-device a4k lanes (`apiUrlFor`, #484).
-    /// WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes it
-    /// back through `withdrawA4k` if the interpreter then fails to start, so it stays true only
-    /// while `PythonRuntime.shared` is non-nil, without the main thread ever starting Python.
-    static var a4k = false
+    /// #483: `window.Dobby.onDeviceSearch`, the PWA's switch for the on-device lanes (`apiUrlFor`,
+    /// #484). WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes
+    /// it back through `withdrawOnDeviceSearch` if the interpreter then fails to start, so it stays
+    /// true only while `PythonRuntime.shared` is non-nil, without the main thread ever starting Python.
+    static var onDeviceSearch = false
 
     /// #486: what openExternal may open: an https link with a host, posted by the app page's main frame (a sub-frame
     /// reaches the message handler too). nil refuses it. No host list: this repo names no server.
@@ -39,13 +39,13 @@ enum BridgeInjection {
     }
 
     /// #483: the interpreter would not start. The page's live flag and every later injection go false.
-    static func withdrawA4k(from webView: WKWebView?) {
-        a4k = false
+    static func withdrawOnDeviceSearch(from webView: WKWebView?) {
+        onDeviceSearch = false
         guard let webView else { return }
         let ucc = webView.configuration.userContentController
         ucc.removeAllUserScripts()
         ucc.addUserScript(userScript())
-        webView.evaluateJavaScript("if (window.Dobby) window.Dobby.a4k = false;")
+        webView.evaluateJavaScript("if (window.Dobby) window.Dobby.onDeviceSearch = false;")
     }
 
     /// What `WebContainer` installs, and what `WebBridge` re-installs after the page flips
@@ -73,8 +73,8 @@ enum BridgeInjection {
             platform: 'native',
             version: '0.1',
             canPlayNative: \(canPlayNative ? "true" : "false"),
-            // #483: this build answers the a4k routes itself (dobby-api://streaming, ://subtitles).
-            a4k: \(a4k ? "true" : "false"),
+            // #483: this build answers the search and subtitle routes itself (dobby-api://streaming, ://subtitles).
+            onDeviceSearch: \(onDeviceSearch ? "true" : "false"),
             // Audio is routed to a car head unit. Pushed by the wrapper on every
             // route change (and once after 'ready'); read it, don't set it.
             isCarAudio: false,

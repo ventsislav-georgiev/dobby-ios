@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Embedded CPython for the a4k lanes (#482): the Apple counterpart of Android's Chaquopy block
+# Embedded CPython for the on-device lanes (#482): the Apple counterpart of Android's Chaquopy block
 # (dobby-android app/build.gradle). Runs as a post-build phase, after Xcode has copied the
 # resources and before it signs the app, and puts three things into the bundle:
 #
 #   Frameworks/Python.framework   BeeWare Python-Apple-support, pinned below, fetched once into
 #                                 python-support/ (gitignored) and checked against its sha256.
-#   <Resources>/python/app        The a4k tree (a4k_search.py, a4k_subs.py, a4kScrapers,
-#                                 a4kSubtitles, a4k_bg_services), copied from the private sibling
-#                                 dobby checkout (scripts/python) plus Dobby/Python/dobby_apple.py. Never committed here:
+#   <Resources>/python/app        The Python tree, copied whole from the private sibling dobby
+#                                 checkout (scripts/python), entry module apple_entry.py included
+#                                 (PythonRuntime.swift imports only that). Never committed here:
 #                                 this repo is public.
 #   <Resources>/python/app_packages  requests and beautifulsoup4 with their deps: exact pure-Python
 #                                 wheels from PyPI, sha256-pinned, unzipped (no pip needed).
@@ -17,7 +17,7 @@
 # the App Store requires: no loose .so outside Frameworks/).
 #
 # The framework is NOT a link-time dependency. PythonRuntime.swift dlopens it, so a build without
-# the a4k tree (no dobby checkout beside this one) gets a WARNING, no Python, and an app that works
+# the Python tree (no dobby checkout beside this one) gets a WARNING, no Python, and an app that works
 # exactly as before: the same degrade-don't-fail rule as scripts/copy-app-shell.sh.
 #
 # By hand, with no Xcode environment, it only fetches and verifies the cache.
@@ -39,7 +39,7 @@ WHEELS=(
   "typing_extensions/typing_extensions-4.16.0-py3-none-any.whl 481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
 )
 # The canonical tree lives in the private dobby repo (#485), which CI checks out beside this one.
-A4K_DIR="${A4K_PYTHON_DIR:-$PWD/../dobby/scripts/python}"
+PYTHON_TREE_DIR="${PYTHON_TREE_DIR:-$PWD/../dobby/scripts/python}"
 CACHE="$PWD/python-support"
 
 fetch() {  # url sha256 dest
@@ -95,8 +95,8 @@ esac
 
 RES="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 FW="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
-if [ ! -f "$A4K_DIR/a4k_search.py" ]; then
-  echo "warning: copy-python: no a4k tree at $A4K_DIR (set A4K_PYTHON_DIR); this build ships without Python and without the on-device a4k lanes." >&2
+if [ ! -f "$PYTHON_TREE_DIR/apple_entry.py" ]; then
+  echo "warning: copy-python: no Python tree at $PYTHON_TREE_DIR (set PYTHON_TREE_DIR); this build ships without Python and without the on-device lanes." >&2
   # Wipe, or an incremental build that lost the sibling keeps a stale interpreter.
   # On iOS that includes the per-module frameworks, each marked by the .origin file utils.sh writes.
   rm -rf "$RES/python" "$FW/Python.framework"
@@ -109,8 +109,7 @@ packages
 SIGN_ID="${EXPANDED_CODE_SIGN_IDENTITY:--}"   # unsigned builds: ad hoc, so every binary still carries a signature
 
 mkdir -p "$RES/python" "$FW"
-/usr/bin/rsync -a --delete --exclude __pycache__ --exclude '*.pyc' "$A4K_DIR/" "$RES/python/app/"
-cp Dobby/Python/dobby_apple.py "$RES/python/app/"
+/usr/bin/rsync -a --delete --exclude __pycache__ --exclude '*.pyc' "$PYTHON_TREE_DIR/" "$RES/python/app/"
 /usr/bin/rsync -a --delete --exclude .stamp --exclude __pycache__ "$CACHE/app_packages/" "$RES/python/app_packages/"
 compile "$RES/python/app" "$RES/python/app_packages"
 
@@ -142,4 +141,4 @@ else
   source "$CACHE/iOS/Python.xcframework/build/utils.sh"
   install_python python-support/iOS/Python.xcframework python/app_packages >/dev/null
 fi
-echo "copy-python: Python $PY_VER ($PY_SUPPORT_TAG) and the a4k tree from $A4K_DIR -> $WRAPPER_NAME"
+echo "copy-python: Python $PY_VER ($PY_SUPPORT_TAG) and the Python tree -> $WRAPPER_NAME"

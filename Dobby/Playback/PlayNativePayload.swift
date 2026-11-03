@@ -112,8 +112,9 @@ struct SubtitleCatalogEntry: Decodable, Identifiable {
     let label: String?
     let fileName: String?
     let kind: String?
-    /// "a4k" ranks below Stremio within a language (E3, SubtitleOrdering).
-    let provider: String?
+    /// The source type within a language (E3, SubtitleOrdering): 1 or 2 from the page, which
+    /// knows its providers; absent reads as 1.
+    let rank: Int?
 
     var displayName: String { label ?? fileName ?? lang ?? id }
 }
