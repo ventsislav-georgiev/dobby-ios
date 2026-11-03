@@ -223,16 +223,20 @@ extension PlayerView {
 
     #if os(iOS)
     /// iOS (Android tablet #450 installVideoGestures): a tap on the picture closes the top layer,
-    /// else shows or hides the bar (OK); a double-tap on the left or right half is the 15 s burst
-    /// with the seek pill. Replaces the pre-#467 centre and corner zones. Below the OSD in
+    /// else shows or hides the bar (OK); a double-tap on the middle third plays or pauses (#510),
+    /// on the left or right third it is the 15 s burst with the seek pill. The single tap waits
+    /// for the double to fail (`exclusively`), so a double never also runs OK. Below the OSD in
     /// PlayerView's ZStack, so the bar's tiles and band win.
     var touchRegions: some View {
         GeometryReader { geo in
             Color.clear
                 .contentShape(Rectangle())
                 .gesture(SpatialTapGesture(count: 2).onEnded { tap in
+                    let third = geo.size.width / 3
                     if controls.anyLayerOpen { controls.closeTopLayer() }
-                    else { controls.seekKey(tap.location.x < geo.size.width / 2 ? -1 : 1) }
+                    else if tap.location.x < third { controls.seekKey(-1) }
+                    else if tap.location.x >= 2 * third { controls.seekKey(1) }
+                    else { controls.togglePlay() }
                 }.exclusively(before: TapGesture().onEnded {
                     if !controls.closeTopLayer() { controls.okPress() }
                 }))
