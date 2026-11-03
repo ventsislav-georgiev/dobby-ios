@@ -29,6 +29,8 @@ final class PlayerControls: ObservableObject {
 
     weak var playback: PlaybackCoordinator?
 
+    init(playback: PlaybackCoordinator? = nil) { self.playback = playback }
+
     // MARK: Layers, in key priority (Android dispatchKey): delay pill > sheet > shortcuts > more > bar
 
     @Published var subsDelayOpen = false { didSet { layersChanged() } }

@@ -789,6 +789,40 @@ if not (body.index("if scrub.isScrubbing {")
 print("PASS: PlayerView recovers a Slider release SwiftUI never delivers and always clears the scrub hold (#131)")
 RELEASEPY
 
+# #525: PlayerControls.playback was set in PlayerView's onAppear, after the first body and not
+# published, so the preparing screen drew an empty title (nothing to breathe) and the default
+# tint until something else re-rendered. The controls get the coordinator in PlayerView.init.
+python3 - <<'PREPARINGTITLEPY'
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+src = {}
+for path in ["Dobby/Playback/PlayerView.swift", "Dobby/Playback/PlayerLoaders.swift", "Dobby/ContentView.swift"]:
+    src[path] = strip_swift(open(path).read(), path)
+view, loaders = src["Dobby/Playback/PlayerView.swift"], src["Dobby/Playback/PlayerLoaders.swift"]
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#525)\n" % msg)
+    sys.exit(1)
+
+init = view[view.index("    init(url: URL,"):]
+init = init[:init.index("\n    }\n")]
+if "@StateObject var controls: PlayerControls\n" not in view or \
+        "_controls = StateObject(wrappedValue: PlayerControls(playback: playback))" not in init:
+    fail("PlayerView no longer hands the coordinator to PlayerControls in init, before the first body")
+if any(re.search(r"\.playback\s*=[^=]", s) for s in src.values()):
+    fail("PlayerControls.playback is assigned after init again (the onAppear-set reference)")
+if "PreparingScreen(title: controls.playback?.request?.title" not in loaders:
+    fail("the preparing screen no longer reads its title from the request")
+screen = loaders[loaders.index("private struct PreparingScreen"):loaders.index("private struct TraceLoader")]
+if screen.count("TraceLoader(color: accent)") != 1:
+    fail("the preparing screen no longer runs the launch trace")
+print("PASS: PlayerControls holds the coordinator from PlayerView.init, so the preparing screen's title "
+      "and tint are there on the first frame, and it runs the launch trace (#525)")
+PREPARINGTITLEPY
+
 # #130: project.yml pinned KSPlayer to a revision instead of `branch: main` so every
 # checkout/CI run resolves the same commit (Dobby.xcodeproj and its Package.resolved
 # are gitignored, so nothing else pins it). Catch a regression back to a branch ref.

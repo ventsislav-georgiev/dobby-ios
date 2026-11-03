@@ -24,7 +24,8 @@ struct ContentView: View {
             }
 
             if let url = playback.playURL, playback.request != nil {
-                PlayerView(url: url, time: playback.player.timemodel, subtitles: playback.player.subtitleModel)
+                PlayerView(url: url, time: playback.player.timemodel, subtitles: playback.player.subtitleModel,
+                           playback: playback)
                     .environmentObject(playback)
                     .transition(.opacity)
             }
