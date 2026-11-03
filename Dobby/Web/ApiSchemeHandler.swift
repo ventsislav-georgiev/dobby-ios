@@ -660,11 +660,9 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             status = 400
             fail(task, id, 400, "Missing graphql document", origin, noStore, secret: true); return
         }
-        guard let token = SettingsMirrorStore.imdbAuthToken() else {
-            status = 401
-            fail(task, id, 401, "IMDb auth token not configured", origin, noStore, secret: true); return
-        }
-        let upstream = Self.credentialRequest(document: document, token: token)
+        // #530: the token is optional — IMDb answers public queries without a session;
+        // only user data (watchlist, ratings) needs it.
+        let upstream = Self.credentialRequest(document: document, token: SettingsMirrorStore.imdbAuthToken())
         guard let url = upstream.url, Self.isAllowedCredentialURL(url) else {
             status = 502
             fail(task, id, 502, "Credential lane upstream is not allowlisted", origin, noStore, secret: true); return
@@ -755,13 +753,16 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     /// The only request that carries the IMDb cookie, and it is built against a
-    /// fixed URL — nothing the page sends picks the host or the headers.
-    static func credentialRequest(document: String, token: String) -> URLRequest {
+    /// fixed URL — nothing the page sends picks the host or the headers. With no
+    /// token (#530) it goes out anonymous: no Cookie header at all.
+    static func credentialRequest(document: String, token: String?) -> URLRequest {
         var request = URLRequest(url: URL(string: imdbGraphQL)!)
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("at-main=\(token); ubid-main=\(imdbSessionID)", forHTTPHeaderField: "Cookie")
+        if let token {
+            request.setValue("at-main=\(token); ubid-main=\(imdbSessionID)", forHTTPHeaderField: "Cookie")
+        }
         request.setValue(imdbSessionID, forHTTPHeaderField: "x-amzn-sessionid")
         // IMDb's edge (CloudFront/WAF) 403s anything without a client-name header.
         request.setValue("imdb-web-next", forHTTPHeaderField: "x-imdb-client-name")

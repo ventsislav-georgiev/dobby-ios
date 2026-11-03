@@ -111,6 +111,17 @@ enum ApiSchemeHandlerCheck {
               "IMDb edge needs the client-name header")
         check(credential.httpMethod == "POST", "credential lane POSTs the document upstream")
 
+        // #530: no token is an anonymous request to the same host, not a 401 — no Cookie at all.
+        let anonymous = ApiSchemeHandler.credentialRequest(document: "{\"query\":\"{x}\"}", token: nil)
+        check(anonymous.value(forHTTPHeaderField: "Cookie") == nil, "a nil token sends no Cookie header")
+        check(anonymous.url == credential.url, "the anonymous request goes to the same fixed URL")
+        check(ApiSchemeHandler.isAllowedCredentialURL(anonymous.url!), "the anonymous URL is allowlisted")
+        check(anonymous.httpMethod == "POST" && anonymous.httpBody == credential.httpBody,
+              "the anonymous request POSTs the same document")
+        var withoutCookie = credential.allHTTPHeaderFields ?? [:]
+        withoutCookie["Cookie"] = nil
+        check(anonymous.allHTTPHeaderFields == withoutCookie, "the anonymous request differs only by the Cookie")
+
         let image = ApiSchemeHandler.imageRequest(URL(string: "https://m.media-amazon.com/x.jpg")!)
         check(image.value(forHTTPHeaderField: "Cookie") == nil, "image lane carries no cookie")
         check(image.allHTTPHeaderFields?.isEmpty ?? true, "image lane injects nothing at all")
