@@ -4289,3 +4289,31 @@ print("PASS: the scanned QR payload reaches only TvLink.keep and the settings ke
       "the one fixed sentence, the capture session starts and stops off main, and a kept scan "
       "leaves the camera, marks the page keyed and hides Scan (#248)")
 TVLINKGUARDPY
+
+# #509: altool takes the first APPL Info.plist in the ipa for the app, and the stdlib module
+# frameworks utils.sh builds were typed APPL by its template (every upload resolved
+# eu.illegible.dobbyios.-zstd). copy-python.sh retypes that template FMWK, once, before the one
+# install_python call that copies it into every module framework and signs it.
+python3 - <<'MODULEFWTYPEPY'
+import sys
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#509)\n" % msg)
+    sys.exit(1)
+
+lines = [l.strip() for l in open("scripts/copy-python.sh")]
+code = [l for l in lines if not l.startswith("#")]
+retype = '/usr/bin/plutil -replace CFBundlePackageType -string FMWK "$CACHE/iOS/Python.xcframework/build/iOS-dylib-Info-template.plist"'
+install = "install_python python-support/iOS/Python.xcframework python/app_packages >/dev/null"
+if code.count(retype) != 1:
+    fail("copy-python.sh must retype the module framework template FMWK exactly once: %r" % retype)
+if 'CACHE="$PWD/python-support"' not in code:
+    fail("copy-python.sh: the retyped template must be the one install_python reads ($PWD/python-support)")
+calls = [l for l in code if "install_python" in l or "install_dylib" in l or "process_dylibs" in l]
+if calls != [install]:
+    fail("copy-python.sh must build module frameworks only through %r, got %r" % (install, calls))
+if code.index(retype) > code.index(install):
+    fail("copy-python.sh must retype the template before install_python copies and signs it")
+print("PASS: copy-python.sh retypes the module framework template FMWK before the one install_python "
+      "call, so the app stays the only APPL bundle altool can resolve (#509)")
+MODULEFWTYPEPY
