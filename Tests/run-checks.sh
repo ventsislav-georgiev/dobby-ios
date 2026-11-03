@@ -3139,6 +3139,9 @@ NATIVECALLBACKSPY
 #     the piEnabledBridge it reads (with its window.Dobby leg, or getPiEnabled is true on iOS); on
 #     this side, BridgeInjection's canPlayNative = true outside any #if and its literal member
 #     (piEnabled's members are PIGATEPY's).
+#   #522: the one return allowed ahead of the guard is the device routing statement, in its exact
+#     two lines; it is safe for an /offline-video/ URL because deviceHubRoutePlay answers false
+#     unless deviceHubPortableUrl(url), whose first test refuses isOfflineVideoUrl(url).
 # Ceiling: textual; a playStreamUrl reassigned at runtime from a string is not seen.
 PLAYSVIDEO_PUB="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
 python3 - <<'PLAYSVIDEOGATEPY'
@@ -3206,10 +3209,16 @@ defined_once("piEnabledBridge", "12-service-worker-offline.js",
 defined_once("getPiEnabled", "12-service-worker-offline.js",
              "function getPiEnabled() {\n  var bridge = piEnabledBridge();\n  if (!bridge) return true;\n"
              "  try { return bridge.piEnabled() === true; } catch (e) { return true; }\n}")
-defined_once("playStreamUrl", "21-android-tv.js", "function playStreamUrl(url) {")
+defined_once("playStreamUrl", "21-android-tv.js", "function playStreamUrl(url, here) {")
+defined_once("deviceHubRoutePlay", "14-settings.js",
+             "function deviceHubRoutePlay(url, extra) {\n  const to = deviceHubTargetId();\n"
+             "  if (!to || !deviceHubPortableUrl(url)) return false;")
+defined_once("deviceHubPortableUrl", "14-settings.js",
+             "function deviceHubPortableUrl(url) {\n"
+             "  if (typeof url !== 'string' || !/^https?:\\/\\//i.test(url) || isOfflineVideoUrl(url)) return false;")
 
 text = texts["21-android-tv.js"]
-start = text.index("\nfunction playStreamUrl(url) {\n") + 1
+start = text.index("\nfunction playStreamUrl(url, here) {\n") + 1
 end = text.find("\n}\n", start)
 body = text[start:end].split("\n")
 GUARD = ["  if (isOfflineVideoUrl(url) && isDobbyWrapper() && !getPiEnabled()) {",
@@ -3220,13 +3229,19 @@ at = [i for i in range(len(body)) if body[i:i + len(GUARD)] == GUARD]
 if len(at) != 1 or sum(l.count("getPiEnabled") for l in body) != 1:
     fail("playStreamUrl must open with the exact #200 guard, once:\n%s" % "\n".join(GUARD))
 g = at[0]
+ROUTE = ["  if (!here && typeof deviceHubRoutePlay === 'function'",
+         "    && deviceHubRoutePlay(url, { filename: pendingStreamFilename, audioTracks: pendingAudioTracks, "
+         "subtitleTracks: pendingSubtitleTracks })) return;"]
+route = [i for i in range(1, g) if body[i:i + 2] == ROUTE]
+if len(route) != 1 or sum("deviceHubRoutePlay" in l for l in body) != 2:
+    fail("playStreamUrl must carry the exact #522 routing statement once, ahead of the guard:\n%s" % "\n".join(ROUTE))
 depth = 0
 # Nothing ahead of the guard may leave playStreamUrl or start playback, at any depth: a return
 # inside a block, or a braceless engine call, would bypass it for some URLs.
 AHEAD = r"\breturn\b|\bplayStreamWithEngine\s*\(|\binitPlaysVideo\s*\(|\bplayNativeVideoUrl\s*\(|\bimport\s*\(|tryDispatch"
-for l in body[1:g]:
+for i, l in enumerate(body[1:g], 1):
     depth += l.count("{") - l.count("}")
-    if re.search(AHEAD, l):
+    if re.search(AHEAD, l) and i != route[0] + 1:
         fail("playStreamUrl: %r runs before the #200 guard" % l.strip())
 if depth != 0:
     fail("the #200 guard is nested inside a block of playStreamUrl; it must sit at its top level")
