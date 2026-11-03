@@ -212,6 +212,7 @@ jobs:
         env:
           CERT_P12: ${{ secrets.DIST_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+          KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
         run: |
           KEYCHAIN="$RUNNER_TEMP/app.keychain-db"
           security create-keychain -p "" "$KEYCHAIN"
@@ -219,13 +220,52 @@ jobs:
           security unlock-keychain -p "" "$KEYCHAIN"
           echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          # #515: the p12's leaf certificate, read with openssl so the facts below exist even
+          # when the keychain calls the identity invalid. Kept in a variable, never printed;
+          # -legacy is for an OpenSSL 3 reading an older RC2/3DES p12.
+          leaf=$( { openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -passin env:CERT_PASSWORD -nokeys -clcerts 2>/dev/null \
+            || openssl pkcs12 -legacy -in "$RUNNER_TEMP/cert.p12" -passin env:CERT_PASSWORD -nokeys -clcerts 2>/dev/null; } \
+            | openssl x509 2>/dev/null || true)
+          rm -f "$RUNNER_TEMP/cert.p12"
+          if [ -n "$leaf" ]; then
+            # Issuer OU is Apple's intermediate generation (G3, G6, ...), no personal data.
+            echo "p12 certificate: $(printf '%s\n' "$leaf" | openssl x509 -noout -enddate), issuer $(printf '%s\n' "$leaf" | openssl x509 -noout -issuer | grep -oE 'OU ?= ?[^,/]+' || echo 'OU unknown')"
+          else
+            echo "::warning::openssl could not read the certificate in DIST_CERT_P12 (#515)"
+          fi
+          # #515: Apple Distribution certificates chain through Apple's WWDR G3 intermediate. The
+          # runner image does not promise it, and without it find-identity -v calls the identity
+          # untrusted (CSSMERR_TP_NOT_TRUSTED). Apple's own file, pinned by SHA-256.
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/AppleWWDRCAG3.cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          echo "dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f  $RUNNER_TEMP/AppleWWDRCAG3.cer" | shasum -a 256 -c - >/dev/null \
+            || { echo "::error::AppleWWDRCAG3.cer from apple.com does not match the pinned SHA-256 (#515)"; exit 1; }
+          security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN" >/dev/null
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          rm -f "$RUNNER_TEMP/cert.p12"
           # #515: the identity's SHA-1, which the profile step matches to the account's
           # certificate. The identity's name carries a person's name, so it is never printed.
           sha1=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Apple Distribution: /{print $2; exit}')
-          [ -n "$sha1" ] || { echo "::error::no valid Apple Distribution identity in DIST_CERT_P12 (expired, or not trusted on this runner) (#515)"; exit 1; }
+          if [ -z "$sha1" ]; then
+            # One run has to tell the causes apart: per identity only the kind (the name up to
+            # its colon) and the keychain's verdict, then whether the p12 is the account's
+            # current DISTRIBUTION certificate.
+            valid=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/valid identities found/{print $1}')
+            security find-identity -p codesigning "$KEYCHAIN" | awk -F'"' -v valid="${valid:-0}" '
+              /Valid identities only/ { done = 1 }
+              !done && /^ *[0-9]+\) [0-9A-F]+ "/ {
+                n++
+                kind = index($2, ":") ? substr($2, 1, index($2, ":") - 1) : "(no kind prefix)"
+                reason = match($3, /CSSMERR_[A-Z_]+/) ? substr($3, RSTART, RLENGTH) : "valid"
+                printf "  identity %d: kind \"%s\", %s\n", n, kind, reason
+              }
+              END { printf "codesigning identities in the build keychain: %d valid of %d\n", valid, n }'
+            if [ -n "$leaf" ]; then
+              DIST_CERT_SHA1=$(printf '%s\n' "$leaf" | openssl x509 -noout -fingerprint -sha1 | sed 's/.*=//; s/://g') \
+                node scripts/asc-certs.mjs match || true
+            fi
+            echo "::error::no valid Apple Distribution identity in DIST_CERT_P12 (expired, or not trusted on this runner) (#515)"
+            exit 1
+          fi
           echo "DIST_CERT_SHA1=$sha1" >> "$GITHUB_ENV"
           echo "imported one Apple Distribution identity"
 

@@ -3896,7 +3896,15 @@ def step(name):
 
 if "allowProvisioningUpdates" in wf:
     fail("testflight.yml passes -allowProvisioningUpdates again; with automatic signing that mints and revokes a certificate every run")
-imp_at, _ = step("Import distribution certificate")
+imp_at, imp = step("Import distribution certificate")
+wwdr = 'security import "$RUNNER_TEMP/AppleWWDRCAG3.cer" -k "$KEYCHAIN"'
+for want in ["https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer",
+             'echo "dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f  $RUNNER_TEMP/AppleWWDRCAG3.cer" | shasum -a 256 -c -',
+             wwdr, "node scripts/asc-certs.mjs match"]:
+    if want not in imp:
+        fail("the certificate import must fetch Apple's WWDR G3 intermediate, check its pinned SHA-256, import it, and on failure ask asc-certs.mjs match: missing %r" % want)
+if not imp.index("shasum -a 256 -c -") < imp.index(wwdr) < imp.index("find-identity"):
+    fail("the WWDR G3 intermediate must be hash-checked, then imported before find-identity judges the identity")
 prof_at, prof = step("Install App Store provisioning profiles")
 arch_at, arch = step("Archive")
 _, export = step("Export .ipa")
@@ -3996,6 +4004,10 @@ if r.returncode != 1 or "::error::the imported distribution certificate" not in 
 r, calls, _, _ = run([], args=(), extra={"CI": "true", "REVOKE": "true"})
 if r.returncode or calls != ["GET /v1/certificates", "DELETE /v1/certificates/C2"] or "A Person" in r.stdout or "revoking 1 CI certificate(s)" not in r.stdout or "::warning::" not in r.stdout:
     fail("revoke mode in CI must revoke only the API-minted development certificate, warn, and print no person's name: %r %r" % (calls, r.stdout))
+for want_sha, verdict in [(sha1, "matches"), ("0" * 40, "does not match"), (hashlib.sha1(b"other").hexdigest(), "does not match")]:
+    r, calls, genv, _ = run([], sha=want_sha, args=("match",))
+    if r.returncode or calls != ["GET /v1/certificates"] or genv or r.stdout != "the p12 certificate %s the account's current DISTRIBUTION certificate\n" % verdict:
+        fail("match mode must print only whether the p12 is the account's DISTRIBUTION certificate (%s), no hash, no name, no write: rc %d %r %r" % (verdict, r.returncode, calls, r.stdout))
 print("PASS: asc-certs.mjs profiles reuses an ACTIVE profile of ours, replaces a stale one for the exact bundle id and "
-      "certificate, refuses a certificate the account lacks, and the CI revoke names no person (#515)")
+      "certificate, refuses a certificate the account lacks, match prints only a verdict, and the CI revoke names no person (#515)")
 SIGNINGPY

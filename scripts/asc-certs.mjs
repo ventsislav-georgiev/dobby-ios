@@ -46,7 +46,17 @@ const call = async (path, method = 'GET', body) => {
   return response.status === 204 ? null : response.json();
 };
 
+const sha1Of = (cert) =>
+  crypto.createHash('sha1').update(Buffer.from(cert.attributes.certificateContent || '', 'base64')).digest('hex').toUpperCase();
 const { data } = await call('/v1/certificates?limit=200');
+if (process.argv[2] === 'match') {
+  // #515: whether DIST_CERT_SHA1 (the p12's certificate) is the account's current DISTRIBUTION
+  // certificate. Prints only the verdict, never the hash or the certificate's name.
+  const want = (process.env.DIST_CERT_SHA1 || '').toUpperCase();
+  const hit = want && data.some((c) => c.attributes.certificateType === 'DISTRIBUTION' && sha1Of(c) === want);
+  console.log(`the p12 certificate ${hit ? 'matches' : 'does not match'} the account's current DISTRIBUTION certificate`);
+  process.exit(0);
+}
 if (process.argv[2] === 'profiles') {
   await installProfiles(data);
   process.exit(0);
@@ -89,11 +99,7 @@ async function installProfiles(certs) {
   const fs = await import('node:fs');
   const os = await import('node:os');
   const sha1 = (process.env.DIST_CERT_SHA1 || '').toUpperCase();
-  const cert = certs.find(
-    (c) =>
-      c.attributes.certificateContent &&
-      crypto.createHash('sha1').update(Buffer.from(c.attributes.certificateContent, 'base64')).digest('hex').toUpperCase() === sha1
-  );
+  const cert = certs.find((c) => c.attributes.certificateContent && sha1Of(c) === sha1);
   if (!sha1 || !cert) {
     console.log('::error::the imported distribution certificate is not on the account (expired or revoked?); renew DIST_CERT_P12 (#515)');
     process.exit(1);
