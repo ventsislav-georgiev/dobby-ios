@@ -53,7 +53,7 @@ done
 [ -x "$OPENSSL" ] || die "no $OPENSSL"
 [ -x "$XCODEGEN" ] || die "no $XCODEGEN"
 FEED="${DOBBY_MAC_FEED_URL:-}"
-case "$FEED" in https://*/*.xml) ;; *) die "DOBBY_MAC_FEED_URL must be an https URL ending in .xml" ;; esac
+[[ $FEED =~ ^https://[^/]+/.+\.xml$ ]] || die "DOBBY_MAC_FEED_URL must be an https URL ending in .xml, with a non-empty host"
 PREFIX="${FEED%/*}/"
 if [ -z "${DOBBY_UPDATE_TOKEN:-}" ]; then
   DOBBY_UPDATE_TOKEN="$(/usr/bin/security find-generic-password -s dobby_update_token -w 2>/dev/null)" \

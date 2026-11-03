@@ -4011,3 +4011,13 @@ for want_sha, verdict in [(sha1, "matches"), ("0" * 40, "does not match"), (hash
 print("PASS: asc-certs.mjs profiles reuses an ACTIVE profile of ours, replaces a stale one for the exact bundle id and "
       "certificate, refuses a certificate the account lacks, match prints only a verdict, and the CI revoke names no person (#515)")
 SIGNINGPY
+
+# #517: mac-release.sh must refuse a feed URL with an empty host (https:///x.xml) before the build,
+# not at publish after a notarized build. Pin the exact check, then run its regex on sample URLs.
+FEEDLINE='[[ $FEED =~ ^https://[^/]+/.+\.xml$ ]] || die '
+/usr/bin/grep -qF "$FEEDLINE" scripts/mac-release.sh || { echo "FAIL: mac-release.sh no longer checks the feed URL with the pinned host regex (#517)" >&2; exit 1; }
+for u in 'https:///v1/mac/appcast.xml' 'http://h.example/a.xml' 'https://h.example/a.json' 'https://h.example/.xml'; do
+  [[ $u =~ ^https://[^/]+/.+\.xml$ ]] && { echo "FAIL: the mac-release.sh feed check accepts $u (#517)" >&2; exit 1; }
+done
+[[ 'https://h.example/v1/mac/appcast.xml' =~ ^https://[^/]+/.+\.xml$ ]] || { echo "FAIL: the mac-release.sh feed check refuses a valid URL (#517)" >&2; exit 1; }
+echo "PASS: mac-release.sh refuses a feed URL with an empty host, a non-https scheme or a non-.xml path (#517)"
