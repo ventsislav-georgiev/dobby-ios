@@ -40,7 +40,7 @@ struct WebContainer {
 
         // #483: advertised from the bundle (a file check, no interpreter start on main), then taken
         // back below if the interpreter will not start.
-        BridgeInjection.a4k = PythonRuntime.bundled
+        BridgeInjection.onDeviceSearch = PythonRuntime.bundled
         let ucc = WKUserContentController()
         ucc.add(coordinator, name: AppConfig.bridgeName)
         ucc.addUserScript(BridgeInjection.userScript())
@@ -53,9 +53,9 @@ struct WebContainer {
         // being off. `url` and not AppConfig.serverURL: the refresh belongs on whichever
         // address actually answered.
         config.setURLSchemeHandler(ApiSchemeHandler(server: url), forURLScheme: ApiSchemeHandler.scheme)
-        // #483: the a4k lanes on that scheme, and the offline sidecars they cache.
-        ApiSchemeHandler.a4kLane = A4kLane.answer
-        OfflineStore.a4kSidecar = A4kLane.sidecarFile
+        // #483: the on-device lanes on that scheme, and the offline sidecars they cache.
+        ApiSchemeHandler.onDeviceLane = OnDeviceLane.answer
+        OfflineStore.laneSidecar = OnDeviceLane.sidecarFile
         // Before the first WKWebView is created — the safe order, not a required one
         // (registering after the WKWebView, or even after its load completes, measured
         // green too), so it cannot be missed by a WebView created later. Over https
@@ -71,8 +71,8 @@ struct WebContainer {
         ApiSchemeHandler.registerAsSecureScheme(in: config, scheme: OfflineSchemeHandler.scheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        if BridgeInjection.a4k {
-            PythonRuntime.warmUp { [weak webView] in BridgeInjection.withdrawA4k(from: webView) }
+        if BridgeInjection.onDeviceSearch {
+            PythonRuntime.warmUp { [weak webView] in BridgeInjection.withdrawOnDeviceSearch(from: webView) }
         }
         webView.navigationDelegate = coordinator
         webView.uiDelegate = coordinator

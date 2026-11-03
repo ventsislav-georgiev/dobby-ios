@@ -79,7 +79,7 @@ final class OfflineStore: NSObject, ObservableObject {
             NSLog("Dobby offline: bad download payload"); return
         }
         // #217: URLSession is not WebKit, so PiRequestBlock never sees this. Unlike a book, a
-        // video need not come from the Pi (a debrid or direct link downloads fine with it off),
+        // video need not come from the Pi (a hosted or direct link downloads fine with it off),
         // so with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam, the #149 rule) only the
         // Pi-origin parts are refused: a Pi video URL refuses the whole download, a Pi subtitle
         // row is skipped. Before the folder, the index and any URLSession task.
@@ -375,17 +375,17 @@ final class OfflineStore: NSObject, ObservableObject {
         if let js = try? jsonString(d) { reportProgress?(js) }
     }
 
-    /// #483: an a4k row's sidecar URL on `dobby-api:` (the on-device lane) to the lane's cached file,
-    /// set by WebContainer (A4kLane.sidecarFile). A hook so this file still compiles alone in its check.
-    static var a4kSidecar: ((URL) -> URL?)?
+    /// #483: an on-device row's sidecar URL on `dobby-api:` (the on-device lane) to the lane's cached
+    /// file, set by WebContainer (OnDeviceLane.sidecarFile). A hook so this file still compiles alone in its check.
+    static var laneSidecar: ((URL) -> URL?)?
 
     private func downloadSidecar(_ url: URL, to dest: URL, completion: @escaping (Bool) -> Void) {
         // #483: URLSession cannot fetch the custom scheme; the lane already holds the file, or nothing
-        // can produce it from here (the row carries no a4k args), and the row is skipped.
+        // can produce it from here (the row carries no download args), and the row is skipped.
         if url.scheme == AppConfig.apiScheme {
             try? FileManager.default.removeItem(at: dest)
-            let ok = Self.a4kSidecar?(url).map { (try? FileManager.default.copyItem(at: $0, to: dest)) != nil } ?? false
-            if !ok { NSLog("Dobby offline: a4k subtitle not in the lane cache, skipped") }
+            let ok = Self.laneSidecar?(url).map { (try? FileManager.default.copyItem(at: $0, to: dest)) != nil } ?? false
+            if !ok { NSLog("Dobby offline: on-device subtitle not in the lane cache, skipped") }
             DispatchQueue.main.async { completion(ok) }
             return
         }

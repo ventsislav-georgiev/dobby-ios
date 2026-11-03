@@ -103,25 +103,25 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             case "settings": self.serveSettings(task, id, url, method, origin, body)
             case "proxy": self.serveProxy(task, id, url, method, origin)
             // #483: a full search holds its request for up to a minute while /partial polls every 2 s,
-            // so the a4k lanes get a concurrent queue of their own instead of this serial one.
-            case "streaming", "subtitles": Self.a4kQueue.async { self.serveA4k(task, id, url, method, origin, body) }
+            // so the on-device lanes get a concurrent queue of their own instead of this serial one.
+            case "streaming", "subtitles": Self.laneQueue.async { self.serveLane(task, id, url, method, origin, body) }
             default: self.fail(task, id, 404, "Unknown dobby-api route", origin)
             }
         }
     }
 
-    /// #483: the a4k lanes (A4kLane.answer), installed by WebContainer. A hook rather than a call so
-    /// this file still compiles on its own in Tests/run-checks.sh. Blocking; never called on main.
-    static var a4kLane: ((_ url: URL, _ method: String, _ body: Data?)
-                         -> (status: Int, contentType: String, body: Data, cacheControl: String))?
-    private static let a4kQueue = DispatchQueue(label: "com.solarflare.dobby.a4k", qos: .userInitiated,
-                                                attributes: .concurrent)
+    /// #483: the on-device lanes (OnDeviceLane.answer), installed by WebContainer. A hook rather than a
+    /// call so this file still compiles on its own in Tests/run-checks.sh. Blocking; never called on main.
+    static var onDeviceLane: ((_ url: URL, _ method: String, _ body: Data?)
+                              -> (status: Int, contentType: String, body: Data, cacheControl: String))?
+    private static let laneQueue = DispatchQueue(label: "com.solarflare.dobby.lane", qos: .userInitiated,
+                                                 attributes: .concurrent)
 
-    /// Exact-origin ACAO (`secret: true`): these lanes spend the Premiumize key and the subtitle
-    /// credentials. The answer goes out through `respond`, so on the main thread (#169).
-    private func serveA4k(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
-                          _ url: URL, _ method: String, _ origin: String?, _ body: Data?) {
-        guard let lane = Self.a4kLane else { fail(task, id, 404, "Unknown dobby-api route", origin); return }
+    /// Exact-origin ACAO (`secret: true`): these lanes spend the stored service keys and the
+    /// subtitle credentials. The answer goes out through `respond`, so on the main thread (#169).
+    private func serveLane(_ task: WKURLSchemeTask, _ id: ObjectIdentifier,
+                           _ url: URL, _ method: String, _ origin: String?, _ body: Data?) {
+        guard let lane = Self.onDeviceLane else { fail(task, id, 404, "Unknown dobby-api route", origin); return }
         let answer = lane(url, method, body)
         respond(task, id, status: answer.status, contentType: answer.contentType, body: answer.body,
                 origin: origin, secret: true, extra: ["Cache-Control": answer.cacheControl])
@@ -323,21 +323,24 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         return (507, Data(#"{"error":"Settings could not be stored on this device","status":\#(stored)}"#.utf8))
     }
 
-    /// The secrets `GET /api/settings` pairs with a computed has* flag (#184) —
-    /// `SettingsRoutes.swift` in the server repo (dobby), six since #174. Android holds the
-    /// same six in `SettingsMirror.PRESENCE_FLAGGED_KEYS` (dobby-android, #164). run-checks
-    /// reads the server's list out of a sibling dobby checkout and fails on any drift: a
-    /// secret missing here answers with no flag and reads Not configured with the Pi off.
-    static let presenceFlaggedKeys = [
-        "imdbAuthToken",
-        "premiumizeApiKey",
-        "openSubtitlesUsername",
-        "openSubtitlesPassword",
-        "subdlApiKey",
-        "subsourceApiKey",
-    ]
+    /// The secrets `GET /api/settings` pairs with a computed has* flag (#184) are, by name,
+    /// every key ending in one of these — `SettingsRoutes.swift` in the server repo (dobby).
+    /// A rule rather than a list (#503): this repo is public and names no service, and the
+    /// server's secrets all follow it. Android lists the same keys in
+    /// `SettingsMirror.PRESENCE_FLAGGED_KEYS` (dobby-android, #164). run-checks reads the
+    /// server's has* family out of a sibling dobby checkout and fails unless this rule picks
+    /// exactly it: a secret missing here answers with no flag and reads Not configured with
+    /// the Pi off.
+    static let secretSuffixes = ["Token", "ApiKey", "Username", "Password"]
 
-    /// `premiumizeApiKey` -> `hasPremiumizeApiKey`, the server's pairing rule.
+    /// A secret key under `secretSuffixes`, never a has* flag itself (`hasImdbAuthToken`
+    /// ends in Token too).
+    static func isPresenceFlagged(_ key: String) -> Bool {
+        if key.hasPrefix("has"), key.dropFirst(3).first?.isUppercase == true { return false }
+        return secretSuffixes.contains { key.hasSuffix($0) && key.count > $0.count }
+    }
+
+    /// `imdbAuthToken` -> `hasImdbAuthToken`, the server's pairing rule.
     static func presenceFlag(_ key: String) -> String {
         "has" + key.prefix(1).uppercased() + key.dropFirst()
     }
@@ -358,7 +361,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     static func withPresenceFlags(_ body: Data) -> Data {
         guard var document = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return body }
         var changed = false
-        for key in presenceFlaggedKeys {
+        for key in document.keys.sorted() where isPresenceFlagged(key) {
             guard let value = document[key] else { continue }
             let configured = (value as? String)?.isEmpty == false
             let flag = presenceFlag(key)
@@ -371,25 +374,26 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         return data
     }
 
-    /// The eight field names `GET /api/settings` always sends as an explicit JSON
-    /// `null` when unset, so a client can tell "unset" apart from "field absent"
-    /// — `SettingsRoutes.swift:37-44` in the server repo (dobby, main @ c8a504f).
-    /// Nine until #174; the ninth key went with the service it belonged to.
+    /// The field names `GET /api/settings` always sends as an explicit JSON `null`
+    /// when unset, so a client can tell "unset" apart from "field absent" —
+    /// `SettingsRoutes.swift:37-44` in the server repo (dobby, main @ c8a504f) —
+    /// that this side seeds: three of the server's eight. Android holds all eight in
+    /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #174 @ c6525be13).
+    ///
+    /// The other five are service keys, left out since #503 (this repo is public and
+    /// names no service). Nothing is lost: absent reads the same as null for each of
+    /// them everywhere it is read — no has* flag (Not configured), an empty value to
+    /// the Python entry, and the page takes only a string as a key. What the seed is
+    /// for is `preferredAudioLanguage`, which tells a complete document from the
+    /// one-key mirror seed (`applyServerSettings`). A document pulled from the Pi still
+    /// carries all eight, and the merge keeps them.
     ///
     /// Transcribed rather than read at build time, because the two repos build
-    /// separately with nothing enforcing they stay in step; a mismatch between
-    /// this list and the Swift one on the Pi is exactly the drift
-    /// `ApiSchemeHandlerCheck.settingsSeedCoversEveryNullKey` exists to catch on
-    /// this side, by naming the count and every literal so a future edit to
-    /// either list has to touch this comment too. Android holds the same eight in
-    /// `SettingsMirror.SETTINGS_NULL_KEYS` (dobby-android, #174 @ c6525be13).
+    /// separately with nothing enforcing they stay in step;
+    /// `ApiSchemeHandlerCheck.settingsSeedCoversEveryNullKey` names the count and
+    /// every literal so a future edit has to touch this comment too.
     static let settingsNullKeys = [
         "imdbAuthToken",
-        "premiumizeApiKey",
-        "openSubtitlesUsername",
-        "openSubtitlesPassword",
-        "subdlApiKey",
-        "subsourceApiKey",
         "preferredSubtitleLanguage",
         "preferredAudioLanguage",
     ]
@@ -430,7 +434,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
     /// only sets a key when its field is non-empty) and `savePreferredSubtitleLanguage`
     /// posts a single key on its own (`js/17-video-playback.js:123-127`), so a POST
     /// body is a patch, never a document. Storing one whole would drop
-    /// `imdbAuthToken` and `premiumizeApiKey` out of the mirror precisely while the
+    /// `imdbAuthToken` and every other secret out of the mirror precisely while the
     /// Pi is unreachable and the mirror is the only copy of them. The Pi's own
     /// `POST /api/settings` applies keys by presence for the same reason
     /// (`SettingsRoutes.swift:83-106`), so this matches the server it stands in for.
@@ -1320,7 +1324,7 @@ private final class StreamDelegate: NSObject, URLSessionDataDelegate {
 /// The last body the Pi gave for `GET /api/settings`, in one Keychain item.
 ///
 /// The Keychain rather than `UserDefaults` because since #045 that payload carries
-/// every secret — `imdbAuthToken` and `premiumizeApiKey` included — and secrets may
+/// every secret — `imdbAuthToken` and the service keys included — and secrets may
 /// persist on clients but not in a plist an iTunes backup hands over in the clear.
 /// `AfterFirstUnlock` so a launch into a locked phone (background audio, a Live
 /// Activity tap) can still read it.

@@ -151,7 +151,7 @@ hard ceiling, and Lane 4 uses the same extension target better.
 
 **Lane 1 — Now Playing.** `PlaybackCoordinator` merges title, artist, album and poster
 artwork into `nowPlayingInfo` (KSPlayer only fills what the *stream* carries, which for
-torrent and YouTube URLs is nothing), declares `MPNowPlayingInfoPropertyMediaType =
+direct stream and YouTube URLs is nothing), declares `MPNowPlayingInfoPropertyMediaType =
 .audio` and `IsLiveStream`, sets skip intervals to 30 s to match the web player, and
 disables next/previous track — KSPlayer wires those to its playlist API, which Dobby
 has no use for, leaving two dead buttons on the car. Web side, `js/11-media-session.js`
