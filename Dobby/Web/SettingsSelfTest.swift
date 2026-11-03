@@ -14,18 +14,13 @@ import WebKit
 /// `mirroredWrite` → `apiUrlFor` → `dobby-api://settings` path, i.e. the same code a user
 /// action runs. For the duration of a step the page's `fetch` refuses the Pi origin, so
 /// the save's first leg fails the way it does with the Pi off and the wrapper leg is what
-/// takes the write. The native half of "Pi removed" is `DOBBY_NO_SERVER=1`, which also
-/// keeps `ApiSchemeHandler`'s own Pi legs off the network.
+/// takes the write. (#508: the wrapper itself never reaches the Pi any more.)
 ///
 /// - `write`: stash the current value in page localStorage (refusing if one is already
 ///   stashed, so a rerun cannot overwrite the real original), save the fixed test list,
 ///   read it back.
 /// - `read`: read the value back, for after a force-stop.
 /// - `restore`: save the stashed original back, read it back, drop the stash on a match.
-/// - `pi` (#181): open Settings and report whether the "Use a Pi server" row is shown and
-///   what it reads. `pi-on` / `pi-off` first flip it exactly the way `saveSettings` does
-///   (`setPiEnabledOnWrapper`, then `probeNetworkStates`), without posting the form. The
-///   flag is the one value these steps print: it is the wrapper's switch, not settings data.
 /// - `cred-write` / `cred-read` / `cred-restore` (#184): the same Pi-off write lane for a
 ///   credential-shaped field, `imdbAuthToken` (since #503; a service key before), whose
 ///   Settings badge is drawn from `hasImdbAuthToken` alone. `cred-write` first takes a
@@ -40,8 +35,7 @@ import WebKit
 /// Values never reach the log: the page hands them to Swift, which prints only a length
 /// and a sha256 prefix for each.
 enum SettingsSelfTest {
-    static let steps: Set<String> = ["read", "write", "restore", "pi", "pi-on", "pi-off",
-                                     "cred-write", "cred-read", "cred-restore"]
+    static let steps: Set<String> = ["read", "write", "restore", "cred-write", "cred-read", "cred-restore"]
     private static var ran = false
 
     @MainActor
@@ -97,24 +91,6 @@ enum SettingsSelfTest {
     await pause(3000);
     meta.origin = location.protocol + '//' + location.host;
     meta.simulated = document.querySelector('script[src^="dobby-offline:"]') ? 'bundled-shell' : 'network-shell';
-    if (step.indexOf('pi') === 0) {
-      meta.supported = typeof piEnabledSupported === 'function' && piEnabledSupported();
-      if (step !== 'pi' && meta.supported) {
-        setPiEnabledOnWrapper(step === 'pi-on');
-        probeNetworkStates();
-        await pause(2000);
-      }
-      openSettings();
-      await pause(1000);
-      const row = document.getElementById('settings-row-pi-enabled');
-      meta.rowShown = !!row && !row.hidden;
-      if (meta.rowShown) row.scrollIntoView({ block: 'center' });
-      meta.piEnabled = meta.supported ? getPiEnabled() : null;
-      meta.checked = document.getElementById('settings-pi-enabled')?.checked === true;
-      meta.noServer = isNoServer();
-      return { meta, v };
-    }
-
     const read = async (label) => {
       const r = await fetch(apiUrlFor('/api/settings'), { cache: 'no-store' });
       meta[label + 'Status'] = r.status;

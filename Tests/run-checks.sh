@@ -12,19 +12,10 @@ OUT0="$(mktemp -d)/app-config-check"
 xcrun swiftc -o "$OUT0" Dobby/AppConfig.swift Tests/AppConfigCheck.swift
 "$OUT0"
 
-# ServerAddresses.swift is compiled twice: OUT2 without -D DEBUG so the file still compiles
-# clean in release configuration (the noServerSeamActive() predicate itself is unconditional,
-# only its call site in probe(_:) is #if DEBUG-gated), and OUT3 with -D DEBUG so the
-# --expect-no-server run below can actually exercise the guarded call site.
 OUT2="$(mktemp -d)/server-addresses-check"
 xcrun swiftc -o "$OUT2" \
   Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
 "$OUT2"
-
-OUT3="$(mktemp -d)/server-addresses-check-debug"
-xcrun swiftc -D DEBUG -o "$OUT3" \
-  Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
-DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server
 
 # #190: every block that strips Swift comments imports Tests/swift_strip.py, one lexer for
 # // and nested /* */ comments over "...", """...""" and #"..."# literals, whose probe runs on
@@ -185,11 +176,10 @@ print("PASS: %s strip through the probed Tests/swift_strip.py and Tests/js_strip
       "(#190, #194)" % ", ".join(sorted(reads)))
 SWIFTSTRIPWIRINGPY
 
-# Compile-time property with no runtime observable: resolve() reports the same "absent" verdict
-# whether the seam call is #if DEBUG-gated or unconditional, and the reason string only reaches
-# OSLog, so no assertion above this line can distinguish a shipped guard from a shipped hole.
-# A textual check over the source is the only tool that can catch the call site losing its
-# DEBUG gate (or a second, ungated call being added elsewhere).
+# Compile-time property with no runtime observable: a debug seam's call site behaves the same
+# whether it is #if DEBUG-gated or unconditional until someone sets the variable on a shipped
+# build. A textual check over the source is the only tool that can catch the call site losing
+# its DEBUG gate (or a second, ungated call being added elsewhere).
 python3 - <<'ASSERTGATEDPY'
 import glob
 import re
@@ -252,8 +242,6 @@ def assert_gated(call_regex, label, expected_calls=1):
 
         print(f"PASS: {label}() call site is #if DEBUG-gated ({path}:{call_idx + 1})")
 
-assert_gated(r"noServerSeamActive\(\)", "noServerSeamActive", expected_calls=6)
-assert_gated(r"autoOfflineSeamActive\(\)", "autoOfflineSeamActive")
 assert_gated(r"AppConfig\.startURL\(origin:", "startURL")
 assert_gated(r"self\.logApi\(", "logApi", expected_calls=2)
 # #149 device round: the settings self-test seam. Its call site is gated here, and the
@@ -307,8 +295,8 @@ if 'stored.range(of: "/Offline/")' not in anchor:
 print("PASS: OfflineStore.root ends in /Offline and anchorOfflinePath splits on that literal (#125)")
 OFFLINEROOTPY
 
-# #243: OfflineStore's latent defects (#242), against the real class. D1 a bad book payload gets
-# refuseBookDownload's error event, D2 a transfer landing after its cancel leaves no bytes behind
+# #243: OfflineStore's latent defects (#242), against the real class. D1 a book start gets a
+# book error event (#508: every one, books came from the retired Pi), D2 a transfer landing after its cancel leaves no bytes behind
 # while an owned file stays, D3 a failed index.json write gets an error event. The store writes
 # under Documents/Offline, so the check runs in a scratch CFFIXED_USER_HOME and refuses to start
 # without one. D4: the injected _setOffline push re-renders the Offline Books section when the
@@ -948,21 +936,7 @@ if not (refuse_idx < save_idx < mark_idx < ack_idx):
     sys.stderr.write("FAIL: the settings POST acknowledges the write before storing and marking it, or refuses after storing (#149)\n")
     sys.exit(1)
 
-# The guard has to be the FIRST thing refreshSettingsInBackground does. Below the
-# lock, or below the fetch, it still lets the pull happen and overwrite.
-body_start = src.index("private func refreshSettingsInBackground() {")
-body = src[body_start:src.index("\n    }\n", body_start)]
-if "if SettingsMirrorStore.isAheadOfServer { return }" not in body:
-    sys.stderr.write("FAIL: refreshSettingsInBackground no longer refuses to pull over a locally-written document (#149)\n")
-    sys.exit(1)
-ahead_idx = body.index("if SettingsMirrorStore.isAheadOfServer { return }")
-for later, what in [("refreshing.lock()", "the refresh lock"),
-                    ("SettingsMirrorStore.save(fresh)", "the pull's own save")]:
-    if later in body and body.index(later) < ahead_idx:
-        sys.stderr.write(f"FAIL: the ahead-of-server guard sits after {what}, so a pull can still land (#149)\n")
-        sys.exit(1)
-
-print("PASS: dobby-api://settings takes a POST, stores the merge before acknowledging it, and a locally-written document is never pulled over (#149)")
+print("PASS: dobby-api://settings takes a POST and stores the merge before acknowledging it (#149)")
 SETTINGSWRITEPY
 
 # #184: the has* flags the Configured badge reads. The rule itself is pinned as values in
@@ -996,12 +970,11 @@ def body(start, what):
     a = locate(src, start, what)
     return src[a:locate(src, "\n    }\n", what + " end", a)]
 
-outcome = body("static func settingsOutcome(mirror: Data?, fetch: () -> Data?)", "settingsOutcome")
+outcome = body("static func settingsOutcome(mirror: Data?)", "settingsOutcome")
 answers = [l.strip() for l in outcome.split("\n") if "return (200" in l]
-want = ["if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror), false) }",
-        "if let fresh = fetch(), !fresh.isEmpty { return (200, withPresenceFlags(fresh), true) }"]
+want = ["if let mirror, !mirror.isEmpty { return (200, withPresenceFlags(mirror)) }"]
 if answers != want:
-    fail("settingsOutcome must answer both 200 bodies, mirror hit then Pi fetch, through "
+    fail("settingsOutcome must answer its one 200 body, the mirror (#508: no Pi fetch), through "
          "withPresenceFlags; got %r" % answers)
 
 serve = body("private func serveSettings(", "serveSettings")
@@ -1016,15 +989,15 @@ if "body: answer.body, origin: origin, secret: true," not in ack:
 get_answer = 'respond(task, id, status: outcome.status, contentType: "application/json",\n                body: outcome.body, origin: origin, secret: true,'
 if serve.count(get_answer) != 1 or serve.index(get_answer) != responds[1]:
     fail("the GET leg must answer outcome.body, as settingsOutcome built it, in its only respond(")
-built = "let outcome = Self.settingsOutcome(mirror: mirror) {"
+built = "let outcome = Self.settingsOutcome(mirror: mirror)\n"
 if serve.count(built) != 1 or serve.count("outcome =") != 1:
     fail("serveSettings must build its GET answer with exactly one settingsOutcome call")
 if not serve.index(built) < responds[1]:
     fail("the GET answer is handed to the task before settingsOutcome derives its flags")
 if "withPresenceFlags(" in serve:
     fail("serveSettings derives flags itself; the one derivation belongs inside settingsOutcome")
-if src.count("static func withPresenceFlags(") != 1 or src.count("withPresenceFlags(") != 3:
-    fail("withPresenceFlags must be defined once and called only from settingsOutcome's two answers")
+if src.count("static func withPresenceFlags(") != 1 or src.count("withPresenceFlags(") != 2:
+    fail("withPresenceFlags must be defined once and called only from settingsOutcome's answer")
 
 # #503: the secrets are a suffix rule (isPresenceFlagged), not a list: this repo names no
 # service. The rule must pick out of the server's GET exactly its has* family.
@@ -1101,7 +1074,7 @@ for path in ("Dobby/Web/ApiSchemeHandler.swift", "Dobby/Web/SettingsSelfTest.swi
         if not flags[line_of(text, m.start())]:
             fail("%s reaches selfTest%s() outside #if DEBUG" % (path, m.group(1)))
 
-print("PASS: every 200 dobby-api://settings answer, mirror hit and Pi fetch, has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
+print("PASS: every 200 dobby-api://settings answer (the mirror) has its has* flags derived inside settingsOutcome before serveSettings hands it to the task, and the seam's Keychain backup is DEBUG only (#184)")
 PRESENCEPY
 
 # #185: a settings save the Keychain refuses is not answered 200. The decision is pinned as
@@ -1209,17 +1182,16 @@ if "_ = write(live, held)" not in lines(body(store, "static func selfTestRestore
     fail("the DEBUG restore's discarded write moved")
 if "guard write(item, held) == errSecSuccess, read(item) == held else { return false }" not in lines(store):
     fail("the DEBUG backup no longer refuses the round on a refused write")
-kept_going = ["if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }",
-              "if let fresh = Self.fetchSettings(from: self.server) { _ = SettingsMirrorStore.save(fresh) }"]
+# #508: the GET seed and the background refresh were the two keep-going saves; both went with the Pi.
 saves = [l for l in lines(src) if "SettingsMirrorStore.save(" in l]
-if sorted(saves) != sorted(kept_going + ["if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }"]):
-    fail("the mirror saves are not exactly the POST's checked one and the two keep-going ones: %r" % saves)
+if saves != ["if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }"]:
+    fail("the mirror saves are not exactly the POST's checked one: %r" % saves)
 if [l for l in lines(src) if "SettingsMirrorStore.queuePatch(" in l] != ["stored = SettingsMirrorStore.queuePatch(patch)"]:
     fail("the queued patch's status no longer reaches the POST answer")
 
 # 3. The POST leg: every status reaches settingsWriteAnswer, which decides before the respond.
 serve = body(src, "private func serveSettings(", "serveSettings")
-post = serve[locate(serve, '        if method == "POST" {', "the settings POST"):locate(serve, "        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()", "the settings GET")]
+post = serve[locate(serve, '        if method == "POST" {', "the settings POST"):locate(serve, "        let mirror = SettingsMirrorStore.loadWithStatus().data", "the settings GET")]
 seq = ["            var stored = mirrorRead",
        "            if stored == errSecSuccess || stored == errSecItemNotFound { stored = SettingsMirrorStore.save(merged) }",
        "            if stored == errSecSuccess {",
@@ -1344,32 +1316,17 @@ if rh[1:] != ["pendingLock.lock(); defer { pendingLock.unlock() }",
               "guard readPending().status == errSecItemNotFound else { return }",
               "UserDefaults.standard.set(false, forKey: aheadKey)"]:
     fail("releaseHold must release the hold only when the queue read, under the lock, found no item (#193): %r" % rh[1:])
-drain = body(src, "private func drainPendingSettings() {", "drainPendingSettings")
-dl = lines(drain)
-dseq = ["guard SettingsMirrorStore.isAheadOfServer else { return }",
-        "let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()",
-        "guard let pending = queued else {",
-        "if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }",
-        "return",
-        "}"]
-if dl[1:1 + len(dseq)] != dseq or drain.count("pendingPatch(") != 1 or drain.count("releaseHold(") != 1 \
-        or drain.count("pendingRead") != 2 or src.count("releaseHold()") != 2:
-    fail("the drain must start from the hold, read the queue with its status, and with no bytes release "
-         "the hold only on errSecItemNotFound and return, pushing nothing (#193): %r" % dl[1:1 + len(dseq)])
-get = serve[locate(serve, "        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()", "the settings GET"):]
-gseq = ["        let (mirror, mirrorRead) = SettingsMirrorStore.loadWithStatus()",
-        '        source = (mirror?.isEmpty == false) ? "mirror" : "network"',
-        "        let outcome = Self.settingsOutcome(mirror: mirror) {",
-        "            Self.fetchSettings(from: server)",
-        "        }",
-        "        if outcome.store && (mirrorRead == errSecSuccess || mirrorRead == errSecItemNotFound) { _ = SettingsMirrorStore.save(outcome.body) }",
+get = serve[locate(serve, "        let mirror = SettingsMirrorStore.loadWithStatus().data", "the settings GET"):]
+gseq = ["        let mirror = SettingsMirrorStore.loadWithStatus().data",
+        '        source = "mirror"',
+        "        let outcome = Self.settingsOutcome(mirror: mirror)",
         "        status = outcome.status",
         "        length = outcome.body.count",
         '        respond(task, id, status: outcome.status, contentType: "application/json",',
         "                body: outcome.body, origin: origin, secret: true,"]
-if not get.startswith("\n".join(gseq)) or get.count("mirrorRead") != 3 or len(re.findall(r"\brespond\(", get)) != 1:
-    fail("the settings GET must read the mirror with its status, answer from settingsOutcome alone, "
-         "seed only when that read succeeded or found no item, and use the status nowhere else (#193)")
+if not get.startswith("\n".join(gseq)) or len(re.findall(r"\brespond\(", get)) != 1:
+    fail("the settings GET must read the mirror (a refusal logged by loadWithStatus), answer from "
+         "settingsOutcome alone and store nothing (#193, #508)")
 
 # 6. The consumer end: the page's retry list, transcribed in ApiSchemeHandlerCheck, is the page's.
 check_src = open("Tests/ApiSchemeHandlerCheck.swift").read()
@@ -1591,47 +1548,31 @@ def need(haystack, needle, why):
 need(web, "        load(loadURL, in: webView)",
      "WebContainer.makeWebView must route its load through load(_:in:)")
 
-# 2. Both branches of the helper, because the unpinned one is always the one that breaks
-#    something else. The guard is what keeps loadSimulatedRequest OFF the Pi-backed path
-#    (a mutant that drops `offlineShell,` synthesizes the shell even when the Pi answered,
-#    which is a working-looking app that never talks to the Pi), and the fallback is what
-#    a build with no bundled shell — every CI/TestFlight build today — still does.
-need(web, "        guard offlineShell, let html = BundledShell.indexHTML() else {",
-     "the simulated load must be guarded by BOTH offlineShell and a shell being present")
-need(web, "            webView.load(URLRequest(url: loadURL))",
-     "the no-shell / Pi-backed fallback must stay the ordinary load")
+# 2. #508: the helper synthesizes the shell and nothing else. The Pi is retired, so there is no
+#    network load of the origin left to fall back to: a plain webView.load of it is a request to
+#    the retired Pi and a blank app, and it is refused anywhere in the file.
+need(web, "        guard let html = BundledShell.indexHTML() else { return }",
+     "the simulated load must be guarded by the shell being present, and do nothing without one")
 need(web, "        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)",
-     "the offline branch must synthesize the shell under loadURL, not load a file: or data: URL")
-
-# 3. Position: the simulated load has to sit AFTER the guard's else-block, not before it.
-#    A mutant hoisting it above the guard passes every `need` above while hijacking the
-#    Pi-backed path, and nothing else in this suite runs WebContainer.
-guard_at = web.index("guard offlineShell, let html = BundledShell.indexHTML() else {")
-plain_at = web.index("webView.load(URLRequest(url: loadURL))")
-simulated_at = web.index("webView.loadSimulatedRequest(")
-if not guard_at < plain_at < simulated_at:
-    sys.stderr.write("FAIL: in WebContainer.load, the guard must come first, then the plain-load fallback, then the simulated load\n")
+     "the load must synthesize the shell under loadURL, not load a file: or data: URL")
+if "webView.load(" in web:
+    sys.stderr.write("FAIL: WebContainer loads a URL over the network again; the origin is the retired Pi (#508)\n")
     sys.exit(1)
 
-# 4. ContentView: the flag reaches WebContainer at all (argument order included), and
-#    "Continue offline" writes BOTH halves. Setting only serverURL is the pre-#151
-#    behaviour — right for a paired box, a blank page for the never-paired one the shell
-#    exists for — and no check above can see the difference.
-need(content, "WebContainer(url: serverURL, offlineShell: offlineShell)",
-     "ContentView must pass the offline-shell flag into WebContainer")
-need(content, "    private func continueOffline() {\n        serverURL = ServerAddresses.candidates().first\n        offlineShell = true\n    }",
-     "continueOffline() must set the origin AND the shell flag, in that order")
-need(content, "                    offline: continueOffline", "the Continue offline button must call continueOffline")
-need(content, "            continueOffline()", "the DOBBY_AUTO_OFFLINE seam must take the same action as the button")
-# ...and a successful resolve must clear it, or a retry after an offline start keeps
-# synthesizing the shell on a Pi that is now answering.
-# #181 put the Pi-setting branch between the clear and the probe, so this is two
-# needles in order rather than one contiguous one.
-need(content, "        resolving = true\n        offlineShell = false\n",
-     "resolve() must clear offlineShell before probing, so a Pi that came back is used")
-if not content.index("        resolving = true\n        offlineShell = false\n") < content.index("serverURL = await ServerAddresses.resolve()"):
-    sys.stderr.write("FAIL: resolve() must clear offlineShell before probing, so a Pi that came back is used\n")
+# 3. Position: the guard comes first, then the simulated load.
+if not web.index("guard let html = BundledShell.indexHTML()") < web.index("webView.loadSimulatedRequest("):
+    sys.stderr.write("FAIL: in WebContainer.load, the guard must come before the simulated load\n")
     sys.exit(1)
+
+# 4. ContentView: start is the shell, under the stored origin, with no probe and no wait (#508).
+need(content, "    private let origin = ServerAddresses.origin()",
+     "ContentView must take its origin from ServerAddresses.origin(), the one earlier builds stored")
+need(content, "            if let origin, BundledShell.root != nil {\n                WebContainer(url: origin)",
+     "ContentView must show WebContainer at once whenever there is an origin and a shell")
+for gone in ["ServerAddresses.resolve", "ServerUnreachableView", "ProgressView"]:
+    if gone in content:
+        sys.stderr.write("FAIL: ContentView has %s again; start goes straight to the bundled shell (#508)\n" % gone)
+        sys.exit(1)
 
 # 5. project.yml: a folder REFERENCE. As a plain group Xcode's resource copy flattens
 #    the tree, every file lands at the bundle root, and `dobby-offline://shell/js/...`
@@ -1647,204 +1588,8 @@ if "excludes:\n          - Shell" not in project:
     sys.stderr.write("FAIL: Dobby/Shell must be excluded from the Dobby source glob, or it is added twice\n")
     sys.exit(1)
 
-print("PASS: the Pi-less cold start is wired — makeWebView calls load(_:in:), only the offline branch synthesizes the shell, ContentView sets both halves, and Dobby/Shell ships as a folder reference (#151)")
+print("PASS: the cold start is wired — makeWebView calls load(_:in:), which only synthesizes the shell, ContentView shows it under the stored origin with no probe, and Dobby/Shell ships as a folder reference (#151, #508)")
 SHELLWIRINGPY
-
-# ---------------------------------------------------------------------------
-# #152 (M5 follow-up) — the iOS settings write-back: drain, then pull.
-#
-# ApiSchemeHandlerCheck pins the two pure rules as values: what the queue
-# accumulates (patches, never the seed), and what a push status means for the hold.
-# What no value-level check can reach is the wiring — that the drain runs at all,
-# that it runs BEFORE the #149 ahead-guard rather than after the `return`, that what
-# goes on the wire is the queued PATCH and never the mirrored document, and that the
-# hold is released only by a push the Pi actually answered. Exact single-line
-# constructs, and position where position is the meaning.
-# ---------------------------------------------------------------------------
-python3 - <<'SETTINGSWRITEBACKPY'
-import sys
-
-path = "Dobby/Web/ApiSchemeHandler.swift"
-with open(path) as f:
-    src = f.read()
-
-def fail(message, needle=None):
-    sys.stderr.write("FAIL: " + message + " (#152)\n")
-    if needle is not None:
-        sys.stderr.write("expected to find, verbatim:\n  " + needle + "\n")
-    sys.exit(1)
-
-def need(haystack, needle, message):
-    if needle not in haystack:
-        fail(message, needle)
-
-def body_of(signature):
-    if signature not in src:
-        fail("no such declaration any more: " + signature, signature)
-    start = src.index(signature)
-    return src[start:src.index("\n    }\n", start)]
-
-# 1. The POST leg keeps the PATCH BYTES. Without this line the merge is still stored
-#    and the mirror still marked ahead — every #149 check stays green — while there
-#    is nothing to push, so the hold never releases and the phone is exactly as
-#    permanently stuck as before. The argument is the raw `patch`, not `merged`:
-#    pushing the merged document would carry the seed's explicit nulls.
-need(src, "                stored = SettingsMirrorStore.queuePatch(patch)",
-     "the settings POST no longer queues the patch bytes, so a write made with the Pi off "
-     "is never pushed and the ahead-of-server hold never releases")
-
-# ...and it comes AFTER markAheadOfServer() and before the acknowledgement. Queue
-# before mark leaves a window in which a drain can land, clear the queue and release
-# the hold, and then markAheadOfServer() re-takes a hold with nothing queued behind
-# it — held forever, the exact bug. queuePatch re-takes the hold itself, under the
-# queue's own lock, which is what makes this order the safe one.
-mark_idx = src.index("                SettingsMirrorStore.markAheadOfServer()")
-queue_idx = src.index("                stored = SettingsMirrorStore.queuePatch(patch)")
-ack_idx = src.index('            respond(task, id, status: answer.status, contentType: "application/json",')
-if not mark_idx < queue_idx < ack_idx:
-    fail("the settings POST queues the patch before it marks the mirror ahead, or after it has "
-         "already acknowledged the write")
-
-# 2. The drain is RUN, and it runs before the guard that returns. Below the guard it
-#    is unreachable code in the only state it exists for, and nothing else in this
-#    suite executes refreshSettingsInBackground.
-refresh = body_of("private func refreshSettingsInBackground() {")
-need(refresh, "        drainPendingSettings()",
-     "refreshSettingsInBackground no longer drains the queued patch, so the #149 hold is "
-     "still set once and never cleared")
-guard_line = "if SettingsMirrorStore.isAheadOfServer { return }"
-if refresh.index("        drainPendingSettings()") > refresh.index(guard_line):
-    fail("the drain sits after the ahead-of-server guard, which returns — so it never runs")
-
-# 3. The drain's own body. Both halves: the patch is read from the QUEUE, and the
-#    legacy hold with nothing behind it is released rather than held forever (every
-#    phone already running the #149 build is in that state after upgrading).
-drain = body_of("private func drainPendingSettings() {")
-for needle, message in [
-    ("        guard SettingsMirrorStore.isAheadOfServer else { return }",
-     "the drain no longer starts from the hold, so it pushes on every settings GET"),
-    ("        let (queued, pendingRead) = SettingsMirrorStore.pendingPatch()\n        guard let pending = queued else {",
-     "the drain no longer takes its bytes from the queue"),
-    ("            if pendingRead == errSecItemNotFound { SettingsMirrorStore.releaseHold() }",
-     "a hold with nothing queued behind it is no longer released, so a phone upgrading from "
-     "the #149 build stays permanently stuck"),
-    ("            switch Self.pushSettings(pending, to: self.server) {",
-     "the drain no longer pushes the queued patch to the Pi"),
-    ("            case .landed, .refused:", "the drain no longer distinguishes a push that ended the hold"),
-    ("                SettingsMirrorStore.clearPending(ifStill: pending)",
-     "the drain no longer releases the hold against the exact bytes it pushed"),
-    ("            case .held:", "the drain no longer has a branch that keeps the patch queued"),
-    ("        if drainInFlight { refreshing.unlock(); return }",
-     "the drain lost its single-flight guard, so a boot that reads settings twice POSTs the "
-     "user's secrets twice"),
-]:
-    need(drain, needle, message)
-
-# THE trap, as an absence. Pushing the mirrored document in the queue's place is the
-# naive fix that looks right and clears live values on the Pi: POST /api/settings
-# applies preferredSubtitleLanguage and preferredAudioLanguage by body PRESENCE
-# (SettingsRoutes.swift:86-90), so the seed's explicit nulls would blank both for a
-# device that never touched either.
-push = body_of("private static func pushSettings(_ patch: Data, to server: URL) -> PushOutcome {")
-for scope, label in [(drain, "the drain"), (push, "the push")]:
-    for forbidden in ["SettingsMirrorStore.load()", "mergedSettings", "seedSettingsJson", "settingsSeed"]:
-        if forbidden in scope:
-            fail(label + " reaches for the mirrored document (" + forbidden + "); only the queued "
-                 "patch may be pushed, or the Pi's live language values are cleared by a stale "
-                 "mirror's nulls")
-
-# 4. The push sends the patch as the body, with the method the Pi's route takes.
-for needle, message in [
-    ('        request.httpMethod = "POST"', "the push no longer uses the method POST /api/settings takes"),
-    ("        request.httpBody = patch", "the push no longer sends the queued patch as its body"),
-    ("        return pushOutcome(status: http?.statusCode)",
-     "the push no longer routes its status through the pinned outcome rule"),
-]:
-    need(push, needle, message)
-
-# 5. Position inside the drain: the clear is INSIDE the landed/refused case and after
-#    the push. Hoisted above the switch — or added to the .held branch — it releases
-#    the hold for a change the Pi never took, which loses the user's key. That mutant
-#    passes every `need` above.
-push_at = drain.index("            switch Self.pushSettings(pending, to: self.server) {")
-landed_at = drain.index("            case .landed, .refused:")
-clear_at = drain.index("                SettingsMirrorStore.clearPending(ifStill: pending)")
-held_at = drain.index("            case .held:")
-if not push_at < landed_at < clear_at < held_at:
-    fail("the queue is cleared outside the landed/refused case, or before the push — the hold "
-         "must only be released by a push the Pi actually answered")
-if drain.count("SettingsMirrorStore.clearPending(") != 1:
-    fail("there is more than one path that releases the hold in the drain")
-
-# 6. clearPending is a compare-and-delete, in that order. The compare is what stops a
-#    save that landed mid-push from being thrown away with the confirmation of the
-#    older one — that mutant loses the user's latest change AND releases the hold in
-#    the same step. Clearing the bit before the delete leaves the mirror unprotected
-#    with the patch still queued.
-clear = body_of("static func clearPending(ifStill pushed: Data) {")
-for needle, message in [
-    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
-     "clearPending no longer takes the queue lock, so it can interleave with a page write"),
-    ("        guard read(pendingQuery) == pushed else { return }",
-     "clearPending no longer checks that what is queued is still what was pushed"),
-    ("        let deleted = SecItemDelete(pendingQuery as CFDictionary)", "clearPending no longer removes the queued patch"),
-    ("        UserDefaults.standard.set(false, forKey: aheadKey)", "clearPending no longer releases the hold"),
-]:
-    need(clear, needle, message)
-if not (clear.index("pendingLock.lock()")
-        < clear.index("guard read(pendingQuery) == pushed")
-        < clear.index("SecItemDelete(pendingQuery")
-        < clear.index("UserDefaults.standard.set(false, forKey: aheadKey)")):
-    fail("clearPending releases the hold before it has checked the queued bytes and removed them")
-
-# 7. queuePatch accumulates through mergedPatch, not mergedSettings. The helper is
-#    pinned as values in ApiSchemeHandlerCheck; this is its call site, and swapping
-#    it for the seeded merge is green everywhere else while it queues nine keys whose
-#    nulls clear the Pi's two language fields.
-queue_fn = body_of("static func queuePatch(_ patch: Data) -> OSStatus {")
-for needle, message in [
-    ("        pendingLock.lock(); defer { pendingLock.unlock() }",
-     "queuePatch no longer takes the queue lock, so a drain can clear a patch mid-write"),
-    ("        guard let accumulated = ApiSchemeHandler.mergedPatch(pending: pending, patch: patch) else { return errSecParam }",
-     "queuePatch no longer accumulates through mergedPatch — the seeded merge would queue nine "
-     "keys and clear the Pi's language fields, and replacing instead of accumulating would drop "
-     "an earlier Pi-less save"),
-    ("        let queued = write(pendingQuery, accumulated)", "queuePatch no longer stores the accumulated patch"),
-    ("        UserDefaults.standard.set(true, forKey: aheadKey)",
-     "queuePatch no longer re-takes the hold under the lock, so a drain landing in the sliver "
-     "after markAheadOfServer() leaves a queued patch with the mirror unprotected"),
-]:
-    need(queue_fn, needle, message)
-if queue_fn.index("write(pendingQuery, accumulated)") > queue_fn.index("UserDefaults.standard.set(true"):
-    fail("queuePatch takes the hold before the patch is actually stored")
-
-# 8. releaseHold re-checks under the lock. Without it, a patch queued between the
-#    drain's look and this call is abandoned with the hold.
-release = body_of("static func releaseHold() {")
-need(release, "        guard readPending().status == errSecItemNotFound else { return }",
-     "releaseHold no longer re-checks the queue under the lock, so it can release a hold that "
-     "a patch queued meanwhile still needs")
-
-# 9. The queued patch is a settings body: it carries every secret the user just typed,
-#    so it lives in the Keychain beside the mirror, never in a plist a backup hands
-#    over in the clear. The only UserDefaults line allowed near the patch is the bit.
-need(src, '    private static let pendingAccount = "api/settings.pending"',
-     "the queue is no longer its own Keychain item beside the mirror")
-need(src, "    private static var pendingQuery: [String: Any] { query(pendingAccount) }",
-     "the queue's Keychain query no longer uses its own account, so it would collide with the mirror")
-for scope, label in [(queue_fn, "queuePatch"), (clear, "clearPending"),
-                     (body_of("static func pendingPatch() -> (data: Data?, status: OSStatus) {"), "pendingPatch")]:
-    for line in scope.splitlines():
-        if "UserDefaults" in line and "aheadKey" not in line:
-            fail(label + " puts something other than the hold bit in UserDefaults; the queued patch "
-                 "carries secrets and belongs in the Keychain")
-
-need(src, "    private var drainInFlight = false",
-     "the drain lost its own single-flight flag")
-
-print("PASS: the iOS settings write-back drains before it pulls, pushes only the queued patch, "
-      "and releases the hold only against the exact bytes a push landed (#152)")
-SETTINGSWRITEBACKPY
 
 # ---------------------------------------------------------------------------
 # #155 — the TestFlight release actually carries the #151 shell, and a build that
@@ -2013,9 +1758,9 @@ print("PASS: testflight.yml's Verify step, run under bash -eo pipefail, warns on
       "archived Dobby.app naming ITMS-91182, says nothing on a clean app, and never fails the upload (#326)")
 TFFONTWARNPY
 
-# 2. ContentView: the screen a never-paired device actually lands on must say
-#    whether THIS build can cold-start Pi-less at all, driven by the same
-#    BundledShell.root the offline load itself branches on, or the two can disagree.
+# 2. ContentView: a build with no shell (or no origin) says so on screen, driven by the same
+#    BundledShell.root the load itself branches on, or the two can disagree. #508: it is the
+#    else-branch of the one switch that shows WebContainer; there is no start screen left.
 python3 - <<'CONTENTVIEWPY'
 import sys
 
@@ -2023,34 +1768,13 @@ path = "Dobby/ContentView.swift"
 with open(path) as f:
     src = f.read()
 
-def need(needle, why):
-    if needle not in src:
-        sys.stderr.write("FAIL: " + why + "\nexpected to find, verbatim:\n  " + needle + "\n")
-        sys.exit(1)
-
-need("if BundledShell.root == nil {",
-     "ServerUnreachableView must gate a signal on BundledShell.root, or a shell-less build says nothing on the screen a never-paired device lands on (#155)")
-need('Text("This build has no offline shell — Continue offline will be blank.")',
-     "the no-shell caption text changed or was removed (#155)")
-
-# Position, scoped to ServerUnreachableView itself (ContentView's own top-level
-# `} else {` sits earlier in the file, around its WebContainer/ServerUnreachableView
-# switch, and would satisfy an unscoped ordering check without the caption existing
-# in the right branch at all). The caption must sit in the not-resolving branch,
-# after the "Continue offline" button — a mutant that hoists the BundledShell.root
-# check above `if resolving` would show it on the resolving loader too,
-# before the app has even decided offline mode is in play.
-view_at = src.index("struct ServerUnreachableView")
-scoped = src[view_at:]
-resolving_at = scoped.index("if resolving {")
-else_at = scoped.index("} else {")
-offline_button_at = scoped.index('Button("Continue offline", action: offline)')
-guard_at = scoped.index("if BundledShell.root == nil {")
-if not (resolving_at < else_at < offline_button_at < guard_at):
-    sys.stderr.write("FAIL: the no-shell caption must sit after 'Continue offline', inside the not-resolving branch (#155)\n")
+shown = "            if let origin, BundledShell.root != nil {\n"
+caption = '                Text(origin == nil ? "This build has no app origin (DOBBY_PI_HOST)." : "This build has no app shell.")'
+if src.count(shown) != 1 or src.count(caption) != 1 or not src.index(shown) < src.index("            } else {") < src.index(caption):
+    sys.stderr.write("FAIL: ContentView must say which half is missing, in the else-branch of the WebContainer switch (#155, #508)\n")
     sys.exit(1)
 
-print("PASS: ServerUnreachableView tells a never-paired device whether this build has an offline shell before it taps Continue offline (#155)")
+print("PASS: a build with no shell or no origin says so on screen instead of a blank page (#155, #508)")
 CONTENTVIEWPY
 
 # 3. The workflow: a sibling checkout that lands where copy-app-shell.sh already
@@ -2519,8 +2243,6 @@ MEMBERS_WITH_NO_PWA_CALLER = {
                 "read it from inside the literal, so no PWA call site names it.",
     "_setOffline": "called by the WRAPPER, not the PWA — WebBridge.swift callJS pushes the "
                    "index into it. Part C pins those two call sites.",
-    "_piEnabled": "#181: the injected answer piEnabled()/setPiEnabled() read and write from "
-                  "inside the literal, like _offline; no PWA call site names it.",
 }
 
 PWA_CALLS_NOT_DECLARED = {
@@ -2969,11 +2691,9 @@ print("PASS: %d source file(s) carry no Spotify symbol, no openSpotifyLyrics bri
 NOSPOTIFYPY
 
 # ---------------------------------------------------------------------------
-# #181 — "Use a Pi server" on iOS/iPadOS. The rule itself is ServerAddressesCheck's;
-# these pin what no rule test can see: that the injected bridge exposes BOTH functions
-# the PWA gate requires (a bridge with one keeps the settings row hidden while every rule
-# test passes), that start-up consults the setting BEFORE the probe, and that each native
-# Pi leg and the page-origin block are reached on the path production takes.
+# #181, #508 — the Pi is retired. The injected bridge still exposes BOTH functions the PWA
+# gate requires, answering "off" (with no bridge, or only one of the two, the page reads the Pi
+# as ON and opens every Pi route), and the page-origin block is in place before the only load.
 # ---------------------------------------------------------------------------
 DOBBY_PUBLIC_DIR_181="${DOBBY_PUBLIC_DIR:-$PWD/../dobby/Sources/DobbyServer/Public}" \
 python3 - <<'PIGATEPY'
@@ -3033,21 +2753,17 @@ literal = inject[locate(inject, anchor, "BridgeInjection"):locate(inject, "\n   
 # present; strip the page's own comments before counting members (#194).
 literal = strip_js(literal)
 members = {
-    "piEnabled": r"^\s{12}piEnabled:\s*function\s*\(\)\s*\{\s*return this\._piEnabled === true;\s*\},$",
-    "setPiEnabled": r"^\s{12}setPiEnabled:\s*function\s*\(on\)\s*\{\s*this\._piEnabled = on === true;\s*"
-                    r"post\('setPiEnabled', this\._piEnabled\);\s*\},$",
-    "_piEnabled": r'^\s{12}_piEnabled:\s*\\\(piEnabled \? "true" : "false"\),$',
+    "piEnabled": r"^\s{12}piEnabled:\s*function\s*\(\)\s*\{\s*return false;\s*\},$",
+    "setPiEnabled": r"^\s{12}setPiEnabled:\s*function\s*\(\)\s*\{\s*\},$",
 }
 for name, pattern in members.items():
     n = len(re.findall(pattern, literal, re.M))
     if n != 1:
-        fail("window.Dobby must carry exactly one `%s` in its #181 shape, found %d. The PWA gate "
-             "reads BOTH piEnabled and setPiEnabled as functions, piEnabled() synchronously, and "
-             "setPiEnabled must update the value before it posts (the page re-probes right after)"
-             % (name, n))
-if 'static func script(piEnabled: Bool) -> String' not in inject or \
-   'WKUserScript(source: script(piEnabled: ServerAddresses.piEnabled()),' not in inject:
-    fail("BridgeInjection.userScript() must inject the live ServerAddresses.piEnabled() answer")
+        fail("window.Dobby must carry exactly one `%s` in its #508 shape, found %d. The PWA gate "
+             "reads BOTH piEnabled and setPiEnabled as functions; piEnabled() answers false and "
+             "setPiEnabled does nothing" % (name, n))
+if "_piEnabled" in literal or "ServerAddresses.piEnabled" in inject:
+    fail("the bridge carries a Pi setting again; the Pi is retired (#508)")
 
 # --- 2. the PWA gate asks for exactly these names (sibling checkout only) ---------------
 pub = os.environ.get("DOBBY_PUBLIC_DIR_181", "")
@@ -3070,68 +2786,18 @@ if os.path.isfile(gate_file):
 else:
     print("SKIP: no dobby checkout at %r — the PWA gate's name set is unchecked (#181)" % pub)
 
-# --- 3. WebBridge persists and re-injects on the page's call ------------------------------
-wb = read("Dobby/Web/WebBridge.swift")
-arm = wb[locate(wb, 'case "setPiEnabled":', "WebBridge.dispatch"):locate(wb, "case \"downloadNativeOffline\":", "WebBridge.dispatch")] \
-    if wb.count('case "setPiEnabled":') == 1 else fail("WebBridge.dispatch needs one setPiEnabled case")
-ordered(arm, ["guard let on = payload as? Bool", "ServerAddresses.setPiEnabled(on)",
-              "ucc.removeAllUserScripts()", "ucc.addUserScript(BridgeInjection.userScript())",
-              "ucc.removeAllContentRuleLists()", "PiRequestBlock.install(in: ucc, origin: origin)"],
-        "WebBridge setPiEnabled arm")
-
-# --- 4. start-up: the setting is consulted BEFORE the probe, and skips it -----------------
-cv = read("Dobby/ContentView.swift")
-resolve = body(cv, "private func resolve() async", "ContentView.resolve")
-gate_at = resolve.find("if !ServerAddresses.piEnabled() {")
-probe_at = resolve.find("await ServerAddresses.resolve()")
-if gate_at < 0 or probe_at < 0 or gate_at > probe_at:
-    fail("ContentView.resolve() must consult ServerAddresses.piEnabled() before "
-         "`await ServerAddresses.resolve()` fires the probe")
-skip = body(resolve[gate_at:], "if !ServerAddresses.piEnabled() {", "the Pi-off branch")
-for needle in ["if BundledShell.root != nil { continueOffline() }", "return"]:
-    if needle not in skip:
-        fail("the Pi-off start-up branch must `%s`" % needle)
-# #479: the Pi is on and nothing answered: the bundled shell, as Android's resolveAndLoad does,
-# not the blocking "Can't reach Dobby" screen. After the probe, before the DEBUG seam.
-fallback = "if serverURL == nil, BundledShell.root != nil {"
-fb_at = resolve.find(fallback)
-if not (probe_at < fb_at < resolve.find("#if DEBUG")):
-    fail("ContentView.resolve() must fall back to the bundled shell after a failed probe, before the DEBUG seam (#479)")
-fb = body(resolve[fb_at:], fallback, "the Pi-on fallback")
-if not (0 <= fb.find("continueOffline()") < fb.find("return")):
-    fail("the Pi-on fallback must continueOffline() and return (#479)")
-calls = sum(read(os.path.join(d, f)).count("ServerAddresses.resolve()")
-            for d, _, fs in os.walk("Dobby") for f in fs if f.endswith(".swift"))
-if calls != 1:
-    fail("expected ServerAddresses.resolve() called from exactly one place (ContentView), found %d" % calls)
-
-# --- 5. every native Pi leg checks the setting before it sends, in Release too ------------
-api = read("Dobby/Web/ApiSchemeHandler.swift")
-for fn, sender in [("private static func pushSettings(", "Transport.sendSync(request)"),
-                   ("private static func fetchSettings(", "Transport.sendSync(request)")]:
-    b = body(api, fn, fn)
-    gate_at = b.find("if !ServerAddresses.piEnabled() {")
-    endif_at = b.find("#endif")
-    if gate_at < 0 or gate_at > b.find(sender) or (endif_at >= 0 and gate_at < endif_at):
-        fail("%s must check ServerAddresses.piEnabled() outside #if DEBUG and before it sends" % fn)
-intents = read("Dobby/Intents/DobbyIntents.swift")
-books = body(intents, "private func allBooks()", "allBooks")
-if not (0 <= books.find("guard ServerAddresses.piEnabled() else { return [] }") < books.find("URLSession.shared")):
-    fail("the Siri library fetch must check the setting before it reaches the Pi")
-
-# --- 6. the page-origin block is in place before the first load when off ------------------
+# --- 3. the page-origin block is in place before the only load ---------------------------
 wc = read("Dobby/Web/WebContainer.swift")
 make = body(wc, "fileprivate func makeWebView(", "makeWebView")
 if make.count("ucc.addUserScript(BridgeInjection.userScript())") != 1:
     fail("makeWebView must install BridgeInjection.userScript()")
-ordered(make, ["guard !ServerAddresses.piEnabled() else {", "load(loadURL, in: webView)",
-               "await PiRequestBlock.install(in: ucc, origin: url)", "load(loadURL, in: webView)"],
-        "makeWebView Pi-off load order")
-if make.count("load(loadURL, in: webView)") != 2:
-    fail("makeWebView must load in exactly two places (Pi on; Pi off after the block)")
+ordered(make, ["await PiRequestBlock.install(in: ucc, origin: url)", "load(loadURL, in: webView)"],
+        "makeWebView block-then-load order")
+if make.count("load(loadURL, in: webView)") != 1:
+    fail("makeWebView must load in exactly one place, after the page-origin block (#508)")
 
-print("PASS: window.Dobby exposes piEnabled() and setPiEnabled(); start-up consults the setting "
-      "before the probe; push, fetch and Siri legs and the page-origin block honour it (#181)")
+print("PASS: window.Dobby exposes piEnabled() (false) and a no-op setPiEnabled() for the PWA gate, "
+      "and the page-origin block is installed before the only load (#181, #508)")
 PIGATEPY
 
 # #197: the iOS left-edge back swipe. Nothing observable at runtime from here (a gesture
@@ -3583,12 +3249,8 @@ PLAYSVIDEOGATEPY
 # cover beside the audio and hands both to the page in its offline index.
 # Pinned, both ends of each name that crosses the bridge:
 #   OfflineStore: the Entry fields, the dict lines that emit "meta" and "cover" (one exact run
-#     from dict's first line to "if let chapters {", so no early return fits before them), the
-#     fetchBookExtras call on the line after emitBook in startBookDownload, and the whole
-#     bodies of fetchBookExtras, storeBookExtras and backfillBookExtras (the DEBUG
-#     DOBBY_NO_SERVER seam skip first, the #149 rule), one definition of fetchBookExtras.
-#   WebBridge: the backfill on the line right after the ready index push, behind the Pi
-#     setting (ServerAddresses.piEnabled()), outside any #if, and its only caller.
+#     from dict's first line to "if let chapters {", so no early return fits before them).
+#     #508: the fetch and the backfill went with the Pi; what books already saved stays listed.
 #   PWA: nativeOfflineBooks reads e.meta, nativeBookCoverUrl reads e.cover (no-server only),
 #     and loadLibrary merges them at its top level, after the cache fallback, before
 #     renderLibrary and renderOfflineBooks. The behaviour is the PWA's
@@ -3681,93 +3343,6 @@ if store[ds + 1:chap + 1] != DICT_HEAD or not chap < ret:
     fail("Entry.dict must emit meta right after the subs closure, cover right after meta and "
          "chapters right after cover, nothing between: %r" % store[ds + 1:chap + 1])
 
-# The fetch is started by every book download, once the index entry it fills exists.
-bs, be = block(store, r"^    func startBookDownload\(_ json: String\) \{$", "startBookDownload")
-entry = [i for i in range(bs, be) if store[i].startswith("        index[p.bookId] = Entry(")]
-emit = top_level(store, bs, be, "        emitBook(p.bookId)", "startBookDownload")
-call = top_level(store, bs, be, "        if let first = files.first.flatMap({ URL(string: $0.url) }) "
-                 "{ fetchBookExtras(p.bookId, dir: dir, server: first) }", "startBookDownload")
-loop = top_level(store, bs, be, "        for ch in files {", "startBookDownload")
-if len(entry) != 1 or not entry[0] < emit < call < loop or call != emit + 1:
-    fail("startBookDownload must start fetchBookExtras on the line after emitBook, after the index "
-         "entry and before the chapter loop")
-fs_, fe = block(store, r"^    private func fetchBookExtras\(_ bookId: String, dir: URL, server: URL\) \{$", "fetchBookExtras")
-# Whole bodies, line for line (comments stripped): the status gate, the cover rule, the hand-off
-# on main, the meta save, the cover record inside its download callback and the seam skip ahead
-# of the walk all sit where they act; a flipped, dropped, dead-branched, moved or early-returned
-# line fails here (review S6-S9, B1).
-def exact_body(s_, e_, want, what):
-    if store[s_ + 1:e_ + 1] != want:
-        fail("%s no longer reads as pinned: %r" % (what, store[s_ + 1:e_ + 1]))
-exact_body(fs_, fe, [
-    "        guard var c = URLComponents(url: server, resolvingAgainstBaseURL: false),",
-    "              let id = bookId.addingPercentEncoding(withAllowedCharacters: Self.pathSegment) else { return }",
-    "        c.query = nil",
-    "        c.fragment = nil",
-    '        c.percentEncodedPath = "/api/books/" + id',
-    "        guard let metaURL = c.url else { return }",
-    "        session.dataTask(with: metaURL) { [weak self] data, response, _ in",
-    "            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,",
-    "                  let meta = String(data: data, encoding: .utf8),",
-    "                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }",
-    '            let cover = (obj["coverImageURL"] as? String).flatMap { URL(string: $0, relativeTo: metaURL)?.absoluteURL }',
-    '                ?? ((obj["hasCover"] as? Bool) == true ? metaURL.appendingPathComponent("cover") : nil)',
-    "            DispatchQueue.main.async {",
-    "                MainActor.assumeIsolated { self?.storeBookExtras(bookId, meta: meta, cover: cover, dir: dir) }",
-    "            }",
-    "        }.resume()",
-    "    }"], "fetchBookExtras")
-if len([l for l in store if re.search(r"\bfunc\s+fetchBookExtras\s*\(", l)]) != 1:
-    fail("OfflineStore must define fetchBookExtras exactly once; a local one shadows it (review S5)")
-ss, se = block(store, r"^    private func storeBookExtras\(_ bookId: String, meta: String, cover: URL\?, dir: URL\) \{$", "storeBookExtras")
-exact_body(ss, se, [
-    "        guard var e = index[bookId] else { return }",
-    "        e.meta = meta",
-    "        index[bookId] = e",
-    "        saveIndex(bookId)",
-    "        guard let cover else { return }",
-    "        downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in",
-    "            guard ok, let self, var e = self.index[bookId] else { return }",
-    "            e.cover = Self.coverFile",
-    "            self.index[bookId] = e",
-    "            self.saveIndex(bookId)",
-    "        }",
-    "    }"], "storeBookExtras")
-if store.count('    static let coverFile = "cover"') != 1:
-    fail('OfflineStore.coverFile must be the one `static let coverFile = "cover"`')
-ks, ke = block(store, r"^    func backfillBookExtras\(server: URL\) \{$", "backfillBookExtras")
-exact_body(ks, ke, [
-    "        #if DEBUG",
-    '        if ServerAddresses.noServerSeamActive() { NSLog("Dobby offline: book backfill skipped (DOBBY_NO_SERVER seam)"); return }',
-    "        #endif",
-    '        for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {',
-    "            if let dir = contained(id) { fetchBookExtras(id, dir: dir, server: server) }",
-    "        }",
-    "    }"], "backfillBookExtras")
-walk = ks + 4
-files = {}
-for p in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
-    files[p] = store if p == store_path else bridge if p == bridge_path else swift(p)
-fb = calls(files, "fetchBookExtras")
-if sorted(fb) != sorted([(store_path, call), (store_path, walk + 1)]):
-    fail("fetchBookExtras must be called from startBookDownload and backfillBookExtras only: %s" % fb)
-
-# The backfill runs on every page load while the Pi setting is on, on the line right after the
-# index push (review S3), never with the setting off. Pi on but unreachable (Continue offline)
-# passes this gate by design: its GETs fail and the next reachable load backfills.
-cs = [i for i, l in enumerate(bridge) if l == '        case "ready":']
-if len(cs) != 1:
-    fail('WebBridge must have one `case "ready":`')
-ce = next(i for i in range(cs[0] + 1, len(bridge)) if re.match(r"        (case |default:)", bridge[i]))
-push = top_level(bridge, cs[0], ce, '            callJS("window.Dobby && window.Dobby._setOffline(\\(offline.indexJSON()));")', "ready")
-fill = top_level(bridge, cs[0], ce, "            if ServerAddresses.piEnabled(), let origin = webView?.url "
-                 "{ offline.backfillBookExtras(server: origin) }", "ready")
-if fill != push + 1:
-    fail("the backfill must be the line right after the ready index push")
-bf = calls(files, "backfillBookExtras")
-if bf != [(bridge_path, fill)]:
-    fail("backfillBookExtras must be called only from WebBridge's ready: %s" % bf)
-
 pub = os.environ.get("OFFLINEBOOK_PUB", "")
 if not os.path.isfile(os.path.join(pub, "js", "04-library.js")):
     print("SKIP: no dobby checkout at %r; the PWA half of the #210 check needs it" % pub)
@@ -3797,20 +3372,16 @@ if len(rec) != 1 or not rec[0] < merge < lr < ro:
     fail("loadLibrary must merge the wrapper's books after the cache fallback and before "
          "renderLibrary and renderOfflineBooks")
 print("PASS: a book the wrapper downloaded keeps its listing entry and cover in the offline index "
-      "(meta and cover, both ends), fetched on every book download and backfilled on ready with "
-      "the Pi setting on only (DEBUG DOBBY_NO_SERVER seam skipped first), and the Pi-off page "
-      "lists it after the cache fallback and draws its cover (#210)")
+      "(meta and cover, both ends), and the Pi-off page lists it after the cache fallback and "
+      "draws its cover (#210, #508)")
 OFFLINEBOOKMETAPY
 
 # #213: with the Pi setting off the Apple wrapper still started a native book download on the
 # Pi's origin: startBookDownload checked neither ServerAddresses.piEnabled() nor the DEBUG
 # DOBBY_NO_SERVER seam, and URLSession traffic is not WebKit's, so PiRequestBlock never saw it
 # (#210 added fetchBookExtras to the same path). Pinned:
-#   OfflineStore: startBookDownload opens with the seam refusal (#if DEBUG, the #149 form) and
-#     the Pi setting refusal, its first four lines exactly, so nothing (payload decode, folder,
-#     index, fetchBookExtras, URLSession) runs ahead of them; refuseBookDownload's whole body
-#     (a log line and a "kind": "book" error event, no URLSession, no index write), defined
-#     once and called from those two lines only.
+#   OfflineStore: #508, startBookDownload's whole body is the refusal (a log line and a
+#     "kind": "book" error event, no URLSession, no index write).
 #   WebBridge: downloadNativeBook is startBookDownload's only caller.
 #   PWA: toggleNativeBookDownload's gate before its bridge post and updateNativeBookDownloadButton's
 #     gate (remove and cancel kept) read getPiEnabled(), the #200 predicate. The behaviour is the
@@ -3853,34 +3424,20 @@ def calls(name):
     return [(p, i) for p, ls in files.items() for i, l in enumerate(ls)
             if re.search(r"\b%s\(" % name, l) and not re.search(r"\bfunc\s+%s\(" % name, l)]
 
-SEAM = '        if ServerAddresses.noServerSeamActive() { refuseBookDownload(json, "DOBBY_NO_SERVER seam"); return }'
-PI = '        if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }'
+# #508: the Pi is retired and books only ever came from it, so startBookDownload is the refusal
+# alone: a log line and a "kind": "book" error event, no folder, no index write, no URLSession.
 bs, be = block(store, r"^    func startBookDownload\(_ json: String\) \{$", "startBookDownload")
-if store[bs + 1:bs + 5] != ["        #if DEBUG", SEAM, "        #endif", PI] \
-        or not store[bs + 5].startswith("        guard let p = BookDownloadPayload.decode(json)"):
-    fail("startBookDownload must open with the seam refusal and the Pi setting refusal, before the "
-         "payload decode: %r" % store[bs + 1:bs + 6])
-if len([l for l in store if re.search(r"\bfunc\s+startBookDownload\s*\(", l)]) != 1:
-    fail("OfflineStore must define startBookDownload exactly once")
-rs, re_ = block(store, r'^    private func refuseBookDownload\(_ json: String, _ why: String, error: String = "Turn on Use a Pi '
-                  r'server to download this book\."\) \{$', "refuseBookDownload")
-if store[rs + 1:re_ + 1] != [
-        '        NSLog("Dobby offline: book download refused (%@)", why)',
+if store[bs + 1:be + 1] != [
+        '        NSLog("Dobby offline: book download refused (no Pi)")',
         "        guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],",
         '              let bookId = obj["bookId"] as? String, !bookId.isEmpty else { return }',
         '        let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,',
-        '                                "error": error]',
+        '                                "error": "Books came from the Dobby Pi, which is no longer used."]',
         "        if let js = try? jsonString(d) { reportProgress?(js) }",
         "    }"]:
-    fail("refuseBookDownload no longer reads as pinned: %r" % store[rs + 1:re_ + 1])
-if len([l for l in store if re.search(r"\bfunc\s+refuseBookDownload\s*\(", l)]) != 1:
-    fail("OfflineStore must define refuseBookDownload exactly once; a local one shadows it")
-# #243 D1: the payload decode guard answers with it too, on the line after the guard.
-BAD = '            refuseBookDownload(json, "bad book payload", error: "invalid book request"); return'
-if store[bs + 6] != BAD or store[bs + 7] != "        }":
-    fail("startBookDownload's payload decode guard must answer with refuseBookDownload (#243 D1): %r" % store[bs + 5:bs + 8])
-if sorted(calls("refuseBookDownload")) != [(store_path, bs + 2), (store_path, bs + 4), (store_path, bs + 6)]:
-    fail("refuseBookDownload must be called from startBookDownload's two refusals and its decode guard only: %s" % calls("refuseBookDownload"))
+    fail("startBookDownload must only refuse, with a book error event: %r" % store[bs + 1:be + 1])
+if len([l for l in store if re.search(r"\bfunc\s+startBookDownload\s*\(", l)]) != 1:
+    fail("OfflineStore must define startBookDownload exactly once")
 case = [i for i, l in enumerate(bridge) if l == '        case "downloadNativeBook":']
 if len(case) != 1 or bridge[case[0] + 1] != "            if let json = payload as? String { offline.startBookDownload(json) }" \
         or calls("startBookDownload") != [(bridge_path, case[0] + 1)]:
@@ -3894,8 +3451,8 @@ with open(os.path.join(pub, "js", "12-service-worker-offline.js"), encoding="utf
     off = strip_js(f.read()).split("\n")
 ts, te = block(off, r"^function toggleNativeBookDownload\(\) \{$", "toggleNativeBookDownload")
 live = [l for l in off[ts + 1:te] if l.strip()]
-gate = ("  if (!getPiEnabled()) { if (typeof showToast === 'function') showToast('Turn on Use a Pi server "
-        "to download this book.', true); updateDownloadButton(); return; }")
+gate = ("  if (!getPiEnabled()) { if (typeof showToast === 'function') showToast('Books came from the Dobby Pi, "
+        "which is no longer used.', true); updateDownloadButton(); return; }")
 flight = "  if (entry && entry.status === 'downloading') return;   "
 post = [i for i, l in enumerate(live) if "b.downloadNativeBook(" in l]
 if live.count(gate) != 1 or live.count(flight) != 1 or live.index(gate) != live.index(flight) + 1 \
@@ -3917,9 +3474,9 @@ if live[:10] != [
         "  document.getElementById('download-area').style.display = '';"]:
     fail("updateNativeBookDownloadButton must hide the area on getPiEnabled() before showing it, "
          "remove and cancel kept: %r" % live[:10])
-print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startBookDownload refuses "
-      "first, with a book error event and no URLSession, from its one caller, and the page hides the "
-      "download it cannot finish and never posts it, remove and cancel kept (#213)")
+print("PASS: startBookDownload only refuses, with a book error event and no URLSession, from its one "
+      "caller, and the page hides the download it cannot finish and never posts it, remove and "
+      "cancel kept (#213, #508)")
 PIOFFBOOKDOWNLOADPY
 
 # #217: the video half of #213. startDownload (downloadNativeOffline) started URLSession work
@@ -3927,9 +3484,8 @@ PIOFFBOOKDOWNLOADPY
 # with it off), so only the Pi-origin parts are refused: ServerAddresses.isPiOrigin compares the
 # URL's host with every candidate's host (hostless = page-relative = the Pi); its rows are
 # ServerAddressesCheck's piOriginRule. Pinned:
-#   OfflineStore: startDownload's live lines after the payload decode guard are exactly the Pi-off
-#     reason (the setting, then the #if DEBUG seam), the whole-download refusal of a Pi video URL,
-#     then the folder; no URLSession, folder, index or sidecar line runs ahead of the refusal.
+#   OfflineStore: startDownload's live lines after the payload decode guard are exactly the
+#     whole-download refusal of a Pi video URL (#508: unconditional), then the folder; no URLSession, folder, index or sidecar line runs ahead of the refusal.
 #     The Pi subtitle row skip sits right after the sidecar's URL guard, before downloadSidecar.
 #     refuseVideoDownload's whole body (a log line and an error event, no index write), defined
 #     once and called from that one refusal.
@@ -3982,22 +3538,17 @@ opening = [
     "        guard let p = DownloadPayload.decode(json), !p.videoId.isEmpty else {",
     '            NSLog("Dobby offline: bad download payload"); return',
     "        }",
-    '        var piOff: String? = ServerAddresses.piEnabled() ? nil : "Pi disabled by the user setting"',
-    "        #if DEBUG",
-    '        if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }',
-    "        #endif",
-    "        if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }",
+    "        if ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId); return }",
     '        guard let dir = contained(p.videoId) else { NSLog("Dobby offline: bad download payload"); return }']
-if [l for _, l in live[:9]] != opening:
-    fail("startDownload must open with the payload decode, the Pi-off reason (setting, then the "
-         "DEBUG seam) and the Pi video URL refusal, before the folder: %r" % [l for _, l in live[:9]])
-refusal = live[7][0]
-for i, l in live[:7]:
+if [l for _, l in live[:5]] != opening:
+    fail("startDownload must open with the payload decode and the Pi video URL refusal (#508: always, "
+         "the Pi is retired), before the folder: %r" % [l for _, l in live[:5]])
+refusal = live[3][0]
+for i, l in live[:3]:
     if re.search(r"activeBgSession|session\.|downloadSidecar\(|createDirectory|index\[|saveIndex\(|emit\(", l):
         fail("startDownload runs %r before its Pi refusal" % l.strip())
 guard = "                guard let urlStr = s.url, let url = URL(string: urlStr) else { continue }"
-skip = ('                if piOff != nil, ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin '
-        'subtitle skipped (Pi off)"); continue }')
+skip = '                if ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin subtitle skipped"); continue }'
 body = [l for _, l in live]
 if body.count(guard) != 1 or body.count(skip) != 1 or body.index(skip) != body.index(guard) + 1 \
         or body.index(skip) > next(k for k, l in enumerate(body) if "downloadSidecar(url, to: dest)" in l):
@@ -4009,10 +3560,10 @@ if len([l for ls in files.values() for l in ls if re.search(r"\bfunc\s+isPiOrigi
     fail("ServerAddresses must define isPiOrigin once, defaulting to the unfiltered candidates(rule: .keepAll) (#245)")
 if len([l for l in store if re.search(r"\bfunc\s+startDownload\s*\(", l)]) != 1:
     fail("OfflineStore must define startDownload exactly once")
-rs, re_ = block(store, r"^    private func refuseVideoDownload\(_ videoId: String, _ why: String\) \{$", "refuseVideoDownload")
+rs, re_ = block(store, r"^    private func refuseVideoDownload\(_ videoId: String\) \{$", "refuseVideoDownload")
 if store[rs + 1:re_ + 1] != [
-        '        NSLog("Dobby offline: video download refused (%@)", why)',
-        '        emit(videoId, status: "error", bytes: 0, total: 0, error: "Turn on Use a Pi server to download this video.")',
+        '        NSLog("Dobby offline: video download refused (Pi origin)")',
+        '        emit(videoId, status: "error", bytes: 0, total: 0, error: "This video was on the Dobby Pi, which is no longer used.")',
         "    }"]:
     fail("refuseVideoDownload no longer reads as pinned: %r" % store[rs + 1:re_ + 1])
 if len([l for l in store if re.search(r"\bfunc\s+(refuseVideoDownload|emit)\s*\(", l)]) != 2:
@@ -4035,8 +3586,8 @@ for n in ("07-bookmarks.js", "21-android-tv.js", "12-service-worker-offline.js")
 ss, se = block(js["07-bookmarks.js"], r"^function startVideoDownload\(vid, streamUrl, stream\) \{$", "startVideoDownload")
 live = [l for l in js["07-bookmarks.js"][ss + 1:se] if l.strip()]
 if live[:2] != [
-        "  if (isDobbyWrapper() && !getPiEnabled() && isPiOriginUrl(streamUrl)) { showToast('Turn on Use a "
-        "Pi server to download this video.', true); return; }",
+        "  if (isDobbyWrapper() && !getPiEnabled() && isPiOriginUrl(streamUrl)) { showToast('This video was on "
+        "the Dobby Pi, which is no longer used.', true); return; }",
         "  if (dobbyTvNative.startDownload(vid, streamUrl, stream)) return;"]:
     fail("startVideoDownload must open with the Pi gate, before the native and service worker posts: %r" % live[:2])
 ns, ne = block(js["21-android-tv.js"], r"^  function startDownload\(vid, streamUrl, stream\) \{$", "startDownload (page)")
@@ -4047,10 +3598,9 @@ if live.count(row) != 1 or live[live.index(row) - 1] != "                if (!ur
     fail("dobbyTvNative.startDownload must drop a Pi subtitle row after the empty-row drop, before building it")
 if len([l for l in js["12-service-worker-offline.js"] if re.search(r"^function isPiOriginUrl\(url\) \{$", l)]) != 1:
     fail("12-service-worker-offline.js must define isPiOriginUrl once")
-print("PASS: with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam) startDownload refuses a "
-      "Pi-origin video URL first, with an error event and no URLSession, and skips a Pi-origin "
-      "subtitle row, from its one caller; a hosted or direct link still downloads; the page holds "
-      "back the same two before posting (#217)")
+print("PASS: startDownload refuses a Pi-origin video URL first (#508: always), with an error event "
+      "and no URLSession, and skips a Pi-origin subtitle row, from its one caller; a hosted or direct "
+      "link still downloads; the page holds back the same two before posting (#217)")
 PIOFFVIDEODOWNLOADPY
 
 # ---------------------------------------------------------------------------

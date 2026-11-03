@@ -22,8 +22,10 @@ Pushes to `main` auto-release to TestFlight via GitHub Actions.
 
 The Pi's https name (`<pi>.<tailnet>.ts.net`) is not in this repo. Export
 `DOBBY_PI_HOST` before any of the builds above (CI takes it from the
-`DOBBY_PI_HOST` repo secret); xcodebuild expands it into `WKAppBoundDomains`,
-which iOS needs to load the Pi at all, and it becomes the default address.
-It is also the origin the web data lives under, so `install.sh` and the
+`DOBBY_PI_HOST` repo secret); xcodebuild expands it into `WKAppBoundDomains`.
+The Pi is retired and no build contacts it (#508), but that name is still the
+origin the bundled app and its web data (settings, downloads index, sync state)
+live under, so it must keep its exact value forever. `install.sh` and the
 TestFlight workflow refuse to build without it (`scripts/mac-release.sh` must
-have it exported too). A Debug build without it has no default Pi address.
+have it exported too). A Debug build without it, on a device that stored no
+other origin, says so on screen instead of starting.

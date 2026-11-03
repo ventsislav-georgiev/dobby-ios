@@ -78,16 +78,11 @@ final class OfflineStore: NSObject, ObservableObject {
         guard let p = DownloadPayload.decode(json), !p.videoId.isEmpty else {
             NSLog("Dobby offline: bad download payload"); return
         }
-        // #217: URLSession is not WebKit, so PiRequestBlock never sees this. Unlike a book, a
-        // video need not come from the Pi (a hosted or direct link downloads fine with it off),
-        // so with the Pi setting off (or the DEBUG DOBBY_NO_SERVER seam, the #149 rule) only the
-        // Pi-origin parts are refused: a Pi video URL refuses the whole download, a Pi subtitle
-        // row is skipped. Before the folder, the index and any URLSession task.
-        var piOff: String? = ServerAddresses.piEnabled() ? nil : "Pi disabled by the user setting"
-        #if DEBUG
-        if ServerAddresses.noServerSeamActive() { piOff = "DOBBY_NO_SERVER seam" }
-        #endif
-        if let why = piOff, ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId, why); return }
+        // #217, #508: URLSession is not WebKit, so PiRequestBlock never sees this. The page's
+        // origin is the retired Pi's name, so only the Pi-origin parts are refused: a Pi video
+        // URL refuses the whole download, a Pi subtitle row is skipped. Before the folder, the
+        // index and any URLSession task.
+        if ServerAddresses.isPiOrigin(p.url) { refuseVideoDownload(p.videoId); return }
         guard let dir = contained(p.videoId) else { NSLog("Dobby offline: bad download payload"); return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -97,7 +92,7 @@ final class OfflineStore: NSObject, ObservableObject {
         if let subs = p.subs {
             for s in subs {
                 guard let urlStr = s.url, let url = URL(string: urlStr) else { continue }
-                if piOff != nil, ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin subtitle skipped (Pi off)"); continue }
+                if ServerAddresses.isPiOrigin(urlStr) { NSLog("Dobby offline: Pi-origin subtitle skipped"); continue }
                 let name = "sub-\(abs((s.lang ?? s.label ?? urlStr).hashValue)).\(subExt(s.mimeType, urlStr))"
                 let dest = dir.appendingPathComponent(name)
                 downloadSidecar(url, to: dest) { [weak self] ok in
@@ -126,123 +121,26 @@ final class OfflineStore: NSObject, ObservableObject {
 
     /// #217: an error event the page's handleDownloadProgress already renders (a toast and
     /// the button re-read). Reports only; the index and the video's folder stay as they were.
-    private func refuseVideoDownload(_ videoId: String, _ why: String) {
-        NSLog("Dobby offline: video download refused (%@)", why)
-        emit(videoId, status: "error", bytes: 0, total: 0, error: "Turn on Use a Pi server to download this video.")
+    private func refuseVideoDownload(_ videoId: String) {
+        NSLog("Dobby offline: video download refused (Pi origin)")
+        emit(videoId, status: "error", bytes: 0, total: 0, error: "This video was on the Dobby Pi, which is no longer used.")
     }
 
     // MARK: Bridge actions — BOOK (multi-chapter, background)
 
+    /// #213, #508: every chapter came from the Pi, which is retired, so nothing starts and an
+    /// existing entry is untouched. Audiobooks are hidden; how they come back is a later decision.
+    /// The answer is an error event the page's handleNativeBookProgress already renders (a toast
+    /// and the button re-read). #243 D1: the bookId is read loosely; a payload with no bookId
+    /// string has nothing to address, so it is logged only.
     func startBookDownload(_ json: String) {
-        // #213: every chapter and the #210 extras come from the Pi, and URLSession traffic is
-        // not WebKit's, so PiRequestBlock never sees it. With the Pi setting off (or the DEBUG
-        // DOBBY_NO_SERVER seam, the #149 rule) nothing starts, and an existing entry is untouched.
-        #if DEBUG
-        if ServerAddresses.noServerSeamActive() { refuseBookDownload(json, "DOBBY_NO_SERVER seam"); return }
-        #endif
-        if !ServerAddresses.piEnabled() { refuseBookDownload(json, "Pi disabled by the user setting"); return }
-        guard let p = BookDownloadPayload.decode(json), !p.bookId.isEmpty, !p.chapters.isEmpty, let dir = contained(p.bookId), p.chapters.allSatisfy({ contained(p.bookId, $0.fileName) != nil }) else {
-            refuseBookDownload(json, "bad book payload", error: "invalid book request"); return
-        }
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        // Dedup chapter files (multiple chapters can share one file).
-        var seen = Set<String>()
-        let files = p.chapters.filter { seen.insert($0.fileName).inserted }
-
-        index[p.bookId] = Entry(videoId: p.bookId, kind: "book", title: p.title ?? "", path: nil, subs: [],
-                                chapters: files.map { ChapterFile(name: $0.fileName, status: "downloading") },
-                                bytes: 0, total: 0, status: "downloading")
-        saveIndex(p.bookId)
-        emitBook(p.bookId)
-        if let first = files.first.flatMap({ URL(string: $0.url) }) { fetchBookExtras(p.bookId, dir: dir, server: first) }
-
-        for ch in files {
-            guard let url = URL(string: ch.url) else { markChapter(p.bookId, ch.fileName, "error"); continue }
-            let key = "book\t\(p.bookId)\t\(ch.fileName)"
-            let task = activeBgSession.downloadTask(with: url)
-            task.taskDescription = key
-            tasks[key] = task
-            task.resume()
-        }
-    }
-
-    /// #213: an error event the page's handleNativeBookProgress already renders (a toast and
-    /// the button re-read). Reports only; the index and the book's folder stay as they were.
-    /// #243 D1: also the answer to a payload startBookDownload cannot use, so the bookId is read
-    /// loosely: a chapter row that fails the typed decode must not silence the event. Ceiling: a
-    /// payload with no bookId string has nothing to address, so it is logged only.
-    private func refuseBookDownload(_ json: String, _ why: String, error: String = "Turn on Use a Pi server to download this book.") {
-        NSLog("Dobby offline: book download refused (%@)", why)
+        NSLog("Dobby offline: book download refused (no Pi)")
         guard let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
               let bookId = obj["bookId"] as? String, !bookId.isEmpty else { return }
         let d: [String: Any] = ["videoId": bookId, "kind": "book", "status": "error", "bytes": 0, "total": 0,
-                                "error": error]
+                                "error": "Books came from the Dobby Pi, which is no longer used."]
         if let js = try? jsonString(d) { reportProgress?(js) }
     }
-
-    /// #210: a downloaded book's listing entry and cover, kept beside its audio. The Pi-off
-    /// page lists, opens and draws the book from these (`nativeOfflineBooks` and
-    /// `nativeBookCoverUrl` in the PWA's js/12-service-worker-offline.js). Without them it
-    /// had only the service worker's Cache Storage, which a Pi-off page may not have (no
-    /// service worker on an origin outside WKAppBoundDomains, a first load, eviction), and
-    /// `PiRequestBlock` refuses the Pi's cover URL whatever that cache holds. Fetched
-    /// natively from `server`'s origin (only scheme, host and port are read), so it needs
-    /// nothing from the page.
-    private func fetchBookExtras(_ bookId: String, dir: URL, server: URL) {
-        guard var c = URLComponents(url: server, resolvingAgainstBaseURL: false),
-              let id = bookId.addingPercentEncoding(withAllowedCharacters: Self.pathSegment) else { return }
-        c.query = nil
-        c.fragment = nil
-        c.percentEncodedPath = "/api/books/" + id
-        guard let metaURL = c.url else { return }
-        session.dataTask(with: metaURL) { [weak self] data, response, _ in
-            guard (response as? HTTPURLResponse)?.statusCode == 200, let data,
-                  let meta = String(data: data, encoding: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-            // The page's own rule (renderBookItem): coverImageURL wins, else the Pi's cover.
-            let cover = (obj["coverImageURL"] as? String).flatMap { URL(string: $0, relativeTo: metaURL)?.absoluteURL }
-                ?? ((obj["hasCover"] as? Bool) == true ? metaURL.appendingPathComponent("cover") : nil)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.storeBookExtras(bookId, meta: meta, cover: cover, dir: dir) }
-            }
-        }.resume()
-    }
-
-    /// #210: a book finished before this build has audio but no listing entry, so the Pi-off
-    /// page still could not list it. Called with the page's origin on every page load while
-    /// the Pi setting is on (WebBridge `ready`); a no-op once every finished book has its
-    /// entry. A Pi that is on but unreachable (Continue offline) only gets GETs that fail,
-    /// and the next reachable load backfills.
-    func backfillBookExtras(server: URL) {
-        // #149 rule, as ApiSchemeHandler's pushSettings/fetchSettings: DOBBY_NO_SERVER removes
-        // the Pi from this leg too, so a seam-driven Pi-off round sends nothing to a real Pi.
-        #if DEBUG
-        if ServerAddresses.noServerSeamActive() { NSLog("Dobby offline: book backfill skipped (DOBBY_NO_SERVER seam)"); return }
-        #endif
-        for (id, e) in index where e.kind == "book" && e.status == "complete" && e.meta == nil {
-            if let dir = contained(id) { fetchBookExtras(id, dir: dir, server: server) }
-        }
-    }
-
-    private func storeBookExtras(_ bookId: String, meta: String, cover: URL?, dir: URL) {
-        guard var e = index[bookId] else { return }   // cancelled meanwhile
-        e.meta = meta
-        index[bookId] = e
-        saveIndex(bookId)
-        guard let cover else { return }
-        downloadSidecar(cover, to: dir.appendingPathComponent(Self.coverFile)) { [weak self] ok in
-            guard ok, let self, var e = self.index[bookId] else { return }
-            e.cover = Self.coverFile
-            self.index[bookId] = e
-            self.saveIndex(bookId)
-        }
-    }
-
-    /// No extension on purpose: a cover may be a JPEG or a PNG, and WebKit decodes an
-    /// image by its bytes, not by the scheme handler's `application/octet-stream`.
-    static let coverFile = "cover"
-    private static let pathSegment = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
     /// #502: cancelling a replacement download (a video whose entry already has its finished file,
     /// the only place `path` is set) stops the transfer and keeps that earlier copy: folder, entry,
@@ -589,18 +487,3 @@ struct DownloadPayload: Decodable {
     }
 }
 
-struct BookDownloadPayload: Decodable {
-    let bookId: String
-    let title: String?
-    let chapters: [BookChapter]
-
-    struct BookChapter: Decodable {
-        let fileName: String
-        let url: String
-    }
-
-    static func decode(_ json: String) -> BookDownloadPayload? {
-        guard let data = json.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(BookDownloadPayload.self, from: data)
-    }
-}

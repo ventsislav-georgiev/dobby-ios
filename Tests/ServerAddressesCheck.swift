@@ -1,42 +1,21 @@
 import Foundation
 
-// #068: the timeout-staging decision in ServerAddresses.classify(connected:httpStatus:),
-// checked as a pure function — no networking, no simulator. Same standalone-binary
-// pattern as ApiSchemeHandlerCheck (see its header for why there is no XCTest target).
+// #508: what is left of ServerAddresses once the Pi is retired: the origin the bundled shell's
+// data is keyed to, and the Pi-origin identity rule. No networking, no simulator. Same
+// standalone-binary pattern as ApiSchemeHandlerCheck (see its header for why there is no XCTest target).
 //
 //   ./Tests/run-checks.sh
 
 @main
 enum ServerAddressesCheck {
-    static func main() async {
-        if CommandLine.arguments.contains("--expect-no-server") {
-            await expectNoServer()
-            return
-        }
-        classification()
+    static func main() {
         normalization()
-        noServerSeam()
-        autoOfflineSeam()
-        piEnabledPersistence()
         piOriginRule()
         appBoundRule()
-        appBoundStoreAndCandidates()
+        originFromStoredKeys()
         appBoundPlatformPin()
         piOriginIgnoresTheAppBoundFilter()
-        piOriginAfterAProductionPush()
-        addressEditorPin()
         print("ServerAddressesCheck: all checks passed")
-    }
-
-    /// Wiring pin for the #068 seam (run-checks.sh builds a separate `-D DEBUG` binary, OUT3,
-    /// and runs `DOBBY_NO_SERVER=1 "$OUT3" --expect-no-server`): unlike
-    /// `noServerSeam()` below, which only pins how the predicate parses its input, this exercises
-    /// the actual call site in `probe(_:)` through `resolve()` — it fails if the guard is ever
-    /// deleted or moved out from under the DEBUG gate.
-    static func expectNoServer() async {
-        let resolved = await ServerAddresses.resolve()
-        check(resolved == nil, "DOBBY_NO_SERVER=1 makes resolve() report every candidate absent")
-        print("ServerAddressesCheck --expect-no-server: seam wiring verified")
     }
 
     static func check(_ condition: Bool, _ what: String) {
@@ -46,32 +25,7 @@ enum ServerAddressesCheck {
         }
     }
 
-    // MARK: connect-vs-read staging (task #068, Android citations in ServerAddresses.swift)
-
-    static func classification() {
-        // "HTTP 200 in 800 ms" — answered inside the short budget: present.
-        check(ServerAddresses.classify(connected: true, httpStatus: 200) == .present,
-              "a 2xx inside the short budget is present")
-        check(ServerAddresses.classify(connected: true, httpStatus: 301) == .present,
-              "a redirect still counts as an answer (existing 200..<400 rule, unchanged)")
-
-        // "connected at 300 ms, no bytes by 1500 ms" — TCP/TLS went through, nothing
-        // answered yet: present-slow, worth the long budget, not absent.
-        check(ServerAddresses.classify(connected: true, httpStatus: nil) == .presentSlow,
-              "connected but no response yet is present-slow")
-
-        // "no connection by 1500 ms" — never got as far as connecting: absent, and a
-        // longer wait would not change that (Android's CONNECT_TIMEOUT_MS reasoning).
-        check(ServerAddresses.classify(connected: false, httpStatus: nil) == .absent,
-              "never connected is absent")
-
-        // A fronter that accepted the TCP/TLS handshake and then answered with a server
-        // error is still a rejection, not a hang — must not read as present-slow.
-        check(ServerAddresses.classify(connected: true, httpStatus: 502) == .absent,
-              "connected, then a 5xx, is absent — not presentSlow")
-    }
-
-    // MARK: normalize() is unchanged by #068, spot-checked so the check file exercises it
+    // MARK: normalize(), which reads every stored address
 
     static func normalization() {
         check(ServerAddresses.normalize("192.0.2.31:8080")?.absoluteString == "http://192.0.2.31:8080",
@@ -80,39 +34,6 @@ enum ServerAddressesCheck {
               == "https://pi.example.ts.net", "an explicit https origin round-trips")
         check(ServerAddresses.normalize("ftp://x") == nil, "a non-http(s) scheme is refused")
         check(ServerAddresses.normalize("   ") == nil, "blank input is refused")
-    }
-
-    /// #068 device done-condition test seam.
-    static func noServerSeam() {
-        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "1"]) == true,
-              "DOBBY_NO_SERVER=1 activates the seam")
-        check(ServerAddresses.noServerSeamActive([:]) == false,
-              "seam is off when the var is unset")
-        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "0"]) == false,
-              "any value other than exactly \"1\" leaves the seam off")
-        check(ServerAddresses.noServerSeamActive(["DOBBY_NO_SERVER": "true"]) == false,
-              "no truthy-string coercion — exact match only")
-    }
-
-    /// #181, #479: the Pi setting through the stored keys. Only an explicit on enables the
-    /// Pi: a fresh install AND a device that once reached a Pi (a stored last known-good)
-    /// start Pi-less, so neither probes or lands on "Can't reach Dobby".
-    static func piEnabledPersistence() {
-        let suite = "dobby.check.piEnabled.\(ProcessInfo.processInfo.processIdentifier)"
-        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
-        defer { defaults.removePersistentDomain(forName: suite) }
-        check(ServerAddresses.piEnabled(defaults) == false, "a fresh install is Pi-less")
-        defaults.set("http://192.0.2.31:8080", forKey: "dobby.serverAddresses.lastGood")
-        check(ServerAddresses.piEnabled(defaults) == false, "#479 a device that reached a Pi before still starts Pi-less")
-        ServerAddresses.setPiEnabled(true, defaults)
-        check(ServerAddresses.piEnabled(defaults) == true, "an explicit on with a stored origin uses the Pi")
-        ServerAddresses.setPiEnabled(false, defaults)
-        check(ServerAddresses.piEnabled(defaults) == false, "an explicit off holds with a stored origin")
-        check(defaults.string(forKey: "dobby.serverAddresses.lastGood") == "http://192.0.2.31:8080",
-              "#479 the stored origin survives every answer (the bundled shell's storage is keyed to it)")
-        defaults.removeObject(forKey: "dobby.serverAddresses.lastGood")
-        ServerAddresses.setPiEnabled(true, defaults)
-        check(ServerAddresses.piEnabled(defaults) == true, "an explicit on holds with no stored origin")
     }
 
     /// #217: the video download gate's origin test. Host against every candidate's host,
@@ -130,17 +51,6 @@ enum ServerAddressesCheck {
         check(!ServerAddresses.isPiOrigin("https://pi.example.invalid.cdn.example.net/x", candidates: pi), "a host that only starts like the Pi is not the Pi")
         check(!ServerAddresses.isPiOrigin(nil, candidates: pi), "no URL is nothing to fetch")
         check(!ServerAddresses.isPiOrigin("https://cdn.example.net/x", candidates: []), "no candidates means nothing is the Pi")
-    }
-
-    static func autoOfflineSeam() {
-        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "1"]) == true,
-              "DOBBY_AUTO_OFFLINE=1 activates the seam")
-        check(ServerAddresses.autoOfflineSeamActive([:]) == false,
-              "seam is off when the var is unset")
-        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "0"]) == false,
-              "any value other than exactly \"1\" leaves the seam off")
-        check(ServerAddresses.autoOfflineSeamActive(["DOBBY_AUTO_OFFLINE": "true"]) == false,
-              "no truthy-string coercion — exact match only")
     }
 
     /// #245: the domains the app ships. #491: Dobby/Info.plist carries only the build setting
@@ -183,37 +93,35 @@ enum ServerAddressesCheck {
         }
     }
 
-    static func appBoundStoreAndCandidates() {
-        let suite = "dobby.check.appBound.\(ProcessInfo.processInfo.processIdentifier)"
+    /// #508: the owner-data pin. The origin is the first candidate over the keys earlier builds
+    /// wrote, in their order (last known-good, the pushed list, the build's name), which is the
+    /// origin the old Pi-less start (`continueOffline`) loaded. The key names are seeded as literals
+    /// here, so renaming one, or reordering, moves the origin and fails this.
+    static func originFromStoredKeys() {
+        let suite = "dobby.check.origin.\(ProcessInfo.processInfo.processIdentifier)"
         guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
         defer { defaults.removePersistentDomain(forName: suite) }
         let good = piHost
-        let push = "[\"192.0.2.10:8080\", \"https://dobby.example.com\", \"http://box.home.arpa:8080\", \"\(good.absoluteString)\"]"
-
-        ServerAddresses.store(json: push, defaults, rule: iOSDevice)
-        check(ServerAddresses.stored(defaults).count == 4 && ServerAddresses.candidates(defaults, rule: iOSDevice) == [good],
-              "#245 storeFilter: iOS stores a mixed push whole and probes only its app-bound entry")
-        ServerAddresses.store([good], defaults, rule: iOSDevice)
-        ServerAddresses.store(json: "[\"192.0.2.10:8080\", \"https://dobby.example.com\"]", defaults, rule: iOSDevice)
-        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: a push with nothing usable never erases the stored list")
-        ServerAddresses.store(refused, defaults, rule: iOSDevice)
-        check(ServerAddresses.stored(defaults) == [good], "#245 storeFilter: the native editor path drops the same entries")
-
-        ServerAddresses.store(json: push, defaults, rule: unenforced)
-        check(ServerAddresses.stored(defaults).count == 4, "#245 storeFilter: macOS stores every entry of the push")
-
-        // A last known-good and a list written before the guard: skipped on iOS, not cleared.
+        check(ServerAddresses.origin(defaults, rule: iOSDevice) == nil,
+              "#508 origin: nothing stored and no build name (no Info.plist here) is no origin")
+        defaults.set(["192.0.2.10:8080", "https://dobby.example.com", "http://box.home.arpa:8080", good.absoluteString],
+                     forKey: "dobby.serverAddresses")
+        check(ServerAddresses.origin(defaults, rule: iOSDevice) == good,
+              "#508 origin: on iOS the first app-bound entry of the stored list")
+        check(ServerAddresses.origin(defaults, rule: unenforced)?.absoluteString == "http://192.0.2.10:8080",
+              "#508 origin: on macOS the first stored entry, LAN address included")
+        // #245: a last known-good written before the iOS guard is skipped there, not cleared.
         defaults.set("http://192.0.2.10:8080", forKey: "dobby.serverAddresses.lastGood")
         check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [good],
-              "#245 candidatesSkip: iOS never probes a non-app-bound lastGood or legacy entry, only the app-bound one")
+              "#245 candidatesSkip: iOS never picks a non-app-bound lastGood or legacy entry, only the app-bound one")
         check(defaults.string(forKey: "dobby.serverAddresses.lastGood") == "http://192.0.2.10:8080",
               "#245 candidatesSkip: the stored lastGood is kept, not cleared")
         check(ServerAddresses.candidates(defaults, rule: unenforced).map(\.absoluteString)
               == ["http://192.0.2.10:8080", "https://dobby.example.com", "http://box.home.arpa:8080", good.absoluteString],
               "#245 candidatesSkip: macOS keeps the order lastGood, list, default with every entry")
-        defaults.set(good.absoluteString, forKey: "dobby.serverAddresses.lastGood")
-        check(ServerAddresses.candidates(defaults, rule: iOSDevice).first == good,
-              "#245 candidatesSkip: an app-bound lastGood still goes first on iOS")
+        defaults.set("https://PI.example.ts.net/some/path", forKey: "dobby.serverAddresses.lastGood")
+        check(ServerAddresses.origin(defaults, rule: iOSDevice)?.absoluteString == "https://PI.example.ts.net",
+              "#508 origin: the stored last known-good wins, normalized exactly as before (path dropped, host case kept)")
     }
 
     /// The platform switch itself: this check runs on macOS, where the guard must be off, and
@@ -252,36 +160,5 @@ enum ServerAddressesCheck {
         let decl = "    static func isPiOrigin(_ raw: String?, candidates: [URL] = candidates(rule: .keepAll)) -> Bool {\n"
         check(src.components(separatedBy: decl).count == 2,
               "#245 piOriginUnfiltered: isPiOrigin defaults to the unfiltered candidates(rule: .keepAll)")
-    }
-
-    /// #245 review 2: the production write path. WebBridge hands the PWA push to store(json:), so
-    /// a Pi LAN address pushed there must still be the Pi afterwards (the #217 refusal).
-    static func piOriginAfterAProductionPush() {
-        let suite = "dobby.check.piOriginPush.\(ProcessInfo.processInfo.processIdentifier)"
-        guard let defaults = UserDefaults(suiteName: suite) else { check(false, "test defaults suite"); return }
-        defer { defaults.removePersistentDomain(forName: suite) }
-        ServerAddresses.store(json: "[\"http://192.0.2.10:8080\", \"\(piHost.absoluteString)\"]", defaults, rule: iOSDevice)
-        check(ServerAddresses.isPiOrigin("http://192.0.2.10:8080/x.mkv", candidates: ServerAddresses.candidates(defaults, rule: .keepAll)),
-              "#245 piOriginAfterPush: a Pi LAN address pushed through store(json:) on iOS is still the Pi")
-        check(ServerAddresses.candidates(defaults, rule: iOSDevice) == [piHost],
-              "#245 piOriginAfterPush: and it is never probed on iOS")
-    }
-
-    /// #245 review 2: AddressEditor is a SwiftUI view with no host runtime here, so textual: it
-    /// prefills from the unfiltered list and carries the iOS-only fixed caption.
-    static func addressEditorPin() {
-        let src = (try? String(contentsOfFile: "Dobby/ContentView.swift", encoding: .utf8)) ?? ""
-        guard let at = src.range(of: "private struct AddressEditor: View {") else {
-            check(false, "#245 addressEditorPin: AddressEditor found in ContentView.swift"); return
-        }
-        let editor = String(src[at.lowerBound...])
-        let prefill = "    @State private var text = ServerAddresses.candidates(rule: .keepAll).map(\\.absoluteString).joined(separator: \"\\n\")\n"
-        check(editor.components(separatedBy: prefill).count == 2 && editor.components(separatedBy: "@State private var text").count == 2,
-              "#245 addressEditorPin: AddressEditor prefills from the unfiltered candidates(rule: .keepAll)")
-        let caption = "            #if os(iOS)\n            // #245: the PWA's Settings note, word for word. Fixed text: no name, no address.\n"
-            + "            Text(\"Only the https Tailscale address works on iPhone and iPad; the others are ignored on this device.\")\n"
-            + "                .font(.caption).foregroundStyle(.secondary)\n            #endif\n"
-        check(editor.components(separatedBy: caption).count == 2,
-              "#245 addressEditorPin: AddressEditor carries the fixed iOS-only caption under the editor")
     }
 }

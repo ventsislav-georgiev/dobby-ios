@@ -88,9 +88,6 @@ extension WebBridge: WKScriptMessageHandler {
         case "ready":
             NSLog("%@", "Dobby ready bridge \(String(describing: payload))")
             callJS("window.Dobby && window.Dobby._setOffline(\(offline.indexJSON()));")
-            // #210: Pi setting on only; with it off nothing may reach the Pi. The DEBUG
-            // DOBBY_NO_SERVER seam is checked inside backfillBookExtras.
-            if ServerAddresses.piEnabled(), let origin = webView?.url { offline.backfillBookExtras(server: origin) }
             pushCarRoute(playback.carRoute.isCar)   // page reload lost the latched value
             #if os(macOS)
             Updater.shared.repush()                 // and the update stamp with it (#464)
@@ -115,25 +112,6 @@ extension WebBridge: WKScriptMessageHandler {
             #if DEBUG
             if let step = ProcessInfo.processInfo.environment["DOBBY_SETTINGS_SELFTEST"] { SettingsSelfTest.run(step, in: webView) }
             #endif
-        // Web app pushes the canonical address list (Settings → Dobby server
-        // addresses) on every load. Cached so the next cold start finds the server
-        // on a different network without anyone touching a setting.
-        case "setServerAddresses":
-            if let json = payload as? String { ServerAddresses.store(json: json) }
-        // #181: "Use a Pi server" from the settings page. Persisted for the next launch's
-        // probe decision (ContentView.resolve); the settings legs read it on every call,
-        // and the origin block and the injected value follow it live.
-        case "setPiEnabled":
-            guard let on = payload as? Bool, let webView else { return }
-            ServerAddresses.setPiEnabled(on)
-            let ucc = webView.configuration.userContentController
-            ucc.removeAllUserScripts()
-            ucc.addUserScript(BridgeInjection.userScript())
-            if on {
-                ucc.removeAllContentRuleLists()
-            } else if let origin = webView.url {
-                Task { await PiRequestBlock.install(in: ucc, origin: origin) }
-            }
         case "downloadNativeOffline":
             if let json = payload as? String { offline.startDownload(json) }
         case "downloadNativeBook":
