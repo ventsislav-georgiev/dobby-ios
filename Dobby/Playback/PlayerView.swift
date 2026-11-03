@@ -17,7 +17,7 @@ struct PlayerView: View {
     @EnvironmentObject var playback: PlaybackCoordinator
     @ObservedObject var time: ControllerTimeModel
     @ObservedObject var subtitles: SubtitleModel
-    @StateObject var controls = PlayerControls()
+    @StateObject var controls: PlayerControls
     let url: URL
 
     @State var scrub = ScrubState()
@@ -43,10 +43,13 @@ struct PlayerView: View {
     @State private var keyMonitor: Any?
     #endif
 
-    init(url: URL, time: ControllerTimeModel, subtitles: SubtitleModel) {
+    init(url: URL, time: ControllerTimeModel, subtitles: SubtitleModel, playback: PlaybackCoordinator) {
         self.url = url
         self.time = time
         self.subtitles = subtitles
+        // #525: the controls hold the coordinator from the first body. Set in onAppear (after
+        // it, and not published), the preparing screen kept an empty title and the default tint.
+        _controls = StateObject(wrappedValue: PlayerControls(playback: playback))
     }
 
     var body: some View {
@@ -124,7 +127,7 @@ struct PlayerView: View {
         .animation(.easeInOut(duration: 0.18), value: controls.visible)
         .animation(.easeInOut(duration: 0.12), value: controls.toast)
         .animation(.easeInOut(duration: 0.16), value: controls.sheet)
-        .onAppear { controls.playback = playback; installInput() }
+        .onAppear { installInput() }
         .onDisappear { removeInput(); controls.exitFullscreenIfNeeded() }
         // #131: deliberately on the root, not on the Slider. If the control bar is torn
         // out mid-drag the Slider's gesture dies with it, but `sliderTouch` lives on this

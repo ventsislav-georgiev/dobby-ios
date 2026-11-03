@@ -22,8 +22,9 @@ extension PlayerView {
     }
 }
 
-/// Black screen, the title bottom-left breathing 1 to 0.5 every 950 ms, the accent
-/// "STARTING NOW" kicker under it (Android px halved: 900 px title width, 64 px margins).
+/// Black screen, the launch trace centred (#525: something always moves), the title bottom-left
+/// breathing 1 to 0.5 every 950 ms, the accent "STARTING NOW" kicker under it (Android px
+/// halved: 900 px title width, 64 px margins).
 private struct PreparingScreen: View {
     let title: String
     let accent: Color
@@ -31,6 +32,8 @@ private struct PreparingScreen: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             Color.black.ignoresSafeArea()
+            TraceLoader(color: accent)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(alignment: .leading, spacing: 7) {
                 TimelineView(.animation) { tl in
                     let t = tl.date.timeIntervalSinceReferenceDate
