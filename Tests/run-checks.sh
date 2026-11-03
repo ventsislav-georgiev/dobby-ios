@@ -2062,7 +2062,7 @@ names = [
     ("name: Upload to TestFlight", "upload"),
     ("name: Record the pair this build shipped", "record"),
     ("name: ${{ steps.record.outputs.name }}", "record upload-artifact"),
-    ("name: Revoke this run's certificate", "revoke"),
+    ("name: Revoke any certificate this run minted", "revoke"),
     ("name: Mark this pair failed", "failure marker"),
     ("name: ${{ steps.failed.outputs.name }}", "failure marker upload-artifact"),
 ]
@@ -3867,3 +3867,135 @@ if code.index(retype) > code.index(install):
 print("PASS: copy-python.sh retypes the module framework template FMWK before the one install_python "
       "call, so the app stays the only APPL bundle altool can resolve (#509)")
 MODULEFWTYPEPY
+
+# #515: automatic signing with -allowProvisioningUpdates minted an Apple Development
+# certificate on every TestFlight run (the runner has no Development identity) and the
+# revoke after it made Apple email the owner each time. The release job signs manually with
+# the imported Apple Distribution identity and one App Store profile per embedded target,
+# which scripts/asc-certs.mjs profiles fetches or creates. Pins: nothing passes
+# -allowProvisioningUpdates or automatic signing again, every application/app-extension in
+# project.yml has a profile in the archive and the export, and the profile picker reuses,
+# replaces and refuses in the right cases (fetch mocked, no network).
+python3 - <<'SIGNINGPY'
+import json, os, re, subprocess, sys, tempfile
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#515)\n" % msg)
+    sys.exit(1)
+
+def strip_comments(text):
+    return "\n".join(l.split(" #", 1)[0] for l in text.splitlines() if not l.lstrip().startswith("#")) + "\n"
+
+wf = strip_comments(open(".github/workflows/testflight.yml").read())
+def step(name):
+    at = wf.find("      - name: " + name + "\n")
+    if at < 0:
+        fail("testflight.yml lost its %r step" % name)
+    end = wf.find("\n      - ", at + 1)
+    return at, wf[at:end if end > 0 else len(wf)]
+
+if "allowProvisioningUpdates" in wf:
+    fail("testflight.yml passes -allowProvisioningUpdates again; with automatic signing that mints and revokes a certificate every run")
+imp_at, _ = step("Import distribution certificate")
+prof_at, prof = step("Install App Store provisioning profiles")
+arch_at, arch = step("Archive")
+_, export = step("Export .ipa")
+if not imp_at < prof_at < arch_at:
+    fail("the profile step must run after the certificate import (it needs DIST_CERT_SHA1) and before Archive")
+if "node scripts/asc-certs.mjs profiles" not in prof:
+    fail("the profile step must run scripts/asc-certs.mjs profiles")
+for want in ["CODE_SIGN_STYLE=Manual", 'CODE_SIGN_IDENTITY="Apple Distribution"',
+             "'PROVISIONING_PROFILE_SPECIFIER=$(DOBBY_PROFILE_$(TARGET_NAME))'"]:
+    if want not in arch:
+        fail("the Archive step must pass %s" % want)
+if re.search(r"CODE_SIGN_STYLE=Automatic|signingStyle</key><string>automatic", wf):
+    fail("testflight.yml signs automatically again")
+if "<key>signingStyle</key><string>manual</string>" not in export:
+    fail("the export options must sign manually")
+
+# Every iOS application/app-extension target in project.yml, as TARGET=bundle id.
+proj = open("project.yml").read()
+targets = {}
+for m in re.finditer(r"^  (\w+):\n((?:    .*\n|\s*\n)+)", proj[proj.index("\ntargets:\n"):], re.M):
+    body = m.group(2)
+    if re.search(r"^    type: (application|app-extension)$", body, re.M) and "iOS" in body.split("\n", 3)[1] + body.split("\n", 3)[2]:
+        targets[m.group(1)] = re.search(r"PRODUCT_BUNDLE_IDENTIFIER: (\S+)", body).group(1)
+if sorted(targets) != ["Dobby", "DobbyWidgets"]:
+    fail("project.yml's signed iOS targets changed to %r; give each a profile in testflight.yml, then update this pin" % sorted(targets))
+pt = re.search(r"\n      PROFILE_TARGETS: (.*)\n", wf)
+if not pt or dict(p.split("=") for p in pt.group(1).split()) != targets:
+    fail("PROFILE_TARGETS must map every signed target to its project.yml bundle id: %r" % targets)
+for t, bundle in targets.items():
+    if 'DOBBY_PROFILE_%s="$DOBBY_PROFILE_%s"' % (t, t) not in arch:
+        fail("the Archive step does not pass DOBBY_PROFILE_%s" % t)
+    if "<key>%s</key><string>${DOBBY_PROFILE_%s}</string>" % (bundle, t) not in export:
+        fail("the export options have no profile for %s" % bundle)
+print("PASS: testflight.yml signs the archive and the export manually with an App Store profile per embedded target "
+      "(%s), and never passes -allowProvisioningUpdates (#515)" % ", ".join(sorted(targets)))
+
+# Behaviour of the picker, against a mocked App Store Connect.
+mock = r'''
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+process.env.KEY_P8 = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' });
+const s = JSON.parse(process.env.SCENARIO);
+const log = [];
+process.on('exit', () => fs.writeFileSync(process.env.CALLS, JSON.stringify(log)));
+globalThis.fetch = async (url, opts) => {
+  const path = url.replace('https://api.appstoreconnect.apple.com', '');
+  log.push(`${opts.method} ${path.split('?')[0]}`);
+  let body = null;
+  if (path.startsWith('/v1/certificates')) body = { data: s.certs };
+  else if (path.startsWith('/v1/bundleIds')) body = { data: [{ id: 'B9', attributes: { identifier: 'x.app.more' } }, { id: 'B1', attributes: { identifier: 'x.app' } }] };
+  else if (opts.method === 'GET' && path.startsWith('/v1/profiles')) body = { data: s.profiles };
+  else if (opts.method === 'POST') {
+    const req = JSON.parse(opts.body).data;
+    log.push(`body ${req.attributes.name} ${req.attributes.profileType} ${req.relationships.bundleId.data.id} ${req.relationships.certificates.data.map((c) => c.id)}`);
+    body = { data: { id: 'NEW', attributes: { name: req.attributes.name, uuid: 'uuid-new', profileContent: Buffer.from('new').toString('base64'), expirationDate: '2099-01-01' } } };
+  }
+  return { ok: true, status: body ? 200 : 204, json: async () => body, text: async () => '' };
+};
+'''
+tmp = tempfile.mkdtemp()
+open(os.path.join(tmp, "mock.mjs"), "w").write(mock)
+der = b"distribution-cert-der"
+import hashlib, base64
+sha1 = hashlib.sha1(der).hexdigest().upper()
+certs = [{"id": "C1", "attributes": {"certificateType": "DISTRIBUTION", "certificateContent": base64.b64encode(der).decode(), "expirationDate": "2099-01-01", "displayName": "A Person"}},
+         {"id": "C2", "attributes": {"certificateType": "DEVELOPMENT", "certificateContent": base64.b64encode(b"other").decode(), "displayName": "Created via API"}}]
+name = "Dobby CI App Store x.app"
+def prof(pid, state="ACTIVE", cert="C1", exp="2099-01-01", nm=name):
+    return {"id": pid, "attributes": {"name": nm, "profileState": state, "uuid": "uuid-" + pid, "expirationDate": exp,
+            "profileContent": base64.b64encode(pid.encode()).decode()}, "relationships": {"certificates": {"data": [{"id": cert}]}}}
+
+def run(profiles, sha=sha1, args=("profiles",), extra=None):
+    home = tempfile.mkdtemp(dir=tmp)
+    env = dict(os.environ, HOME=home, KEY_ID="K", ISSUER_ID="I", DIST_CERT_SHA1=sha, PROFILE_TARGETS="App=x.app",
+               GITHUB_ENV=os.path.join(home, "env"), CALLS=os.path.join(home, "calls"),
+               SCENARIO=json.dumps({"certs": certs, "profiles": profiles}), **(extra or {}))
+    r = subprocess.run(["node", "--import", os.path.join(tmp, "mock.mjs"), "scripts/asc-certs.mjs", *args], env=env, capture_output=True, text=True)
+    calls = json.load(open(env["CALLS"])) if os.path.exists(env["CALLS"]) else []
+    genv = open(env["GITHUB_ENV"]).read() if os.path.exists(env["GITHUB_ENV"]) else ""
+    return r, calls, genv, home
+
+r, calls, genv, home = run([prof("OLD", state="INVALID"), prof("XC", nm="iOS Team Store Provisioning Profile: x.app"), prof("P1")])
+if r.returncode or [c for c in calls if not c.startswith("GET")] or genv != "DOBBY_PROFILE_App=uuid-P1\n":
+    fail("an ACTIVE profile of ours holding the certificate must be reused untouched: rc %d, calls %r, env %r, out %r" % (r.returncode, calls, genv, r.stdout + r.stderr))
+for d in ["Library/Developer/Xcode/UserData/Provisioning Profiles", "Library/MobileDevice/Provisioning Profiles"]:
+    if open(os.path.join(home, d, "uuid-P1.mobileprovision"), "rb").read() != b"P1":
+        fail("the reused profile must be installed as <uuid>.mobileprovision in " + d)
+if 'reused' not in r.stdout or "uuid-P1" not in r.stdout:
+    fail("the profile step must log the profile uuid it used and that it was reused")
+for stale in [prof("S", state="INVALID"), prof("S", cert="C9"), prof("S", exp="2000-01-01")]:
+    r, calls, genv, _ = run([stale, prof("XC", nm="iOS Team Store Provisioning Profile: x.app")])
+    if r.returncode or [c for c in calls if not c.startswith("GET")] != ["DELETE /v1/profiles/S", "POST /v1/profiles", "body %s IOS_APP_STORE B1 C1" % name] or genv != "DOBBY_PROFILE_App=uuid-new\n":
+        fail("a stale profile of ours (invalid, another certificate, expiring) must be replaced by an App Store profile for the exact bundle id and the imported certificate, and nothing else touched: %r" % calls)
+r, calls, genv, _ = run([], sha="0" * 40)
+if r.returncode != 1 or "::error::the imported distribution certificate" not in r.stdout or [c for c in calls if not c.startswith("GET")] or genv:
+    fail("an imported certificate the account does not hold must stop the run before any write: rc %d, calls %r" % (r.returncode, calls))
+r, calls, _, _ = run([], args=(), extra={"CI": "true", "REVOKE": "true"})
+if r.returncode or calls != ["GET /v1/certificates", "DELETE /v1/certificates/C2"] or "A Person" in r.stdout or "revoking 1 CI certificate(s)" not in r.stdout or "::warning::" not in r.stdout:
+    fail("revoke mode in CI must revoke only the API-minted development certificate, warn, and print no person's name: %r %r" % (calls, r.stdout))
+print("PASS: asc-certs.mjs profiles reuses an ACTIVE profile of ours, replaces a stale one for the exact bundle id and "
+      "certificate, refuses a certificate the account lacks, and the CI revoke names no person (#515)")
+SIGNINGPY
