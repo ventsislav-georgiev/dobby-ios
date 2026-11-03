@@ -108,7 +108,10 @@ final class PlayerControls: ObservableObject {
         if s.isPlaying, lastState == .paused, visible, !anyLayerOpen, !scrubbing {
             hideTask?.cancel(); visible = false
         } else if s.isPlaying {
-            scheduleHide()
+            // #510: KSPlayer calls this from the state's willSet, so the layer still reports the
+            // previous state here; readyToPlay -> bufferFinished read as not playing and the bar
+            // shown at the start never hid. Pass the state being entered.
+            scheduleHide(playing: true)
         }
         lastState = s
     }
@@ -126,9 +129,9 @@ final class PlayerControls: ObservableObject {
         scheduleHide()
     }
 
-    func scheduleHide() {
+    func scheduleHide(playing: Bool? = nil) {
         hideTask?.cancel()
-        guard !anyLayerOpen, !showInfo, isPlaying, !scrubbing else { return }   // keep visible if a layer/info is open, paused, or scrubbing (#129)
+        guard !anyLayerOpen, !showInfo, playing ?? isPlaying, !scrubbing else { return }   // keep visible if a layer/info is open, paused, or scrubbing (#129)
         hideTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 5_000_000_000)   // Android CONTROL_BAR_AUTO_HIDE_MS
             guard !Task.isCancelled else { return }
