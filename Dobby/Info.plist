@@ -29,6 +29,10 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- #537: lets the player's display link run above 60 Hz on a ProMotion iPhone, so 24 fps film
+	     lands on an even 120 Hz cadence (5 refreshes a frame) instead of 60 Hz 3:2 (33/50 ms). -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

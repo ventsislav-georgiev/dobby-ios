@@ -103,8 +103,10 @@ extension WebBridge: WKScriptMessageHandler {
                 // exercised too, not just decode-and-open.
                 let env = ProcessInfo.processInfo.environment
                 let poster = env["DOBBY_SELFTEST_POSTER"] ?? ""
+                // #537: DOBBY_SELFTEST_START_MS resumes mid-file, the owner's usual open (demuxer seek at open).
+                let start = env["DOBBY_SELFTEST_START_MS"].flatMap(Int.init).map { "\"startMs\":\($0)," } ?? ""
                 let json = """
-                {"ref":"selftest","url":"\(u)","title":"selftest",\
+                {"ref":"selftest",\(start)"url":"\(u)","title":"selftest",\
                 "artist":"selftest artist","album":"selftest album","poster":"\(poster)"}
                 """
                 if let req = PlayNativePayload.decode(json) { playback.play(req) }
