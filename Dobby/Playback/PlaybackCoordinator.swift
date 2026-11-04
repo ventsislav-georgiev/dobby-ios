@@ -140,6 +140,9 @@ final class PlaybackCoordinator: ObservableObject {
         options.hardwareDecode = KSOptions.hardwareDecode
         options.asynchronousDecompression = KSOptions.asynchronousDecompression
         options.videoFilters = []
+        #if os(iOS)
+        RenderProbe.beforeOpen()   // #537: selftest-only experiment switches, inert otherwise
+        #endif
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
         options.userAgent = AppConfig.streamUserAgent
         options.referer = AppConfig.serverURL?.absoluteString
@@ -402,6 +405,9 @@ final class PlaybackCoordinator: ObservableObject {
             let engine = player.playerLayer.map { String(describing: type(of: $0.player)) } ?? "?"
             mark("engine=\(engine) adaptive=\(request?.isAdaptivePair ?? false)")
             perfLogged = false   // #537: the perf line follows on the first tick with a frame on screen
+            #if os(iOS)
+            RenderProbe.start(player: { [weak self] in self?.player.playerLayer?.player }, web: bridge?.webView) { [weak self] in self?.mark($0) }
+            #endif
         }
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
@@ -552,6 +558,9 @@ final class PlaybackCoordinator: ObservableObject {
         // then sees playerLayer.url != url and recreates+autoplays the layer (infinite
         // loop on finish). Setting request=nil removes the overlay; SwiftUI's
         // dismantleNSView/dismantleUIView calls resetPlayer() for us.
+        #if os(iOS)
+        RenderProbe.stop(web: bridge?.webView)
+        #endif
         request = nil
         activeRef = nil
         lastReportSec = 0
