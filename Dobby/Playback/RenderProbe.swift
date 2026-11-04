@@ -8,8 +8,8 @@ import UIKit
 /// display link and logs nothing. Once a second it hands one "tick" line to the coordinator's
 /// mark(), which also appends it to the selftest log file.
 /// Switches, one variable each, read only when the selftest is on:
-///   DOBBY_EXP_PREFERREDFRAME=0  KSOptions.preferredFrame = false: KSPlayer leaves the display
-///                               link at the system default rate instead of fps..2*fps
+///   DOBBY_EXP_PREFERREDFRAME=0|1 KSOptions.preferredFrame for this run: 1 restores KSPlayer's
+///                               fps..2*fps display-link range that play() turns off (#537)
 ///   DOBBY_EXP_RANGE=min,max,pref override the link's preferredFrameRateRange after the first tick
 ///   DOBBY_EXP_HIDEWEB=1         hide the web view while the player is up
 ///   DOBBY_EXP_PING=0            no main-queue latency ping (proves the ping itself costs nothing)
@@ -21,7 +21,7 @@ final class RenderProbe {
     /// Before KSPlayer opens: the display link range is set on the first frame drawn.
     static func beforeOpen() {
         guard enabled else { return }
-        if env["DOBBY_EXP_PREFERREDFRAME"] == "0" { KSOptions.preferredFrame = false }
+        if let v = env["DOBBY_EXP_PREFERREDFRAME"] { KSOptions.preferredFrame = v == "1" }
     }
 
     static func start(player: @escaping () -> MediaPlayerProtocol?, web: UIView?, log: @escaping (String) -> Void) {

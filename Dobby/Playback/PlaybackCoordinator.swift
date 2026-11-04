@@ -141,6 +141,12 @@ final class PlaybackCoordinator: ObservableObject {
         options.asynchronousDecompression = KSOptions.asynchronousDecompression
         options.videoFilters = []
         #if os(iOS)
+        // #537: KSPlayer asks its display link for fps..2*fps (24..48, preferred 24, at 23.976 fps).
+        // On a 120 Hz iPhone that link fired about 14 times a second, a frame per call, so the picture
+        // ran at 14 fps and fell a second behind the audio. Left at the default rate (60 Hz in an app
+        // without CADisableMinimumFrameDurationOnPhone) it fires 60 times and KSPlayer picks each
+        // frame by the audio clock: measured 24.0 fps, 0 drops. Main-thread cost is an early return.
+        KSOptions.preferredFrame = false
         RenderProbe.beforeOpen()   // #537: selftest-only experiment switches, inert otherwise
         #endif
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
