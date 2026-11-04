@@ -143,9 +143,10 @@ final class PlaybackCoordinator: ObservableObject {
         #if os(iOS)
         // #537: KSPlayer asks its display link for fps..2*fps (24..48, preferred 24, at 23.976 fps).
         // On a 120 Hz iPhone that link fired about 14 times a second, a frame per call, so the picture
-        // ran at 14 fps and fell a second behind the audio. Left at the default rate (60 Hz in an app
-        // without CADisableMinimumFrameDurationOnPhone) it fires 60 times and KSPlayer picks each
-        // frame by the audio clock: measured 24.0 fps, 0 drops. Main-thread cost is an early return.
+        // ran at 14 fps and fell a second behind the audio. With it off KSPlayer never touches the
+        // link's range, and readyToPlay sets it to 120 Hz (Self.fastDisplayLink) so 24 fps lands on
+        // an even five refreshes a frame instead of 60 Hz 3:2 (33/50 ms). Each call picks the frame
+        // by the audio clock; most return early.
         KSOptions.preferredFrame = false
         RenderProbe.beforeOpen()   // #537: selftest-only experiment switches, inert otherwise
         #endif
@@ -412,7 +413,8 @@ final class PlaybackCoordinator: ObservableObject {
             mark("engine=\(engine) adaptive=\(request?.isAdaptivePair ?? false)")
             perfLogged = false   // #537: the perf line follows on the first tick with a frame on screen
             #if os(iOS)
-            RenderProbe.start(player: { [weak self] in self?.player.playerLayer?.player }, web: bridge?.webView) { [weak self] in self?.mark($0) }
+            RenderProbe.start(player: { [weak self] in self?.player.playerLayer?.player }, owner: self, web: bridge?.webView) { [weak self] in self?.mark($0) }
+            mark(Self.fastDisplayLink(player.playerLayer?.player))
             #endif
         }
         if state == .readyToPlay, !didSeekToStart {
@@ -545,6 +547,27 @@ final class PlaybackCoordinator: ObservableObject {
             + " fps=\(String(format: "%.3f", v?.nominalFrameRate ?? 0)) decode=\(decode)"
             + " hwOpt=\(options.hardwareDecode) thermal=\(info.thermalState.rawValue) lowPower=\(info.isLowPowerModeEnabled)"
     }
+
+    #if os(iOS)
+    /// #537: KSMEPlayer's display link, KSPlayer keeps it private and Mirror reads the stored
+    /// property (no fork). nil on the AVPlayer lane, which presents on its own.
+    nonisolated static func playerDisplayLink(_ p: MediaPlayerProtocol?) -> CADisplayLink? {
+        guard let v = (p as? KSMEPlayer)?.videoOutput else { return nil }
+        return Mirror(reflecting: v).children.first { $0.label == "displayLink" }?.value as? CADisplayLink
+    }
+
+    /// #537: the link's 120 Hz range, set on every open (a new KSMEPlayer has a new link). At the
+    /// default 60 Hz a 23.976 fps film shows 3:2 judder, frames held 33 and 50 ms in turn. At 120 Hz
+    /// each frame holds five refreshes (42 ms) and 25/30/60 fps land evenly or within one refresh.
+    /// Needs CADisableMinimumFrameDurationOnPhone in Info.plist; a 60 Hz screen or Low Power Mode
+    /// clamps it to 60, today's behaviour. The returned line names the lane and the panel maximum.
+    static func fastDisplayLink(_ p: MediaPlayerProtocol?) -> String {
+        guard p is KSMEPlayer else { return "link=none" }
+        guard let l = playerDisplayLink(p) else { return "link=missing" }
+        l.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, __preferred: 120)
+        return "link=120 screenMax=\(UIScreen.main.maximumFramesPerSecond)"
+    }
+    #endif
 
     private static func fourCC(_ c: UInt32) -> String {
         let s = String(bytes: (0..<4).map { UInt8((c >> (24 - 8 * $0)) & 0xff) }, encoding: .ascii) ?? ""
