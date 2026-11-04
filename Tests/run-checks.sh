@@ -99,6 +99,8 @@ reads = {
     "TVLINKGUARDPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"],
                       ['with open("Dobby/Info.plist", "rb") as f:']),
     "DECODERESETPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
+    "RENDERPROBEGATEPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
+    "DISPLAYLINKRATEPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -1026,6 +1028,108 @@ if re.search(r"\b(request|url|URL|host|title|ref)\b", perf):
 print("PASS: play() resets KSPlayer's per-track decode edits before every open and nothing else writes them, "
       "and the perf line (codec, size, fps, decode hw/sw, hwOpt, thermal, lowPower) logs once per open with no URL (#537)")
 DECODERESETPY
+
+# #537: the render probe and its experiment switches run on device rounds only. Every entry point
+# returns unless DOBBY_SELFTEST_URL is set, so a normal launch starts no timer and no main-queue
+# ping, reads no display link, writes no KSOptions.preferredFrame, hides no web view and logs nothing.
+python3 - <<'RENDERPROBEGATEPY'
+import glob, re, sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#537)\n" % msg)
+    sys.exit(1)
+
+src = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    src[path] = strip_swift(open(path).read(), path)
+probe_path = "Dobby/Playback/RenderProbe.swift"
+probe = src[probe_path]
+pc = src["Dobby/Playback/PlaybackCoordinator.swift"]
+
+body = probe.strip().split("\n")
+if body[0] != "#if os(iOS)" or body[-1] != "#endif" or probe.count("#if ") != 1:
+    fail("RenderProbe.swift must be one #if os(iOS) ... #endif with no other conditional")
+if probe.count('static let enabled = env["DOBBY_SELFTEST_URL"] != nil') != 1 or len(re.findall(r"\benabled\s*=", probe)) != 1:
+    fail("RenderProbe.enabled must be exactly DOBBY_SELFTEST_URL being set, written once")
+# The gate: every non-private function is static and its first statement is the enabled guard.
+entries = re.findall(r"\n    ((?:static )?func (\w+)\([^\n]*\n?([^\n]*))", probe)
+public = [(n, first.strip()) for whole, n, first in entries if not whole.startswith("private")]
+want = {"beforeOpen": "guard enabled else { return }", "start": "guard enabled, shared == nil else { return }",
+        "stop": "guard enabled, let probe = shared else { return }"}
+if dict(public) != want:
+    fail("RenderProbe entry points must be exactly beforeOpen/start/stop, each opening with its enabled guard, got %r" % public)
+if any(not w.startswith("static func") for w, n, f in entries if n in want):
+    fail("RenderProbe entry points must be static")
+if re.search(r"\n    (?:static )?(?:var|let) \w+[^\n]*=\s*(?:Timer|DispatchSource|CADisplayLink)", probe) or "init(" in probe:
+    fail("RenderProbe must create nothing at load or init; timers are made only in run() after start's guard")
+if probe.count("RenderProbe()") != 1 or probe.index("RenderProbe()") < probe.index("guard enabled, shared == nil"):
+    fail("RenderProbe is instantiated once, inside start() after its guard")
+for token in ("DispatchSource.makeTimerSource", "Timer(timeInterval"):
+    if probe.count(token) != 1 or not probe.index(token) > probe.index("private func run("):
+        fail("%s must appear once, inside the private run() reached only from start()" % token)
+# Nothing else in the app reads the switches, writes preferredFrame or calls the probe.
+for path, text in src.items():
+    writes = [l.strip() for l in text.split("\n") if re.search(r"(?:KSOptions\.|Self\.|^\s*)preferredFrame\s*=(?!=)", l)]
+    if path != probe_path and ("DOBBY_EXP_" in text or [w for w in writes if w != "KSOptions.preferredFrame = false"]):
+        fail("%s reads a DOBBY_EXP_ switch or writes KSOptions.preferredFrame outside RenderProbe" % path)
+    if path not in (probe_path, "Dobby/Playback/PlaybackCoordinator.swift") and "RenderProbe" in text:
+        fail("%s calls RenderProbe; only PlaybackCoordinator may" % path)
+sw = 'if let v = env["DOBBY_EXP_PREFERREDFRAME"] { KSOptions.preferredFrame = v == "1" }'
+if probe.count(sw) != 1 or len(re.findall(r"(?:KSOptions\.|Self\.|^\s*)preferredFrame\s*=(?!=)", probe)) != 1 or probe.index(sw) > probe.index("static func start("):
+    fail("the probe must write KSOptions.preferredFrame once, the DOBBY_EXP_PREFERREDFRAME switch in beforeOpen() behind its guard")
+calls = re.findall(r"RenderProbe\.(\w+)\(", pc)
+if sorted(calls) != ["beforeOpen", "start", "stop"]:
+    fail("PlaybackCoordinator must call RenderProbe.beforeOpen, start and stop once each, found %r" % calls)
+if not re.search(r"options\.videoFilters = \[\]\n        #if os\(iOS\)\n        KSOptions\.preferredFrame = false\n        RenderProbe\.beforeOpen\(\)", pc):
+    fail("RenderProbe.beforeOpen() must run in play() right after the per-track option reset, before KSPlayer opens")
+if not re.search(r"perfLogged = false[^\n]*\n            #if os\(iOS\)\n            RenderProbe\.start\(", pc):
+    fail("RenderProbe.start must run at readyToPlay, next to the perf line re-arm")
+if not re.search(r"RenderProbe\.stop\([^\n]*\n        #endif\n        request = nil", pc):
+    fail("RenderProbe.stop must run in clear() before the request is dropped")
+if "self?.mark($0)" not in pc[pc.index("RenderProbe.start("):].split("\n")[0]:
+    fail("the probe's tick line must go through mark(), which also writes the selftest log file")
+print("PASS: the render probe and its DOBBY_EXP_ switches are inert unless DOBBY_SELFTEST_URL is set: three guarded "
+      "entry points, timers only after start's guard, preferredFrame written only there, ticks through mark() (#537)")
+RENDERPROBEGATEPY
+
+# #537 fix: KSPlayer asks its display link for fps..2*fps; at 23.976 fps on the owner's 120 Hz iPhone
+# that link fired about 14 times a second (probe: calls 13.8/s, display 13.9 fps, 10 drops/s, a/v
+# down to -1.1 s, main thread idle). With KSOptions.preferredFrame = false the link runs at 60 Hz and
+# the same file plays at 24.0 fps with 0 drops (720p, 25 and 29.97 too). Pin the one write, iOS only,
+# in play() before the open and before the probe switch that may restore the old range for a run.
+python3 - <<'DISPLAYLINKRATEPY'
+import glob, re, sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#537)\n" % msg)
+    sys.exit(1)
+
+src = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    src[path] = strip_swift(open(path).read(), path)
+pc = src["Dobby/Playback/PlaybackCoordinator.swift"]
+m = re.search(r"\n    func play\(", pc)
+end = re.search(r"\n    (?:private |static |@\w+ )*func ", pc[m.end():])
+play = pc[m.start():m.end() + end.start()]
+fix = "\n        KSOptions.preferredFrame = false\n"
+if play.count(fix) != 1:
+    fail("play() no longer sets KSOptions.preferredFrame = false once at its top level")
+at = play.index(fix)
+if play[:at].rstrip().split("\n")[-1].strip() != "#if os(iOS)" or play.count("#if os(iOS)\n        KSOptions.preferredFrame = false\n        RenderProbe.beforeOpen()\n        #endif") != 1:
+    fail("the preferredFrame fix must sit alone with RenderProbe.beforeOpen() in one #if os(iOS) block, the fix first")
+if not at < play.index("KSOptions.firstPlayerType ="):
+    fail("the preferredFrame fix must run before the player is chosen and opened")
+writers = [(p, l.strip()) for p, t in src.items() for l in t.split("\n") if re.search(r"(?:KSOptions\.|Self\.|^\s*)preferredFrame\s*=(?!=)", l)]
+if sorted(writers) != [("Dobby/Playback/PlaybackCoordinator.swift", "KSOptions.preferredFrame = false"),
+                       ("Dobby/Playback/RenderProbe.swift", 'if let v = env["DOBBY_EXP_PREFERREDFRAME"] { KSOptions.preferredFrame = v == "1" }')]:
+    fail("KSOptions.preferredFrame must have exactly two writers, the play() fix and the selftest switch, found %r" % writers)
+print("PASS: play() turns KSPlayer's fps..2*fps display-link range off on iOS before every open, and only the "
+      "selftest switch writes it otherwise (#537)")
+DISPLAYLINKRATEPY
 
 # #128: the elapsed label used to format itself alone (d:dd under an hour, d:dd:dd at
 # or above), so scrubbing across the 1:00:00 mark grew it by three characters mid-drag,

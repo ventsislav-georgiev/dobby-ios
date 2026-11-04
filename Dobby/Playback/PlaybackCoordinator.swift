@@ -140,6 +140,15 @@ final class PlaybackCoordinator: ObservableObject {
         options.hardwareDecode = KSOptions.hardwareDecode
         options.asynchronousDecompression = KSOptions.asynchronousDecompression
         options.videoFilters = []
+        #if os(iOS)
+        // #537: KSPlayer asks its display link for fps..2*fps (24..48, preferred 24, at 23.976 fps).
+        // On a 120 Hz iPhone that link fired about 14 times a second, a frame per call, so the picture
+        // ran at 14 fps and fell a second behind the audio. Left at the default rate (60 Hz in an app
+        // without CADisableMinimumFrameDurationOnPhone) it fires 60 times and KSPlayer picks each
+        // frame by the audio clock: measured 24.0 fps, 0 drops. Main-thread cost is an early return.
+        KSOptions.preferredFrame = false
+        RenderProbe.beforeOpen()   // #537: selftest-only experiment switches, inert otherwise
+        #endif
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
         options.userAgent = AppConfig.streamUserAgent
         options.referer = AppConfig.serverURL?.absoluteString
@@ -402,6 +411,9 @@ final class PlaybackCoordinator: ObservableObject {
             let engine = player.playerLayer.map { String(describing: type(of: $0.player)) } ?? "?"
             mark("engine=\(engine) adaptive=\(request?.isAdaptivePair ?? false)")
             perfLogged = false   // #537: the perf line follows on the first tick with a frame on screen
+            #if os(iOS)
+            RenderProbe.start(player: { [weak self] in self?.player.playerLayer?.player }, web: bridge?.webView) { [weak self] in self?.mark($0) }
+            #endif
         }
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
@@ -552,6 +564,9 @@ final class PlaybackCoordinator: ObservableObject {
         // then sees playerLayer.url != url and recreates+autoplays the layer (infinite
         // loop on finish). Setting request=nil removes the overlay; SwiftUI's
         // dismantleNSView/dismantleUIView calls resetPlayer() for us.
+        #if os(iOS)
+        RenderProbe.stop(web: bridge?.webView)
+        #endif
         request = nil
         activeRef = nil
         lastReportSec = 0
