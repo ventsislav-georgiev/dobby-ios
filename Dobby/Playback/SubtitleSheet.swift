@@ -41,17 +41,10 @@ extension PlayerControls {
         let model = p.player.subtitleModel
         for info in model.subtitleInfos {
             let sel = model.selectedSubtitleInfo?.subtitleID == info.subtitleID
-            let lang: String?
-            let label: String
-            if info is URLSubtitleInfo {
-                // Sideloaded: the web's label already names its source and flag.
-                label = info.name
-                lang = subtitleLang(ofLabel: info.name, p, priority: priority)
-            } else {
-                lang = SubtitleOrdering.normalize((info as? MediaPlayerTrack)?.languageCode)
-                let flag = SubtitleOrdering.flag(lang)
-                label = "Embedded - " + (flag.isEmpty ? "" : flag + " ") + info.name
-            }
+            let label = Self.subtitleLabel(info)
+            let lang = info is URLSubtitleInfo
+                ? subtitleLang(ofLabel: info.name, p, priority: priority)
+                : SubtitleOrdering.normalize((info as? MediaPlayerTrack)?.languageCode)
             rows.append(SubtitleRow(id: info.subtitleID, label: label,
                                     key: SubtitleSortKey(lang: lang, sdh: SubtitleOrdering.isSdh(info.name), rank: 0),
                                     selected: sel, pick: { [weak self] in
@@ -72,6 +65,14 @@ extension PlayerControls {
             }))
         }
         return rows
+    }
+
+    /// A row's label, also what a remote sender sees for it (#541, PlaybackCoordinator.remoteTracks).
+    /// Sideloaded: the web's label already names its source and flag.
+    static func subtitleLabel(_ info: any SubtitleInfo) -> String {
+        if info is URLSubtitleInfo { return info.name }
+        let flag = SubtitleOrdering.flag(SubtitleOrdering.normalize((info as? MediaPlayerTrack)?.languageCode))
+        return "Embedded - " + (flag.isEmpty ? "" : flag + " ") + info.name
     }
 
     /// A sideloaded subtitle's language: the catalog entry or payload track carrying the same

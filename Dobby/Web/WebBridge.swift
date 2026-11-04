@@ -24,6 +24,14 @@ final class WebBridge: NSObject {
         self.webView = webView
         playback.bridge = self
         playback.carRoute.onChange = { [weak self] isCar in self?.pushCarRoute(isCar) }
+        // #541: the native remote player's controls, into the PWA's session (it returns false without one).
+        playback.remote.send = { [weak self] button in
+            self?.webView?.evaluateJavaScript(button.js) { result, _ in
+                MainActor.assumeIsolated {
+                    self?.playback.markSelftest("remote control \(button.cmd) \(button.args) -> \(result.map { "\($0)" } ?? "nil")")
+                }
+            }
+        }
         // `deliver` is wired on `ready`, not here: a command handed over while the
         // page is still loading has nothing to run it and would vanish.
         VoiceCommandQueue.shared.deliver = nil
@@ -116,6 +124,10 @@ extension WebBridge: WKScriptMessageHandler {
             #if DEBUG
             if let step = ProcessInfo.processInfo.environment["DOBBY_SETTINGS_SELFTEST"] { SettingsSelfTest.run(step, in: webView) }
             #endif
+            // #541 simulator seam: the remote control through this bridge (RemoteSelfTest.swift, Debug only).
+            #if DEBUG
+            if let mode = ProcessInfo.processInfo.environment["DOBBY_REMOTE_SELFTEST"] { RemoteSelfTest.run(mode, web: webView, playback: playback) }
+            #endif
         case "downloadNativeOffline":
             if let json = payload as? String { offline.startDownload(json) }
         case "downloadNativeBook":
@@ -143,6 +155,12 @@ extension WebBridge: WKScriptMessageHandler {
             }
         case "stop":
             playback.stop()
+        case "remoteCommand":
+            if let json = payload as? String { playback.remoteCommand(json) }
+        case "openRemotePlayer":
+            if let json = payload as? String { playback.remote.open(json) }
+        case "remotePlayerState":
+            if let json = payload as? String { playback.remote.update(json) }
         case "openTvLink":
             NotificationCenter.default.post(name: TvLink.open, object: nil)
         case "openExternal":
