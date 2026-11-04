@@ -187,7 +187,10 @@ struct PlayerView: View {
 
     /// Top safe-area inset read off the key window — GeometryReader reports zero
     /// here because an ancestor already ignores the safe area.
-    private var topSafeInset: CGFloat {
+    private var topSafeInset: CGFloat { Self.topSafeInset }
+
+    /// Also the native remote player's (#541).
+    static var topSafeInset: CGFloat {
         #if os(iOS)
         UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }

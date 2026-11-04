@@ -30,6 +30,10 @@ struct ContentView: View {
                     .transition(.opacity)
             }
 
+            #if os(iOS)
+            // #541: the native remote player (this phone controls another device), over everything.
+            RemotePlayerView(model: playback.remote)
+            #endif
         }
         .animation(.easeInOut(duration: 0.2), value: playback.activeRef)
         .onReceive(NotificationCenter.default.publisher(for: TvLink.open)) { _ in typingOnTv = true }

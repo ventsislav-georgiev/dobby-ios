@@ -21,7 +21,8 @@ extension PlayerControls {
         })
     }
 
-    private static func audioLabel(_ t: MediaPlayerTrack, index: Int) -> String {
+    /// Also the label a remote sender sees for this row (#541, PlaybackCoordinator.remoteTracks).
+    static func audioLabel(_ t: MediaPlayerTrack, index: Int) -> String {
         let ffmpegName = (t as? FFmpegAssetTrack)?.codecName
         let c = t.codecType
         let fourCC = String(bytes: [24, 16, 8, 0].map { UInt8((c >> $0) & 0xff) }, encoding: .ascii) ?? ""

@@ -30,6 +30,9 @@ final class PlaybackCoordinator: ObservableObject {
     /// Car head unit connected? Drives audio-only stream selection.
     let carRoute = CarRoute()
 
+    /// #541: the native remote player this phone shows while it controls another device (the sender).
+    let remote = RemotePlayerModel()
+
     // KSOptions.isAutoPlay is a static (default true); plain options autoplay.
     // automaticWindowResize snaps the macOS window to the video's aspect ratio on
     // readyToPlay (shrinks it); we manage sizing / fullscreen ourselves.
@@ -48,6 +51,8 @@ final class PlaybackCoordinator: ObservableObject {
     private var lastDurationMs = 0
     private var lastReportSec = 0.0
     private var perfLogged = false
+    /// #541: the paused state the last tick reported, so a pause or a resume ticks at once.
+    private var lastPaused = false
 
     // Headless e2e: unified log is unreadable from the test sandbox, so when the
     // selftest harness is active we append state transitions to a file the runner
@@ -125,6 +130,7 @@ final class PlaybackCoordinator: ObservableObject {
         lastPositionMs = req.startMs ?? 0
         lastDurationMs = 0
         lastReportSec = 0
+        lastPaused = false
         currentVideoUrl = req.videoUrl
         resumeSeconds = nil
         attached = []
@@ -315,6 +321,13 @@ final class PlaybackCoordinator: ObservableObject {
         clear()
     }
 
+    /// #541: window.Dobby.remoteCommand, the hub's command for this film (RemoteControl.run, which ticks after).
+    func remoteCommand(_ json: String) {
+        guard activeRef != nil else { mark("remote command ignored: nothing playing"); return }
+        let result = RemoteControl.run(json, on: self)
+        mark("remote command \(RemoteCommand.parse(json).map { "\($0)" } ?? "unparsed") -> \(result)")
+    }
+
     func togglePlayPause() {
         guard let layer = player.playerLayer else { return }
         layer.state.isPlaying ? layer.pause() : layer.play()
@@ -404,6 +417,9 @@ final class PlaybackCoordinator: ObservableObject {
 
     func onStateChanged(_ state: KSPlayerState) {
         mark("state=\(state)")
+        // #541: a pause or a resume, from any source, reaches a remote sender at once. From the state handed in:
+        // the layer's own state still reads the old value inside this callback (measured, a pause ticked paused=false).
+        if didSeekToStart, (state == .paused) != lastPaused { remoteTick(paused: state == .paused) }
         if state == .readyToPlay {
             // #132: log which engine actually opened the stream. firstPlayerType above is
             // only a request - KSPlayerLayer silently swaps to KSOptions.secondPlayerType
@@ -519,10 +535,11 @@ final class PlaybackCoordinator: ObservableObject {
             isPlaying: player.playerLayer?.state.isPlaying ?? true
         )
         #endif
-        // ponytail: report every ~5s — matches the web's SmartTube save cadence.
-        if current - lastReportSec >= 5 {
+        // ponytail: report every ~5s — matches the web's SmartTube save cadence. abs: after a seek back
+        // the reports must not wait until the film is past the old place again (#541).
+        if abs(current - lastReportSec) >= 5 {
             lastReportSec = current
-            emit("dobbyNativePlaybackProgress", completed: false)
+            remoteTick()
         }
     }
 
@@ -673,17 +690,93 @@ final class PlaybackCoordinator: ObservableObject {
         return file
     }
 
-    private func emit(_ fn: String, completed: Bool) {
+    private func emit(_ fn: String, completed: Bool, extra: [String: Any] = [:]) {
         guard let ref = activeRef else { return }
         let payload: [String: Any] = [
             "ref": ref,
             "positionMs": lastPositionMs,
             "durationMs": lastDurationMs,
             "completed": completed,
-        ]
+        ].merging(extra) { base, _ in base }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         bridge?.callJS("window.\(fn) && window.\(fn)(\(json));")
+    }
+}
+
+// MARK: - #541 receiver: the hub's commands, relayed by the PWA (RemoteControl.swift)
+
+extension PlaybackCoordinator: RemoteTarget {
+    var remotePosition: Double {
+        let live = player.playerLayer?.player.currentPlaybackTime ?? .nan
+        return live.isFinite ? live : Double(lastPositionMs) / 1000
+    }
+
+    var remoteDuration: Double {
+        let d = player.playerLayer?.player.duration ?? .nan
+        return d.isFinite && d > 0 ? d : Double(lastDurationMs) / 1000
+    }
+
+    var remotePaused: Bool { player.playerLayer?.state == .paused }
+    func remotePlay() { player.playerLayer?.play() }
+    func remotePause() { player.playerLayer?.pause() }
+
+    /// The tick right after reports the target: the seek itself lands a moment later. A paused film stays paused,
+    /// as the web player's does: seek(to:) passes the options' isSeekedAutoPlay, read once at the call.
+    func remoteSeek(to seconds: Double) {
+        lastPositionMs = Int(seconds * 1000)
+        let autoPlay = options.isSeekedAutoPlay
+        if remotePaused { options.isSeekedAutoPlay = false }
+        seek(to: seconds)
+        options.isSeekedAutoPlay = autoPlay
+    }
+
+    /// Ids are the rows of the player's own lists, labels the native sheets' (AudioSheet, SubtitleSheet), so a
+    /// sender picks what a tap on that row picks here; subtitle "off" is a row of its own. The online catalog's
+    /// rows are left out: they are not tracks until the page downloads one.
+    func remoteTracks(_ kind: RemoteTrackKind) -> [RemoteTrack] {
+        switch kind {
+        case .audio:
+            let tracks = player.playerLayer?.player.tracks(mediaType: .audio) ?? []
+            return tracks.enumerated().map { i, t in
+                RemoteTrack(id: "\(i)", label: PlayerControls.audioLabel(t, index: i), selected: t.isEnabled)
+            }
+        case .subtitle:
+            let model = player.subtitleModel
+            let on = model.selectedSubtitleInfo?.subtitleID
+            return [RemoteTrack(id: "off", label: "Off", selected: on == nil)]
+                + model.subtitleInfos.enumerated().map { i, info in
+                    RemoteTrack(id: "\(i)", label: PlayerControls.subtitleLabel(info), selected: info.subtitleID == on)
+                }
+        }
+    }
+
+    func remoteSelect(_ kind: RemoteTrackKind, id: String) {
+        switch kind {
+        case .audio:
+            let tracks = player.playerLayer?.player.tracks(mediaType: .audio) ?? []
+            if let i = Int(id), tracks.indices.contains(i) { player.playerLayer?.player.select(track: tracks[i]) }
+        case .subtitle:
+            let infos = player.subtitleModel.subtitleInfos
+            if id == "off" { player.subtitleModel.selectedSubtitleInfo = nil }
+            else if let i = Int(id), infos.indices.contains(i) { player.subtitleModel.selectedSubtitleInfo = infos[i] }
+        }
+    }
+
+    /// window.dobbyNativePlaybackProgress with paused and tracks: the 5 s tick, and at once after a command,
+    /// a pause or a resume (protocol.md). It restarts the 5 s count.
+    func remoteTick() { remoteTick(paused: remotePaused) }
+
+    func remoteTick(paused: Bool) {
+        lastPaused = paused
+        lastReportSec = Double(lastPositionMs) / 1000
+        let audio = remoteTracks(.audio), subtitle = remoteTracks(.subtitle)
+        emit("dobbyNativePlaybackProgress", completed: false,
+             extra: ["paused": paused, "tracks": RemoteControl.tracksPayload(audio: audio, subtitle: subtitle)])
+        if Self.selftestLog != nil {
+            let rows = { (l: [RemoteTrack]) in l.map { "\($0.id):\($0.label)\($0.selected ? "*" : "")" }.joined(separator: "|") }
+            mark("tick paused=\(paused) posMs=\(lastPositionMs) durMs=\(lastDurationMs) audio=[\(rows(audio))] subtitle=[\(rows(subtitle))]")
+        }
     }
 }
 

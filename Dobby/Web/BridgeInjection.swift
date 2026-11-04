@@ -16,6 +16,14 @@ enum BridgeInjection {
     static let edgeBack = false
     #endif
 
+    /// #541: the native remote player (the sender side of the remote control) is iOS only. On the Mac
+    /// openRemotePlayer throws, and the PWA's hubRemoteOpen catches that and opens its own remote player.
+    #if os(iOS)
+    static let remotePlayer = true
+    #else
+    static let remotePlayer = false
+    #endif
+
     /// #483: `window.Dobby.onDeviceSearch`, the PWA's switch for the on-device lanes (`apiUrlFor`,
     /// #484). WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes
     /// it back through `withdrawOnDeviceSearch` if the interpreter then fails to start, so it stays
@@ -76,6 +84,12 @@ enum BridgeInjection {
             setSubtitleCatalog: function (json) { post('setSubtitleCatalog', json); },
             setSubtitleOffsetMs: function (ref, ms) { post('setSubtitleOffsetMs', { ref: ref, ms: ms }); },
             stop: function (ref) { post('stop', { ref: ref }); },
+            // #541, the remote control (dobby protocol.md, "#521 addendum"). Receiver: the hub's play, pause,
+            // toggle, seek, skip, audio and subtitle for the native player, {"cmd", "args"} as JSON.
+            remoteCommand: function (json) { post('remoteCommand', json); },
+            // Sender: the native remote player, opened with the session's view and fed each change of it.
+            openRemotePlayer: function (json) { if (!\(remotePlayer ? "true" : "false")) throw new Error('no native remote player'); post('openRemotePlayer', json); },
+            remotePlayerState: function (json) { post('remotePlayerState', json); },
             // Now Playing state for the web-driven audiobook lane, so it also gets a
             // Live Activity (lock screen / Dynamic Island / CarPlay Dashboard). Native
             // playback pushes its own; call this only for <audio>-element playback.

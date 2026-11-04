@@ -102,6 +102,7 @@ reads = {
     "RENDERPROBEGATEPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
     "DISPLAYLINKRATEPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"],
                           ['with open("Dobby/Info.plist", "rb") as f:']),
+    "REMOTEWIRINGPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -274,6 +275,66 @@ for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleShe
   xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
 done
+
+# #541: the remote control's pure half (RemoteControl.swift): remoteCommand parsing and clamping, the track label
+# re-check, a tick after every command, the sender's view, ended dismissing the remote player, each control's
+# window.dobbyRemoteControl call. REMOTEWIRINGPY pins the app to it.
+OUTR="$(mktemp -d)/remote-control-check"
+xcrun swiftc -o "$OUTR" Dobby/Playback/RemoteControl.swift Tests/RemoteControlCheck.swift
+"$OUTR"
+
+python3 - <<'REMOTEWIRINGPY'
+import re
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#541)\n" % msg)
+    sys.exit(1)
+
+def need(text, needle, count, why):
+    if text.count(needle) != count:
+        fail("%s: expected %d of %r, found %d" % (why, count, needle, text.count(needle)))
+
+src = {}
+for path in ("Dobby/Web/WebBridge.swift", "Dobby/Playback/PlaybackCoordinator.swift", "Dobby/ContentView.swift",
+             "Dobby/Playback/RemotePlayerView.swift"):
+    src[path] = strip_swift(open(path).read(), path)
+bridge, pc = src["Dobby/Web/WebBridge.swift"], src["Dobby/Playback/PlaybackCoordinator.swift"]
+content, view = src["Dobby/ContentView.swift"], src["Dobby/Playback/RemotePlayerView.swift"]
+
+# The three bridge actions reach the receiver and the sender's model.
+for action, member in (("remoteCommand", "remoteCommand"), ("openRemotePlayer", "remote.open"),
+                       ("remotePlayerState", "remote.update")):
+    need(bridge, '        case "%s":\n            if let json = payload as? String { playback.%s(json) }\n' % (action, member), 1,
+         "WebBridge.dispatch must hand %s to playback.%s" % (action, member))
+# Receiver: every command runs through RemoteControl.run, which ticks after it (RemoteControlCheck). Every
+# progress tick goes through remoteTick, so the 5 s one carries paused and tracks too, and a pause or resume
+# from any source ticks at once.
+need(pc, "        let result = RemoteControl.run(json, on: self)\n", 1, "remoteCommand must run RemoteControl.run")
+need(pc, 'emit("dobbyNativePlaybackProgress"', 1, "the progress tick must have one emitter, remoteTick")
+need(pc, '        emit("dobbyNativePlaybackProgress", completed: false,\n'
+         '             extra: ["paused": paused, "tracks": RemoteControl.tracksPayload(audio: audio, subtitle: subtitle)])\n',
+     1, "remoteTick must send paused and tracks")
+need(pc, "        if abs(current - lastReportSec) >= 5 {\n            lastReportSec = current\n            remoteTick()\n        }\n",
+     1, "onProgress must tick through remoteTick every 5 s, a seek back included")
+need(pc, "        if didSeekToStart, (state == .paused) != lastPaused { remoteTick(paused: state == .paused) }\n", 1,
+     "onStateChanged must tick on a pause or a resume")
+# Sender: each control's own call reaches the page; the player is presented on iOS; the view's controls all go
+# through RemotePlayerModel.press (the path RemoteControlCheck covers), never around it.
+need(bridge, "            self?.webView?.evaluateJavaScript(button.js) { result, _ in\n", 1,
+     "the remote player's send must evaluate the control's dobbyRemoteControl call")
+need(content, "            #if os(iOS)\n", 1, "ContentView's one iOS block")
+i = content.index("            #if os(iOS)\n")
+if "            RemotePlayerView(model: playback.remote)\n            #endif\n" not in content[i:i + 300]:
+    fail("ContentView must present RemotePlayerView(model: playback.remote) in its iOS block")
+if re.search(r"\.send\b|callJS|evaluateJavaScript", view):
+    fail("RemotePlayerView must reach the page only through model.press")
+print("PASS: remoteCommand runs through RemoteControl.run and every progress tick, the 5 s one and a pause or "
+      "resume, carries paused and tracks; openRemotePlayer and remotePlayerState reach the native remote player, "
+      "which ContentView presents on iOS and whose controls go through RemotePlayerModel.press (#541)")
+REMOTEWIRINGPY
 
 OUT6="$(mktemp -d)/offline-store-path-check"
 xcrun swiftc -o "$OUT6" \
@@ -2584,18 +2645,6 @@ PWA_CALLS_NOT_DECLARED = {
                            "installed before #158 would silently lose book removal. Drop the "
                            "else-branch there and this entry together once every installed "
                            "build carries removeNativeOffline.",
-    "openRemotePlayer": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
-                         "typeof-guarded and falls back to the web remote player, so iOS must not "
-                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
-                         "this entry when #541 declares the member.",
-    "remoteCommand": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
-                         "typeof-guarded and falls back to the web remote player, so iOS must not "
-                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
-                         "this entry when #541 declares the member.",
-    "remotePlayerState": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
-                         "typeof-guarded and falls back to the web remote player, so iOS must not "
-                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
-                         "this entry when #541 declares the member.",
 }
 
 def read(path):
@@ -3350,6 +3399,8 @@ EXPECTED = {
     "dobbyNativeDownloadProgress", "dobbyNativeAudioRoute", "dobbyNativeVoiceCommand",
     "dobbyNativeRequestSubtitle", "dobbyNativePlaybackEnded", "dobbyNativePlaybackProgress",
     "dobbyNativeBookmarkRequest", "dobbyNativeSubtitleTracks",
+    # #541: the native remote player's controls (RemoteButton.js), the one page callback outside dobbyNative*.
+    "dobbyRemoteControl",
 }
 NOT_DEFINED_BY_PWA = {
     "dobbyNativeAudioRoute": "never defined by the PWA; it reads window.Dobby.isCarAudio, which "
@@ -3367,7 +3418,7 @@ for path in swift_files:
         src = strip_swift(f.read(), path)
     if re.search(r"(?i)book_?play", src):
         fail("%s still names the legacy app name in live code" % path)
-    for m in re.finditer(r"window\.([A-Za-z_]\w*Native[A-Z]\w*)", src):
+    for m in re.finditer(r"window\.([A-Za-z_]\w*Native[A-Z]\w*|dobbyRemote[A-Z]\w*)", src):
         called.setdefault(m.group(1), set()).add(path)
     for m in re.finditer(r'\bemit\("([A-Za-z_]\w*)"', src):
         called.setdefault(m.group(1), set()).add(path)
@@ -3377,15 +3428,17 @@ for path in swift_files:
 # file-wide count of the forwarding line: strip_swift keeps #if blocks, and anything added
 # before the forwarding line (an always-true early return, a dropped guard) changes what
 # reaches the page while the line itself still reads the same.
-EMIT_SIG = "    private func emit(_ fn: String, completed: Bool) {"
-EMIT_BLOCK = """    private func emit(_ fn: String, completed: Bool) {
+# #541: extra carries the tick's paused and tracks; the base keys win a clash, so no extra can move a
+# position, a ref or completed.
+EMIT_SIG = "    private func emit(_ fn: String, completed: Bool, extra: [String: Any] = [:]) {"
+EMIT_BLOCK = """    private func emit(_ fn: String, completed: Bool, extra: [String: Any] = [:]) {
         guard let ref = activeRef else { return }
         let payload: [String: Any] = [
             "ref": ref,
             "positionMs": lastPositionMs,
             "durationMs": lastDurationMs,
             "completed": completed,
-        ]
+        ].merging(extra) { base, _ in base }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         bridge?.callJS("window.\\(fn) && window.\\(fn)(\\(json));")
@@ -3395,7 +3448,7 @@ if coordinator is None or coordinator.count(EMIT_SIG) != 1 or coordinator.count(
          "(signature through its closing brace, after comment stripping). Any change to emit must "
          "update that needle on purpose, after checking that every emit() call still reaches the "
          "guarded window.<callback> call")
-bad = sorted(n for n in called if not n.startswith("dobbyNative"))
+bad = sorted(n for n in called if not n.startswith("dobbyNative") and n != "dobbyRemoteControl")
 if bad:
     fail("the wrapper calls page callback(s) without the dobbyNative prefix: %s. The PWA defines "
          "dobbyNative* only, so each is a silent no-op on the device"
@@ -3415,8 +3468,8 @@ for path in js_files:
     with open(path, encoding="utf-8") as f:
         text = strip_js(f.read())
     # Column 0 only: a function declared inside another one is not on window (the #158 layout).
-    defined |= set(re.findall(r"^function\s+(dobbyNative\w+)\s*\(", text, re.M))
-    defined |= set(re.findall(r"\bwindow\.(dobbyNative\w+)\s*=(?!=)", text))
+    defined |= set(re.findall(r"^function\s+(dobbyNative\w+|dobbyRemoteControl)\s*\(", text, re.M))
+    defined |= set(re.findall(r"\bwindow\.(dobbyNative\w+|dobbyRemoteControl)\s*=(?!=)", text))
 missing = sorted(n for n in EXPECTED if n not in defined and n not in NOT_DEFINED_BY_PWA)
 if missing:
     fail("the wrapper calls %s, which the PWA under %s does not define: a silent no-op on the "
