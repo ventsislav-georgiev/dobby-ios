@@ -70,7 +70,7 @@ struct WebContainer {
         if BridgeInjection.onDeviceSearch {
             PythonRuntime.warmUp { [weak webView] in BridgeInjection.withdrawOnDeviceSearch(from: webView) }
         }
-        webView.navigationDelegate = coordinator
+        webView.navigationDelegate = coordinator.navigation
         webView.uiDelegate = coordinator
         #if os(iOS)
         webView.scrollView.bounces = false
@@ -93,25 +93,9 @@ struct WebContainer {
         // name. The lever is a content rule list, in place before the page asks for anything.
         Task { @MainActor in
             await PiRequestBlock.install(in: ucc, origin: url)
-            load(loadURL, in: webView)
+            coordinator.navigation.load(loadURL, in: webView)
         }
         return webView
-    }
-
-    /// The bundled shell, *synthesized under the origin* by `loadSimulatedRequest`.
-    ///
-    /// The origin is the whole point and is why this is not `loadHTMLString` or a
-    /// `file://` load. #150 measured that the simulated document lands in the REAL
-    /// storage partition for that origin — `location.origin`, `document.baseURI` and
-    /// `isSecureContext` all report the Pi, and the localStorage/IndexedDB/Cache Storage
-    /// a previous *networked* load of the Pi wrote read back inside it. So progress,
-    /// bookmarks, the gallery cache and the service worker are the ones the app already
-    /// has, and no cross-origin migration is needed (§9 option (b) is off the table for
-    /// iOS because of this). #508: ContentView shows WebContainer only when the build has
-    /// a shell, so there is no network fallback here.
-    private func load(_ loadURL: URL, in webView: WKWebView) {
-        guard let html = BundledShell.indexHTML() else { return }
-        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)
     }
 }
 
