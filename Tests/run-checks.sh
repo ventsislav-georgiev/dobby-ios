@@ -1745,6 +1745,20 @@ else
   echo "SKIP: no dobby checkout at $DOBBY_PUBLIC_DIR — BundledShellCheck and BundledShellWebViewCheck need the PWA's Public dir (#151)"
 fi
 
+# #540: iOS kills the WebContent process (memory pressure beside the native player, or a crash)
+# and the page stays white unless the navigation delegate loads the shell again. A real WKWebView
+# on a fixture shell, the shipped ShellNavigation, the WebContent process SIGKILLed: the page has
+# to come back live, on its route, with the user script and message handler, and stop reloading
+# past the limit. Needs no PWA checkout. macOS only, like the other WebView checks.
+if [ "$(uname -s)" = "Darwin" ]; then
+  OUT12="$(mktemp -d)/webcontent-termination-check"
+  xcrun swiftc -o "$OUT12" -framework WebKit -framework AppKit \
+    Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
+    Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift Dobby/Web/ShellNavigation.swift \
+    Tests/WebContentTerminationWebViewCheck.swift
+  "$OUT12"
+fi
+
 # #151 wiring. Everything above runs the shell's pieces in isolation: the rewrite as a
 # pure function, the handler behind a WKWebView the CHECK configures. None of it observes
 # whether the app ever takes the offline branch — the exact "helper pinned, call site
@@ -1757,6 +1771,8 @@ def read(path):
     with open(path) as f:
         return f.read()
 web = read("Dobby/Web/WebContainer.swift")
+nav = read("Dobby/Web/ShellNavigation.swift")
+bridge = read("Dobby/Web/WebBridge.swift")
 content = read("Dobby/ContentView.swift")
 project = read("project.yml")
 
@@ -1766,24 +1782,33 @@ def need(haystack, needle, why):
         sys.exit(1)
 
 # 1. makeWebView hands the load to the helper. Without this line the helper is dead code
-#    and every offline start is the pre-#151 plain load — green everywhere else.
-need(web, "        load(loadURL, in: webView)",
-     "WebContainer.makeWebView must route its load through load(_:in:)")
+#    and every offline start is the pre-#151 plain load — green everywhere else. #540 moved the
+#    helper to ShellNavigation, which is also the navigation delegate whose termination handler
+#    reloads the shell; both wirings are pinned, with the bundle's shell as its root.
+need(web, "            coordinator.navigation.load(loadURL, in: webView)",
+     "WebContainer.makeWebView must route its load through ShellNavigation.load(_:in:)")
+need(web, "        webView.navigationDelegate = coordinator.navigation",
+     "the web view's navigation delegate must be the ShellNavigation that reloads a killed page (#540)")
+need(bridge, "    let navigation = ShellNavigation()",
+     "WebBridge must own the ShellNavigation (WKWebView holds its delegate weakly), on the bundle's shell (#540)")
+need(nav, "    init(shellRoot: URL? = BundledShell.root) {",
+     "ShellNavigation's shell root must default to the bundle's shell (#540)")
 
 # 2. #508: the helper synthesizes the shell and nothing else. The Pi is retired, so there is no
 #    network load of the origin left to fall back to: a plain webView.load of it is a request to
-#    the retired Pi and a blank app, and it is refused anywhere in the file.
-need(web, "        guard let html = BundledShell.indexHTML() else { return }",
+#    the retired Pi and a blank app, and it is refused anywhere in either file.
+need(nav, "        guard let html = BundledShell.indexHTML(root: shellRoot) else { return }",
      "the simulated load must be guarded by the shell being present, and do nothing without one")
-need(web, "        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)",
+need(nav, "        webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)",
      "the load must synthesize the shell under loadURL, not load a file: or data: URL")
-if "webView.load(" in web:
-    sys.stderr.write("FAIL: WebContainer loads a URL over the network again; the origin is the retired Pi (#508)\n")
-    sys.exit(1)
+for path, src in [("WebContainer", web), ("ShellNavigation", nav)]:
+    if "webView.load(" in src or "webView.reload(" in src:
+        sys.stderr.write("FAIL: %s loads or reloads a URL over the network again; the origin is the retired Pi (#508, #540)\n" % path)
+        sys.exit(1)
 
 # 3. Position: the guard comes first, then the simulated load.
-if not web.index("guard let html = BundledShell.indexHTML()") < web.index("webView.loadSimulatedRequest("):
-    sys.stderr.write("FAIL: in WebContainer.load, the guard must come before the simulated load\n")
+if not nav.index("guard let html = BundledShell.indexHTML(") < nav.index("webView.loadSimulatedRequest("):
+    sys.stderr.write("FAIL: in ShellNavigation.load, the guard must come before the simulated load\n")
     sys.exit(1)
 
 # 4. ContentView: start is the shell, under the stored origin, with no probe and no wait (#508).
@@ -1810,7 +1835,7 @@ if "excludes:\n          - Shell" not in project:
     sys.stderr.write("FAIL: Dobby/Shell must be excluded from the Dobby source glob, or it is added twice\n")
     sys.exit(1)
 
-print("PASS: the cold start is wired — makeWebView calls load(_:in:), which only synthesizes the shell, ContentView shows it under the stored origin with no probe, and Dobby/Shell ships as a folder reference (#151, #508)")
+print("PASS: the cold start is wired — makeWebView calls ShellNavigation.load(_:in:), which only synthesizes the shell, ShellNavigation is the navigation delegate, ContentView shows it under the stored origin with no probe, and Dobby/Shell ships as a folder reference (#151, #508, #540)")
 SHELLWIRINGPY
 
 # ---------------------------------------------------------------------------

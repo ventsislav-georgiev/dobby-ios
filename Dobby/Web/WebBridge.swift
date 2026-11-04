@@ -7,6 +7,8 @@ final class WebBridge: NSObject {
     private let playback: PlaybackCoordinator
     private let offline: OfflineStore
     private(set) weak var webView: WKWebView?
+    /// The web view's navigationDelegate, which WKWebView holds weakly (#540).
+    let navigation = ShellNavigation()
 
     /// Title the web audiobook lane last reported — a change means a new item.
     private var webNowPlayingTitle: String?
@@ -272,14 +274,3 @@ extension WebBridge: WKUIDelegate {
     }
 }
 #endif
-
-// MARK: - Navigation (kept minimal; log failures)
-
-extension WebBridge: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        NSLog("%@", "Dobby: navigation failed: \(error.localizedDescription)")
-    }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        NSLog("%@", "Dobby: provisional navigation failed: \(error.localizedDescription)")
-    }
-}
