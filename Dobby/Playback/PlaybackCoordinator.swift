@@ -47,6 +47,7 @@ final class PlaybackCoordinator: ObservableObject {
     private var lastPositionMs = 0
     private var lastDurationMs = 0
     private var lastReportSec = 0.0
+    private var perfLogged = false
 
     // Headless e2e: unified log is unreadable from the test sandbox, so when the
     // selftest harness is active we append state transitions to a file the runner
@@ -132,6 +133,13 @@ final class PlaybackCoordinator: ObservableObject {
         player.timemodel.currentTime = 0
         player.timemodel.totalTime = 1
         player.subtitleModel.subtitleDelay = 0
+        // #537: KSPlayer edits these per track on the options it is handed (KSOptions.process:
+        // interlaced turns hardwareDecode off and appends yadif; MEPlayerItem: rotation turns it off
+        // and appends transpose), and this one object serves every open. One interlaced title left
+        // every later title of the session decoding in software behind a stale deinterlacer.
+        options.hardwareDecode = KSOptions.hardwareDecode
+        options.asynchronousDecompression = KSOptions.asynchronousDecompression
+        options.videoFilters = []
         // FFmpeg/HTTP layer headers for direct googlevideo / origin streams.
         options.userAgent = AppConfig.streamUserAgent
         options.referer = AppConfig.serverURL?.absoluteString
@@ -393,6 +401,7 @@ final class PlaybackCoordinator: ObservableObject {
             // KSPlayer revision move has to READ the engine, never infer it from the lane.
             let engine = player.playerLayer.map { String(describing: type(of: $0.player)) } ?? "?"
             mark("engine=\(engine) adaptive=\(request?.isAdaptivePair ?? false)")
+            perfLogged = false   // #537: the perf line follows on the first tick with a frame on screen
         }
         if state == .readyToPlay, !didSeekToStart {
             didSeekToStart = true
@@ -483,6 +492,7 @@ final class PlaybackCoordinator: ObservableObject {
 
     func onProgress(current: TimeInterval, total: TimeInterval) {
         guard current.isFinite, current > 0 else { return }
+        if !perfLogged, let line = perfLine() { perfLogged = true; mark(line) }
         lastPositionMs = Int(current * 1000)
         lastDurationMs = Int(max(0, total) * 1000)
         #if os(iOS)
@@ -500,6 +510,33 @@ final class PlaybackCoordinator: ObservableObject {
             lastReportSec = current
             emit("dobbyNativePlaybackProgress", completed: false)
         }
+    }
+
+    /// #537: once per open, whether the picture is decoded in hardware, and the device state that
+    /// throttles a decode. Not at readyToPlay: no frame is on screen yet there. decode= reads the
+    /// pixel format of the frame on screen: VideoToolbox (FFmpeg's hwaccel or KSPlayer's own
+    /// session) hands out bi-planar 4:2:0, FFmpeg's software path planar y420 (no CVPixelBuffer at
+    /// all above 8 bits), AVPlayer always decodes in hardware. hwOpt is KSOptions.hardwareDecode
+    /// after KSPlayer's per-track edits. No URL, host or source name. nil until a frame is shown.
+    private func perfLine() -> String? {
+        let p = player.playerLayer?.player
+        let v = p?.tracks(mediaType: .video).first { $0.isEnabled }
+        var decode = p is KSAVPlayer ? "avplayer" : "none"
+        if let me = p as? KSMEPlayer, v != nil {
+            guard let pb = me.videoOutput?.pixelBuffer else { return nil }
+            let pix = pb.cvPixelBuffer.map { Self.fourCC(CVPixelBufferGetPixelFormatType($0)) } ?? "none"
+            decode = (["420v", "420f", "x420", "xf20"].contains(pix) ? "hw" : "sw") + " pix=" + pix
+        }
+        let sz = p?.naturalSize ?? .zero
+        let info = ProcessInfo.processInfo
+        return "perf codec=\(Self.fourCC(v?.codecType ?? 0)) size=\(Int(sz.width))x\(Int(sz.height))"
+            + " fps=\(String(format: "%.3f", v?.nominalFrameRate ?? 0)) decode=\(decode)"
+            + " hwOpt=\(options.hardwareDecode) thermal=\(info.thermalState.rawValue) lowPower=\(info.isLowPowerModeEnabled)"
+    }
+
+    private static func fourCC(_ c: UInt32) -> String {
+        let s = String(bytes: (0..<4).map { UInt8((c >> (24 - 8 * $0)) & 0xff) }, encoding: .ascii) ?? ""
+        return s.trimmingCharacters(in: .whitespaces).isEmpty ? "none" : s
     }
 
     func onFinish(error: Error?) {

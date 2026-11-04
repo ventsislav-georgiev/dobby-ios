@@ -98,6 +98,7 @@ reads = {
                               '    with open(os.path.join(pub, "js", n), encoding="utf-8") as f:']),
     "TVLINKGUARDPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"],
                       ['with open("Dobby/Info.plist", "rb") as f:']),
+    "DECODERESETPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -967,6 +968,64 @@ if ".readyToPlay" not in preceding:
 
 print("PASS: PlaybackCoordinator logs the engine that actually opened the stream, so a #132 device round can be gated on it")
 ENGINELOGPY
+
+# #537: KSPlayer writes per-track decisions into the KSOptions it is handed (KSOptions.process:
+# an interlaced track turns hardwareDecode off and appends yadif; MEPlayerItem: a rotated one turns
+# it off and appends transpose), and PlaybackCoordinator hands every open the same object. Without
+# the reset in play(), one interlaced title leaves every later title of the session decoding in
+# software behind a stale deinterlacer (measured in a simulator: hwOpt=false and the yadif filter
+# carried into the next, progressive 1080p open). The perf line is how a device round reads it.
+python3 - <<'DECODERESETPY'
+import glob, re, sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#537)\n" % msg)
+    sys.exit(1)
+
+src = {}
+for path in sorted(glob.glob("Dobby/**/*.swift", recursive=True)):
+    src[path] = strip_swift(open(path).read(), path)
+pc = src["Dobby/Playback/PlaybackCoordinator.swift"]
+
+def body_of(name):
+    m = re.search(r"\n    (?:private )?func %s\(" % name, pc)
+    if not m:
+        fail("PlaybackCoordinator has no %s(" % name)
+    end = re.search(r"\n    (?:private |static |@\w+ )*func ", pc[m.end():])
+    return pc[m.start():m.end() + (end.start() if end else len(pc))]
+
+resets = ["options.hardwareDecode = KSOptions.hardwareDecode",
+          "options.asynchronousDecompression = KSOptions.asynchronousDecompression",
+          "options.videoFilters = []"]
+play = body_of("play")
+for line in resets:
+    if play.count("\n        %s\n" % line) != 1:
+        fail("PlaybackCoordinator.play() no longer resets %r once at its top level before each open" % line)
+# Any other writer would undo or pre-empt the reset; count them across the app, not just this file.
+for field in ("hardwareDecode", "asynchronousDecompression", "videoFilters"):
+    writers = [(p, l.strip()) for p, t in src.items() for l in t.split("\n")
+               if re.search(r"\b%s\s*(=(?!=)|\+=|\.append\b|\.removeAll\b)" % field, l)]
+    if len(writers) != 1:
+        fail("expected exactly one app-side writer of options.%s (the play() reset), found %r" % (field, writers))
+
+ready = pc[pc.index("func onStateChanged("):]
+ready = ready[:ready.index("\n    func ")]
+if not re.search(r'mark\("engine=.*\n\s*perfLogged = false\b', ready):
+    fail("onStateChanged no longer re-arms the perf line right after the engine= line at readyToPlay")
+prog = body_of("onProgress")
+if "if !perfLogged, let line = perfLine() { perfLogged = true; mark(line) }" not in prog:
+    fail("onProgress no longer emits the perf line once per open through mark()")
+perf = body_of("perfLine")
+for key in ("perf codec=", " size=", " fps=", " decode=", " hwOpt=", " thermal=", " lowPower="):
+    if key not in perf:
+        fail("the perf line lost its %r field" % key.strip())
+if re.search(r"\b(request|url|URL|host|title|ref)\b", perf):
+    fail("the perf line reads the request, a URL or a title; it ships in a public repo's logs")
+print("PASS: play() resets KSPlayer's per-track decode edits before every open and nothing else writes them, "
+      "and the perf line (codec, size, fps, decode hw/sw, hwOpt, thermal, lowPower) logs once per open with no URL (#537)")
+DECODERESETPY
 
 # #128: the elapsed label used to format itself alone (d:dd under an hour, d:dd:dd at
 # or above), so scrubbing across the 1:00:00 mark grew it by three characters mid-drag,
