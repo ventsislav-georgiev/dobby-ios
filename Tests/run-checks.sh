@@ -2584,6 +2584,18 @@ PWA_CALLS_NOT_DECLARED = {
                            "installed before #158 would silently lose book removal. Drop the "
                            "else-branch there and this entry together once every installed "
                            "build carries removeNativeOffline.",
+    "openRemotePlayer": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
+                         "typeof-guarded and falls back to the web remote player, so iOS must not "
+                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
+                         "this entry when #541 declares the member.",
+    "remoteCommand": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
+                         "typeof-guarded and falls back to the web remote player, so iOS must not "
+                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
+                         "this entry when #541 declares the member.",
+    "remotePlayerState": "#521 remote control: the PWA half shipped ahead of the iOS half (#541). Every call site is "
+                         "typeof-guarded and falls back to the web remote player, so iOS must not "
+                         "declare a stub (a stub makes typeof true and breaks the fallback). Drop "
+                         "this entry when #541 declares the member.",
 }
 
 def read(path):
@@ -3508,7 +3520,9 @@ defined_once("getPiEnabled", "12-service-worker-offline.js",
              "  try { return bridge.piEnabled() === true; } catch (e) { return true; }\n}")
 defined_once("playStreamUrl", "21-android-tv.js", "function playStreamUrl(url, here) {")
 defined_once("deviceHubRoutePlay", "14-settings.js",
-             "function deviceHubRoutePlay(url, extra) {\n  const to = deviceHubTargetId();\n"
+             "  const n = hubRemoteNextTo;\n  hubRemoteNextTo = null;\n"
+             "  const cur = window._currentVideoId || {};\n"
+             "  const to = n && cur.imdbId === n.imdbId && cur.season === n.season && cur.episode === n.episode ? n.to : deviceHubTargetId();\n"
              "  if (!to || !deviceHubPortableUrl(url)) return false;")
 defined_once("deviceHubPortableUrl", "14-settings.js",
              "function deviceHubPortableUrl(url) {\n"
