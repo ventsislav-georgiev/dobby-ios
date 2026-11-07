@@ -3554,7 +3554,7 @@ for p in js_files:
         texts[os.path.basename(p)] = strip_js(f.read())
 
 def defined_once(name, file, block):
-    where = [n for n, t in texts.items() if re.search(r"^function\s+%s\s*\(|\b%s\s*=(?!=)" % (name, name), t, re.M)]
+    where = [n for n, t in texts.items() if re.search(r"^(?:async\s+)?function\s+%s\s*\(|\b%s\s*=(?!=)" % (name, name), t, re.M)]
     if where != [file]:
         fail("%s must be defined once, in js/%s; found in %s" % (name, file, where))
     if ("\n" + block + "\n") not in texts[file]:
@@ -3577,7 +3577,7 @@ defined_once("piEnabledBridge", "12-service-worker-offline.js",
 defined_once("getPiEnabled", "12-service-worker-offline.js",
              "function getPiEnabled() {\n  var bridge = piEnabledBridge();\n  if (!bridge) return true;\n"
              "  try { return bridge.piEnabled() === true; } catch (e) { return true; }\n}")
-defined_once("playStreamUrl", "21-android-tv.js", "function playStreamUrl(url, here) {")
+defined_once("playStreamUrl", "21-android-tv.js", "async function playStreamUrl(url, here) {")
 defined_once("deviceHubRoutePlay", "14-settings.js",
              "  const n = hubRemoteNextTo;\n  hubRemoteNextTo = null;\n"
              "  const cur = window._currentVideoId || {};\n"
@@ -3588,7 +3588,7 @@ defined_once("deviceHubPortableUrl", "14-settings.js",
              "  if (typeof url !== 'string' || !/^https?:\\/\\//i.test(url) || isOfflineVideoUrl(url)) return false;")
 
 text = texts["21-android-tv.js"]
-start = text.index("\nfunction playStreamUrl(url, here) {\n") + 1
+start = text.index("\nasync function playStreamUrl(url, here) {\n") + 1
 end = text.find("\n}\n", start)
 body = text[start:end].split("\n")
 GUARD = ["  if (isOfflineVideoUrl(url) && isDobbyWrapper() && !getPiEnabled()) {",
