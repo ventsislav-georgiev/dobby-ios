@@ -591,9 +591,10 @@ final class PlaybackCoordinator: ObservableObject {
         return s.trimmingCharacters(in: .whitespaces).isEmpty ? "none" : s
     }
 
-    func onFinish(error: Error?) {
-        mark("finish err=\(error?.localizedDescription ?? "nil")")
-        emit("dobbyNativePlaybackEnded", completed: error == nil)
+    /// The natural end, or #560's Next episode (SkipOverlay.swift) with `next: true` for the page.
+    func onFinish(error: Error?, next: Bool = false) {
+        mark("finish err=\(error?.localizedDescription ?? "nil")\(next ? " next" : "")")
+        emit("dobbyNativePlaybackEnded", completed: error == nil, extra: next ? ["next": true] : [:])
         clear()
     }
 

@@ -19,6 +19,7 @@ files and never edit someone else's. This page is the whole contract; the Androi
 | E9 More menu, Pause on OK, shortcuts, Speed | MoreMenu.swift, ShortcutsOverlay.swift |
 | E10 pause info cards | PauseInfoCards.swift |
 | E11 loaders | PlayerLoaders.swift |
+| #560 intro/recap skip, next episode | SkipOverlay.swift, SkipSegments.swift (pure) |
 
 Rules:
 - Edit only your files. If you need something in an E1 file, say so in your report; do not edit it.
@@ -43,7 +44,7 @@ Rules:
 
 video (`.aspectTransform(controls.aspect)`, E7) · picture clicks (Mac) / tap regions (iOS) ·
 `subtitleOverlay` (E5) · `playerLoaders` (E11) · info stats · `pauseInfoCards` (E10) ·
-`controlBarLayer` (E2) · close button · `moreMenu` (E9) · `shortcutsOverlay` (E9) · the open
+`controlBarLayer` (E2) · `skipOverlay` (#560) · close button · `moreMenu` (E9) · `shortcutsOverlay` (E9) · the open
 sheet (`OSDSheetView`, E1) · `subsDelayPill` (E6) · toast.
 
 Every component view is always in the tree and decides itself whether to draw (an empty
@@ -82,6 +83,7 @@ only ends the hold timer. Handlers the router calls:
 
 | handler | file | called when |
 |---|---|---|
+| `skipHandleKey` | SkipOverlay.swift | always, ahead of every layer (Return presses a skip / next button while the OSD is hidden; any key cancels the next-episode countdown) |
 | `subsDelayHandleKey` | SubsDelayPill.swift | pill open |
 | `subtitleSheetHandleKey`, `audioSheetHandleKey`, `qualitySheetHandleKey`, `speedSheetHandleKey`, `aspectSheetHandleKey`, `styleSheetHandleKey` | the sheet's file | that sheet open, BEFORE the generic sheet keys |
 | `shortcutsHandleKey` | ShortcutsOverlay.swift | card open |

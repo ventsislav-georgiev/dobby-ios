@@ -62,6 +62,7 @@ final class PlayerControls: ObservableObject {
     }
     @Published var aspect = AspectModel()                    // AspectModel.swift (E7)
     @Published var more = MoreMenuState()                    // MoreMenu.swift (E9)
+    @Published var skip = SkipState()                        // SkipOverlay.swift (#560)
 
     /// Every route the OSD reads its colours from: the payload's skin.
     var tint: OsdTint { .forSkin(playback?.request?.skin) }
@@ -119,7 +120,7 @@ final class PlayerControls: ObservableObject {
     }
 
     /// Called from KSPlayer's onPlay (about 10 Hz) with the playback position.
-    func playbackTick(current: TimeInterval) { subsDelayTick(current: current) }
+    func playbackTick(current: TimeInterval) { subsDelayTick(current: current); skipTick(current: current) }
 
     // MARK: Visibility
 
@@ -279,6 +280,7 @@ final class PlayerControls: ObservableObject {
     /// sheet letters keep working with a layer open, as before #466). Esc closes the top
     /// layer when its handler did not take it.
     func route(_ key: OSDKey) -> Bool {
+        if skipHandleKey(key) { return true }                            // SkipOverlay.swift (#560)
         if subsDelayOpen, subsDelayHandleKey(key) { return true }       // SubsDelayPill.swift (E6)
         if let s = sheet, sheetHandleKey(s, key) || sheetNavigate(key) { return true }
         if shortcutsOpen, shortcutsHandleKey(key) { return true }        // ShortcutsOverlay.swift (E9)
