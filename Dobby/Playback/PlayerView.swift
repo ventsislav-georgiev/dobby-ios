@@ -154,7 +154,9 @@ struct PlayerView: View {
                     playback.onProgress(current: cur, total: total)
                     controls.playbackTick(current: cur)
                 }
-                .onFinish { _, err in playback.onFinish(error: err) }
+                .onFinish { _, err in   // #560: the end inside a running Next episode countdown is next
+                    playback.onFinish(error: err, next: controls.skip.nextOnNaturalEnd(ref: playback.activeRef, failed: err != nil))
+                }
                 .aspectTransform(controls)                         // AspectSheet.swift (E7, #477 reset)
                 .ignoresSafeArea()
                 .clipped()

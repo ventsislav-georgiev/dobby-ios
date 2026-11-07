@@ -151,6 +151,11 @@ struct SkipState: Equatable {
     /// Any key or Back during the countdown: it stops, the button stays.
     mutating func cancelCountdown() { countdownEnd = nil; countdown = nil }
 
+    /// The natural end while the auto countdown still runs (credits.start within 10 s of the real
+    /// end) is the Next episode too. A cancelled countdown, button mode, off, a failed end or
+    /// another playback's state end plainly.
+    func nextOnNaturalEnd(ref: String?, failed: Bool) -> Bool { !failed && ref == self.ref && countdownEnd != nil }
+
     /// Where the visible skip button seeks to.
     func buttonTarget(_ skip: SkipSegments?) -> Double? { button.flatMap { skip?.segment($0)?.end } }
 }

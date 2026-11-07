@@ -118,6 +118,28 @@ enum SkipSegmentsCheck {
         check(s.nextShown && s.countdown == nil, "a cancelled countdown leaves the button")
         check(run(&s, segments(), [1311, 1400]) == [nil, nil] && s.nextShown, "a cancelled countdown never fires")
 
+        // The natural end inside a running countdown is next (credits within 10 s of the end).
+        s = SkipState()
+        _ = run(&s, segments(), [1300, 1304])
+        check(s.nextOnNaturalEnd(ref: "r1", failed: false), "the end during the auto countdown carries next")
+        check(!s.nextOnNaturalEnd(ref: "r1", failed: true), "a failed end during the countdown ends plainly")
+        check(!s.nextOnNaturalEnd(ref: "r2", failed: false), "another playback's countdown never makes its end next")
+        var cancelled = s; cancelled.cancelCountdown()
+        check(!cancelled.nextOnNaturalEnd(ref: "r1", failed: false), "the end after a cancelled countdown ends plainly")
+        var buttonMode = SkipState()
+        _ = run(&buttonMode, segments(creditsMode: .button), [1300, 1304])
+        check(!buttonMode.nextOnNaturalEnd(ref: "r1", failed: false), "credits mode button ends plainly")
+        var offMode = SkipState()
+        _ = run(&offMode, segments(creditsMode: .off), [1300, 1304])
+        check(!offMode.nextOnNaturalEnd(ref: "r1", failed: false), "credits mode off ends plainly")
+        var noNext = SkipState()
+        _ = run(&noNext, segments(hasNext: false), [1300, 1304])
+        check(!noNext.nextOnNaturalEnd(ref: "r1", failed: false), "hasNext false ends plainly")
+        var before = SkipState()
+        _ = run(&before, segments(), [1200])
+        check(!before.nextOnNaturalEnd(ref: "r1", failed: false), "an end before credits.start ends plainly")
+        check(!SkipState().nextOnNaturalEnd(ref: nil, failed: false), "an absent skip ends plainly")
+
         // Seeking back before the credits hides the button; reaching them again restarts it.
         _ = run(&s, segments(), [1200])
         check(!s.nextShown && s.countdown == nil, "seeking back before the credits hides Next episode")
@@ -167,7 +189,7 @@ enum SkipSegmentsCheck {
 
         print("PASS: SkipSegments auto/button/off per segment, confident, the 20 s length tolerance incl. null, "
               + "once-per-playback auto-skip with the button on seek-back, the 3 s label, credits with hasNext "
-              + "false/off/button/auto, the 10 s countdown and its cancel, an absent skip; PlayNativePayload "
+              + "false/off/button/auto, the 10 s countdown and its cancel, next on a natural end inside the countdown, an absent skip; PlayNativePayload "
               + "decodes skip, absent, null and malformed (#560)")
     }
 }
