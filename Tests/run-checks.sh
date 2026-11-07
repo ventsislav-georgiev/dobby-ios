@@ -276,6 +276,12 @@ for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleShe
   "$OUTP"
 done
 
+# #560: the intro / recap skip and next-episode model (SkipSegments.swift, pure), with the play
+# payload it decodes from (PlayNativePayload.swift), so an absent or malformed skip is pinned too.
+OUTS="$(mktemp -d)/skip-segments-check"
+xcrun swiftc -o "$OUTS" Dobby/Playback/SkipSegments.swift Dobby/Playback/PlayNativePayload.swift Tests/SkipSegmentsCheck.swift
+"$OUTS"
+
 # #541: the remote control's pure half (RemoteControl.swift): remoteCommand parsing and clamping, the track label
 # re-check, a tick after every command, the sender's view, ended dismissing the remote player, each control's
 # window.dobbyRemoteControl call. REMOTEWIRINGPY pins the app to it.
@@ -371,7 +377,7 @@ OFFLINEROOTPY
 # failed save still pushes the index and, on a book cancel, carries the book kind.
 OUT9="$(mktemp -d)/offline-store-check"
 xcrun swiftc -o "$OUT9" \
-  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Playback/PlayNativePayload.swift \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Playback/PlayNativePayload.swift Dobby/Playback/SkipSegments.swift \
   Dobby/Offline/OfflinePathAnchor.swift Dobby/Offline/OfflineStore.swift Tests/OfflineStoreCheck.swift
 CFFIXED_USER_HOME="$(mktemp -d)" "$OUT9"
 

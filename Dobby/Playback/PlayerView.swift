@@ -73,6 +73,7 @@ struct PlayerView: View {
 
             pauseInfoCards                                         // PauseInfoCards.swift (E10)
             controlBarLayer                                        // ControlBar.swift (E2)
+            skipOverlay                                            // SkipOverlay.swift (#560)
 
             // Close button as a top-level, topmost layer (not inside the bar): in iOS
             // portrait the bar's overlay was below the tap regions in hit-test order, so

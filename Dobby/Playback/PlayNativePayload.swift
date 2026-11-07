@@ -23,6 +23,7 @@ struct PlayNativePayload: Decodable {
     let thumb: String?              // pause info card still (absolute URL), else poster
     let video: VideoMeta?           // the page's video descriptor; per-title memory key
     let serverUrl: String?          // the page's API origin
+    let skip: SkipSegments?         // #560 intro/recap/credits segments (SkipSegments.swift); absent = nothing new
 
     // SmartTube / YouTube variants
     let playbackKind: String?       // "smarttube"
