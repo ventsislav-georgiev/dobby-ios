@@ -28,16 +28,19 @@ struct SkipSegments: Equatable {
     var creditsMode = Mode.auto
     var hasNext = false
 
-    /// An auto-skip needs the times measured on this cut: within 20 s of the actual duration.
+    /// An auto-skip needs the times measured on this cut: within 20 s of the actual duration,
+    /// unless the segment starts at the beginning (within `startAnchor` of 0).
     static let lengthTolerance = 20.0
+    static let startAnchor = 1.0
 
     func segment(_ k: Kind) -> Segment? { k == .intro ? intro : recap }
     func mode(_ k: Kind) -> Mode { k == .intro ? introMode : recapMode }
 
-    /// Mode auto, a confident segment, and a length that is unknown or matches this duration.
+    /// Mode auto, a confident segment, and a start at the beginning or a length that is unknown
+    /// or matches this duration.
     func autoSkips(_ k: Kind, duration: Double) -> Bool {
-        guard mode(k) == .auto, segment(k)?.confident == true else { return false }
-        guard let length else { return true }
+        guard mode(k) == .auto, let seg = segment(k), seg.confident else { return false }
+        guard seg.start > Self.startAnchor, let length else { return true }
         return duration.isFinite && abs(length - duration) <= Self.lengthTolerance
     }
 }

@@ -86,6 +86,16 @@ enum SkipSegmentsCheck {
         }
         check(segments().autoSkips(.intro, duration: .nan), "a null length auto-skips even before the duration is known")
 
+        // A segment from the very start auto-skips whatever the length; a later one keeps the 20 s rule.
+        for (start, end, auto) in [(0.0, 90.0, true), (30.0, 120.0, false)] {
+            let skip = SkipSegments(intro: Seg(start: start, end: end, confident: true), recap: nil, credits: nil,
+                                    length: 1375.374)
+            s = SkipState()
+            let a = run(&s, skip, [start + 0.5], duration: 1428.3)
+            check(a == (auto ? [.seek(end)] : [nil]), "an intro at \(start) with the length 53 s off auto-skips: \(auto)")
+            check(auto ? s.button == nil : s.button == .intro, "an intro at \(start) with the length off shows the button: \(!auto)")
+        }
+
         // Credits, hasNext false: nothing happens at the end.
         s = SkipState()
         check(run(&s, segments(hasNext: false), [1299, 1300, 1400]) == [nil, nil, nil], "hasNext false never fires next")
