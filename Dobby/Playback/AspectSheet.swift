@@ -30,10 +30,23 @@ enum AspectStore {
 extension PlayerControls {
     /// Called on first load (syncState) and after every change: starts the session once, then
     /// pushes the part KSPlayer owns (gravity: Crop is aspect fill). The transform is
-    /// `aspectTransform`, which re-renders from `aspect` on its own.
-    func applyAspect() {
+    /// `aspectTransform`, which re-renders from `aspect` on its own. `portrait` comes from the
+    /// rotation hook (AspectSessionReset), whose layout the view's bounds may not show yet.
+    func applyAspect(portrait: Bool? = nil) {
         if !aspect.started { startAspectSession() }
-        playback?.player.isScaleAspectFill = aspect.mode == .crop
+        playback?.player.isScaleAspectFill = aspect.effectiveMode(portrait: portrait ?? aspectPortrait) == .crop
+    }
+
+    var aspectPortrait: Bool { AspectModel.isPortrait(aspectViewAspect) }
+
+    /// #563: iPhone and iPad follow the view's orientation. The Mac keeps Original: the macOS
+    /// build, Catalyst, and an iOS build running on a Mac (which reports .pad).
+    private var aspectOrientationDefault: Bool {
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        return !ProcessInfo.processInfo.isiOSAppOnMac && [.phone, .pad].contains(UIDevice.current.userInterfaceIdiom)
+        #else
+        return false
+        #endif
     }
 
     /// The video view's aspect (window resizes and fullscreen change it); 0 when not laid out.
@@ -47,6 +60,7 @@ extension PlayerControls {
     private func startAspectSession() {
         aspect.started = true
         aspect.autoLevel = AspectStore.level
+        aspect.orientationDefault = aspectOrientationDefault
         if let size = playback?.player.playerLayer?.player.naturalSize {
             aspect.videoWidth = Double(size.width); aspect.videoHeight = Double(size.height)
         }
@@ -97,7 +111,7 @@ extension PlayerControls {
 
     /// One arrow step or Reset (Android cycleAspectAdjust).
     func adjustAspect(_ knob: AspectModel.Knob, _ dir: Int) {
-        if let memKnob = aspect.adjust(knob, dir) { rememberAspect(knob: memKnob, source: "manual") }
+        if let memKnob = aspect.adjust(knob, dir, portrait: aspectPortrait) { rememberAspect(knob: memKnob, source: "manual") }
         applyAspect()
     }
 
@@ -132,7 +146,7 @@ extension PlayerControls {
             rows.append(OSDItem(id: "mode", label: "Mode: not supported for this video", selected: false,
                                 enabled: false, action: {}))
         } else {
-            rows.append(arrow("mode", "Mode: \(a.mode.label)", knob(.mode)))
+            rows.append(arrow("mode", "Mode: \(a.effectiveMode(portrait: aspectPortrait).label)", knob(.mode)))
         }
         rows += [
             arrow("stretchV", "Stretch height: \(a.stretchV)%\(auto)", knob(.stretchV)),
@@ -185,6 +199,13 @@ private struct AspectSessionReset: ViewModifier {
 
     func body(content: Content) -> some View {
         content.aspectTransform(controls.aspect)
+            .background(GeometryReader { g in
+                // #563: the transform re-renders on a resize by itself; the gravity (Crop is
+                // KSPlayer's aspect fill) needs a push when the view turns portrait or landscape.
+                Color.clear.onChange(of: g.size.width > 0 && g.size.width < g.size.height) { portrait in
+                    if controls.aspect.started { controls.applyAspect(portrait: portrait) }
+                }
+            })
             .onChange(of: playback.request.map { "\($0.ref)|\($0.url ?? $0.videoUrl ?? "")" }) { _ in   // the one-argument form: iOS 16
                 controls.resetAspectSession()
             }

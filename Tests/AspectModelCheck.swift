@@ -146,6 +146,41 @@ enum AspectModelCheck {
         _ = l.foldLetterbox((0, 0), screenAspect: tv); l.autoLevel = 100
         check(l.reapplyLevel() == .none && !l.autoApplied, "measured without bars, a level step applies nothing")
 
+        // #563: phone and pad follow the view's orientation until a pick; the Mac keeps Original.
+        var o = AspectModel(); o.videoWidth = 2400; o.videoHeight = 1000
+        check(o.effectiveMode(portrait: true) == .original && o.effectiveMode(portrait: false) == .original,
+              "the Mac default stays Original")
+        check(AspectModel.isPortrait(9.0 / 16) && !AspectModel.isPortrait(1) && !AspectModel.isPortrait(0),
+              "portrait is a laid-out view aspect under 1")
+        o.orientationDefault = true
+        check(o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .stretch,
+              "phone and pad: portrait crops, landscape stretches")
+        t = o.transform(width: 1600, height: 900)
+        check(t.x == 1 && near(t.y, 2.4 / tv), "landscape renders Stretch to screen")
+        t = o.transform(width: 900, height: 1600)
+        check(t.x == 1 && t.y == 1, "a rotation to portrait drops the stretch (Crop is the gravity)")
+        check(o.modeHasNoEffect(viewAspect: 2.41), "a picture matching the view still disables the Mode row")
+        o.adjust(.mode, 1, portrait: false)
+        check(o.mode == .crop && o.effectiveMode(portrait: false) == .crop && o.effectiveMode(portrait: true) == .crop,
+              "a pick steps from the mode on screen and survives a rotation")
+        o.adjust(.mode, 1, portrait: true)
+        check(o.effectiveMode(portrait: true) == .original && o.effectiveMode(portrait: false) == .original,
+              "a pick of Original holds in both orientations")
+        o.adjust(.reset, 1)
+        check(o.followsOrientation && o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .stretch,
+              "Reset returns phone and pad to the orientation default")
+        var mac = AspectModel(); mac.adjust(.mode, 1); mac.adjust(.reset, 1)
+        check(mac.effectiveMode(portrait: false) == .original, "Reset on the Mac is Original")
+        // No auto stretch on top of an orientation-default Stretch or Crop.
+        var f = AspectModel(); f.orientationDefault = true; f.autoLevel = 100; f.videoWidth = 1920; f.videoHeight = 1080
+        check(f.autoStretch(videoAspect: 2.39, screenAspect: tv) == nil && f.stretchV == 100, "no metadata auto stretch")
+        check(!f.startLetterbox(token: 1), "no letterbox sampler")
+        check(f.reapplyLevel() == .none && f.stretchV == 100, "a level step applies nothing")
+        check(f.restore(StretchMemory.Row(p: 134, k: "stretchV", m: "auto", cap: StretchMemory.capStamp(100), n: 1.34, t: 0)) == nil
+              && f.stretchV == 100, "a remembered auto row is not restored")
+        check(f.restore(StretchMemory.Row(p: 115, k: "stretchV", m: "manual", cap: 0, n: nil, t: 0))! == ("stretchV", 115),
+              "a remembered manual row still restores")
+
         print("AspectModelCheck: all checks passed")
     }
 }

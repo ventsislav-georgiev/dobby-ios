@@ -23,6 +23,11 @@ struct AspectModel: Equatable {
     static let autoFull = 100
 
     var mode = Mode.original
+    /// #563: iPhone and iPad (AspectSheet.swift sets this at session start) follow the video view's
+    /// orientation until the user picks a mode: Crop in portrait, Stretch in landscape. The Mac keeps Original.
+    var orientationDefault = false
+    var modePicked = false
+    var followsOrientation: Bool { orientationDefault && !modePicked }
     var stretchV = 100      // "Stretch height", scaleY
     var stretchH = 100      // "Stretch width", scaleX
     var zoom = 100          // "Scale", both axes
@@ -43,6 +48,14 @@ struct AspectModel: Equatable {
 
     var videoAspect: Double { videoWidth > 0 && videoHeight > 0 ? videoWidth / videoHeight : 0 }
 
+    /// A view aspect under 1 is portrait; 0 (not laid out) is not.
+    static func isPortrait(_ viewAspect: Double) -> Bool { viewAspect > 0 && viewAspect < 1 }
+
+    /// The mode on screen: the user's pick, else the orientation default (#563).
+    func effectiveMode(portrait: Bool) -> Mode {
+        followsOrientation ? (portrait ? .crop : .stretch) : mode
+    }
+
     /// #477 letterbox sampler session (Android letterboxSampler*): `token` names the running
     /// sampler (0 = never started), `applied` the percent it put on screen (Android
     /// letterboxAppliedIndex; nil = not yet), the bars are the minimum across accepted samples.
@@ -60,6 +73,7 @@ struct AspectModel: Equatable {
     func transform(width w: Double, height h: Double) -> (x: Double, y: Double, dy: Double) {
         var x = Double(stretchH * zoom) / 10_000, y = Double(stretchV * zoom) / 10_000
         let va = videoAspect, viewAspect = h > 0 ? w / h : 0
+        let mode = effectiveMode(portrait: Self.isPortrait(viewAspect))
         if mode == .stretch, va > 0, viewAspect > 0 {
             if va > viewAspect { y *= va / viewAspect } else { x *= viewAspect / va }
         }
@@ -89,13 +103,15 @@ struct AspectModel: Equatable {
 
     /// One arrow-row step or Reset. Returns the knob a manual memory row is written for
     /// ("stretchV" / "zoom"), nil when nothing is remembered (Android rememberAspectAdjust calls).
+    /// `portrait` is the view's orientation: a Mode step starts from the mode on screen.
     @discardableResult
-    mutating func adjust(_ knob: Knob, _ dir: Int) -> String? {
+    mutating func adjust(_ knob: Knob, _ dir: Int, portrait: Bool = false) -> String? {
         let d = dir == 0 ? 1 : dir
         switch knob {
         case .mode:
             let n = Mode.allCases.count
-            mode = Mode(rawValue: ((mode.rawValue + d) % n + n) % n)!
+            mode = Mode(rawValue: ((effectiveMode(portrait: portrait).rawValue + d) % n + n) % n)!
+            modePicked = true                          // #563: kept in both orientations
             return resetKnobs()                        // #273: a Mode pick starts over, Position Y kept
         case .stretchV, .stretchVFine:
             stretchV = Self.step(stretchV, d, by: knob == .stretchVFine ? 1 : Self.coarse)
@@ -115,7 +131,7 @@ struct AspectModel: Equatable {
             offsetY = next
             return nil
         case .reset:
-            mode = .original; offsetY = 0
+            mode = .original; modePicked = false; offsetY = 0   // #563: phone and pad follow again
             return resetKnobs()
         }
     }
@@ -157,7 +173,8 @@ struct AspectModel: Equatable {
     /// Android maybeAutoStretchForAspect: once per playback, never over a manual knob or at Off.
     /// Returns the applied percent (the caller remembers an auto row and toasts), nil when nothing changed.
     mutating func autoStretch(videoAspect: Double, screenAspect: Double) -> Int? {
-        guard !autoApplied, !userAdjusted, autoLevel != 0, screenAspect > 0 else { return nil }
+        // #563: Stretch and Crop already fill the view; an auto stretch would stack on top.
+        guard !autoApplied, !userAdjusted, !followsOrientation, autoLevel != 0, screenAspect > 0 else { return nil }
         let p = Self.pickStretch(videoAspect: videoAspect, screenAspect: screenAspect, level: autoLevel)
         guard p != 100 else { return nil }
         stretchV = p; stretchFromAuto = true; autoApplied = true
@@ -169,7 +186,7 @@ struct AspectModel: Equatable {
     /// `.runStartPaths`: no fill measured yet, run the metadata pass (and the #477 sampler) now.
     enum LevelOutcome { case none, remember, runStartPaths }
     mutating func reapplyLevel() -> LevelOutcome {
-        if userAdjusted { return .none }
+        if userAdjusted || followsOrientation { return .none }
         if autoLevel == 0 {
             if stretchFromAuto { stretchV = 100 }
             return .none
@@ -189,9 +206,9 @@ struct AspectModel: Equatable {
     // MARK: Letterbox sampler (#477, Android startLetterboxSamplerIfNeeded / onLetterboxSampleResult)
 
     /// Starts the sampler session once per playback; false when it must not run: already started,
-    /// a manual knob, Off, or the metadata pass / a restored row already filled the screen.
+    /// a manual knob, Off, the orientation default (#563), or the metadata pass / a restored row already filled the screen.
     mutating func startLetterbox(token: Int) -> Bool {
-        guard lbToken == 0, !userAdjusted, autoLevel != 0, !(lbApplied == nil && autoApplied) else { return false }
+        guard lbToken == 0, !userAdjusted, !followsOrientation, autoLevel != 0, !(lbApplied == nil && autoApplied) else { return false }
         lbToken = token
         return true
     }
@@ -250,7 +267,7 @@ struct AspectModel: Equatable {
     mutating func restore(_ row: StretchMemory.Row) -> (knob: String, percent: Int)? {
         let p = row.p
         guard (Self.minPercent...Self.maxPercent).contains(p), row.m == "manual" || row.m == "auto" else { return nil }
-        if row.m == "auto" && (autoLevel == 0 || row.cap != StretchMemory.capStamp(autoLevel)) { return nil }
+        if row.m == "auto" && (autoLevel == 0 || followsOrientation || row.cap != StretchMemory.capStamp(autoLevel)) { return nil }
         if row.m == "manual" && p == 100 { return nil }   // #180: no correction
         let knob = row.m == "manual" && row.k == "zoom" ? "zoom" : "stretchV"
         if knob == "zoom" { zoom = p } else { stretchV = p }
