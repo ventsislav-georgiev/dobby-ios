@@ -13,6 +13,7 @@ struct PlayNativePayload: Decodable {
     let poster: String?
     let preferredSubtitleLang: String?
     let preferredAudioLang: String?
+    let subtitleMode: String?    // #586 "on" | "forced" | "off"; read through SubtitleMode(_:), missing or unknown is on
     let allowBookmarks: Bool?
     let subs: [SubtitleTrack]?
 

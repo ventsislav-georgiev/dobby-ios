@@ -31,4 +31,28 @@ enum TrackPreference {
         return nil
     }
 
+    /// #586: the subtitle auto-pick under the page's subtitle mode. on is pick() unchanged; forced
+    /// considers only tracks marked forced, in the same priority; off never auto-picks (a hand
+    /// pick in SubtitleSheet still works and leaves the mode alone).
+    static func pickSubtitle(_ trackLangs: [String?], forced: [Bool], priority: [String], mode: SubtitleMode) -> Int? {
+        switch mode {
+        case .on: return pick(trackLangs, priority: priority)
+        case .off: return nil
+        case .forced:
+            return pick(trackLangs.indices.map { forced.indices.contains($0) && forced[$0] ? trackLangs[$0] : nil },
+                        priority: priority)
+        }
+    }
+
+    /// A forced marking in a track's title or label ("English (Forced)", "eng.forced").
+    static func isForcedLabel(_ name: String?) -> Bool {
+        name?.range(of: #"(?<![a-z])forced(?![a-z])"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+/// #586: the play payload's subtitleMode. Missing or unknown reads on (owner ruling, OQ-76).
+enum SubtitleMode: String {
+    case on, forced, off
+
+    init(_ raw: String?) { self = raw.flatMap(SubtitleMode.init(rawValue:)) ?? .on }
 }
