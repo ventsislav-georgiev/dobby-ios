@@ -163,6 +163,9 @@ final class PlaybackCoordinator: ObservableObject {
         // MP4) ignores this, so onStateChanged also seeks manually at readyToPlay.
         options.startPlayTime = req.startSeconds
         options.audioPriority = TrackPreference.priority(req.preferredAudioLang, deviceLanguage: Self.deviceLanguage)
+        // #586: KSPlayer's own fallback (the first enabled embedded track, a second after
+        // readyToPlay) is an auto-pick too, so it runs only in on mode. Set per open: one shared object.
+        options.autoSelectEmbedSubtitle = SubtitleMode(req.subtitleMode) == .on
         // KSPlayerLayer instantiates KSOptions.firstPlayerType and only falls
         // back to the second on failure. The synthesized MPD is FFmpeg-only,
         // so the default (KSAVPlayer) burns an async AVFoundation failure on
@@ -228,7 +231,8 @@ final class PlaybackCoordinator: ObservableObject {
 
     /// Attach the subtitle tracks carried in the playNative envelope; auto-select a
     /// track only when the web flagged it default (applyPreferredTracks, right after, may
-    /// override it with a preferred-language track).
+    /// override it with a preferred-language track). #586: the flag is an auto-pick too, so only in
+    /// on mode; forced and off leave the choice to applyPreferredTracks.
     private func applyInitialSubtitles() {
         guard let subs = request?.subs, !subs.isEmpty else { return }
         var selected: URLSubtitleInfo?
@@ -240,7 +244,7 @@ final class PlaybackCoordinator: ObservableObject {
             attached.append((info, t.lang))
             if t.isDefault == true { selected = info }
         }
-        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }
+        if let selected, SubtitleMode(request?.subtitleMode) == .on { player.subtitleModel.selectedSubtitleInfo = selected }
     }
 
     /// The payload's subtitle tracks as attached on first open, with their languages.
@@ -266,14 +270,20 @@ final class PlaybackCoordinator: ObservableObject {
 
         let embedded = p.tracks(mediaType: .subtitle)
         // AVPlayer's legible tracks are not SubtitleInfo; they are reported, never picked here.
-        let pickable: [(info: any SubtitleInfo, lang: String?)] =
-            embedded.compactMap { t in (t as? any SubtitleInfo).map { ($0, t.languageCode) } }
-            + attached.map { ($0.info, $0.lang) }
+        // #586 forced marking: KSPlayer keeps an image track enabled at open only when its stream is
+        // flagged forced (FFmpegAssetTrack); a text track or side-loaded file says so only in its title.
+        let pickable: [(info: any SubtitleInfo, lang: String?, forced: Bool)] =
+            embedded.compactMap { t in
+                (t as? any SubtitleInfo).map { ($0, t.languageCode, (t.isImageSubtitle && t.isEnabled) || TrackPreference.isForcedLabel(t.name)) }
+            }
+            + attached.map { ($0.info, $0.lang, TrackPreference.isForcedLabel($0.info.name)) }
+        let mode = SubtitleMode(req.subtitleMode)
         let subPriority = TrackPreference.priority(req.preferredSubtitleLang, deviceLanguage: Self.deviceLanguage)
         var selectedLang: String?
         // A track the page flagged default (the offline sidecar the user picked, #228) stands.
-        let pageFlagged = req.subs?.contains { $0.isDefault == true } ?? false
-        if !pageFlagged, let i = TrackPreference.pick(pickable.map { $0.lang }, priority: subPriority) {
+        let pageFlagged = mode == .on && (req.subs?.contains { $0.isDefault == true } ?? false)
+        if !pageFlagged, let i = TrackPreference.pickSubtitle(pickable.map { $0.lang }, forced: pickable.map { $0.forced },
+                                                             priority: subPriority, mode: mode) {
             player.subtitleModel.selectedSubtitleInfo = pickable[i].info
             if i < pickable.count - attached.count { selectedLang = TrackPreference.normalize(pickable[i].lang) }
         }
@@ -287,7 +297,7 @@ final class PlaybackCoordinator: ObservableObject {
         if let selectedLang { report["selectedLang"] = selectedLang }
         guard let json = Self.json(report) else { return }
         bridge?.callJS("window.dobbyNativeSubtitleTracks && window.dobbyNativeSubtitleTracks(\(json));")
-        mark("subtitle tracks langs=\(langs) selected=\(selectedLang ?? "-") audio=\(audio.first { $0.isEnabled }?.languageCode ?? "-")")
+        mark("subtitle tracks mode=\(mode.rawValue) langs=\(langs) selected=\(selectedLang ?? "-") audio=\(audio.first { $0.isEnabled }?.languageCode ?? "-")")
     }
 
     private static func json(_ object: [String: Any]) -> String? {

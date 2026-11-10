@@ -103,6 +103,7 @@ reads = {
     "DISPLAYLINKRATEPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"],
                           ['with open("Dobby/Info.plist", "rb") as f:']),
     "REMOTEWIRINGPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
+    "SUBTITLEMODEWIRINGPY": ([SW], ['src = strip_swift(open("Dobby/Playback/PlaybackCoordinator.swift").read(), "PlaybackCoordinator.swift")'], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -275,6 +276,42 @@ for PURE in SubtitleOrdering SubsDelayModel AspectModel AudioTrackLabel StyleShe
   xcrun swiftc -o "$OUTP" Dobby/Playback/LanguageCodes.swift "Dobby/Playback/$PURE.swift" "Tests/${PURE}Check.swift"
   "$OUTP"
 done
+
+# #586: the subtitle mode: the payload field read with its default (missing or unknown is on) and
+# the auto-pick it gates (TrackPreference.pickSubtitle), off picks nothing, forced only a forced track.
+OUTM="$(mktemp -d)/subtitle-mode-check"
+xcrun swiftc -o "$OUTM" Dobby/Playback/LanguageCodes.swift Dobby/Playback/TrackPreference.swift \
+  Dobby/Playback/PlayNativePayload.swift Dobby/Playback/SkipSegments.swift Tests/SubtitleModeCheck.swift
+"$OUTM"
+
+# #586: the pure pick is only a guard if the coordinator calls it. Pin the three auto-pick gates:
+# the preferred-language pick goes through pickSubtitle with the payload's mode, the page default
+# flag selects only in on mode, and KSPlayer's own first-track fallback is on only in on mode.
+python3 - <<'SUBTITLEMODEWIRINGPY'
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+src = strip_swift(open("Dobby/Playback/PlaybackCoordinator.swift").read(), "PlaybackCoordinator.swift")
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#586)\n" % msg)
+    sys.exit(1)
+pins = [
+    ("        let mode = SubtitleMode(req.subtitleMode)\n", "applyPreferredTracks reads the payload's mode"),
+    ("        let pageFlagged = mode == .on && (req.subs?.contains { $0.isDefault == true } ?? false)\n",
+     "the page default flag stands only in on mode"),
+    ("        options.autoSelectEmbedSubtitle = SubtitleMode(req.subtitleMode) == .on\n",
+     "KSPlayer's own embedded fallback runs only in on mode, set on every open"),
+    ("        if let selected, SubtitleMode(request?.subtitleMode) == .on { player.subtitleModel.selectedSubtitleInfo = selected }\n",
+     "applyInitialSubtitles selects the flagged track only in on mode"),
+]
+for line, what in pins:
+    if src.count(line) != 1:
+        fail(what + ": expected exactly one %r" % line.strip())
+if src.count("TrackPreference.pickSubtitle(") != 1 or "priority: subPriority, mode: mode)" not in src \
+        or "TrackPreference.pick(pickable" in src or src.count("autoSelectEmbedSubtitle") != 1:
+    fail("the subtitle auto-pick must go through pickSubtitle with the payload's mode, once, and nothing else may set autoSelectEmbedSubtitle")
+print("PASS: the subtitle auto-pick, the page default flag and KSPlayer's embedded fallback are gated on subtitleMode (#586)")
+SUBTITLEMODEWIRINGPY
 
 # #560: the intro / recap skip and next-episode model (SkipSegments.swift, pure), with the play
 # payload it decodes from (PlayNativePayload.swift), so an absent or malformed skip is pinned too.
@@ -509,7 +546,7 @@ if keys.count('        case isDefault = "default"') != 1 or len([l for l in keys
 coordinator = swift_lines("Dobby/Playback/PlaybackCoordinator.swift")
 apply = block(coordinator, "    private func applyInitialSubtitles() {", "applyInitialSubtitles")
 if apply.count("            if t.isDefault == true { selected = info }") != 1 \
-        or apply.count("        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }") != 1:
+        or apply.count("        if let selected, SubtitleMode(request?.subtitleMode) == .on { player.subtitleModel.selectedSubtitleInfo = selected }") != 1:
     fail("applyInitialSubtitles no longer selects the track the page flagged default")
 # The body alone is a guard on a function nobody calls: pin its one live call, on first open.
 call = "            if resumeSeconds == nil { applyInitialSubtitles() }"
@@ -524,7 +561,7 @@ if sum(l.count("{") - l.count("}") for l in before) != 0 \
     fail("applyInitialSubtitles() sits in a nested scope or #if of the first-open readyToPlay branch, not at its top level")
 if ready.count("            resumeSeconds = nil") != 1 or ready.index(call) > ready.index("            resumeSeconds = nil"):
     fail("resumeSeconds is cleared before the first-open check, so a quality switch re-adds every track")
-if apply[-2:] != ["        }", "        if let selected { player.subtitleModel.selectedSubtitleInfo = selected }"]:
+if apply[-2:] != ["        }", "        if let selected, SubtitleMode(request?.subtitleMode) == .on { player.subtitleModel.selectedSubtitleInfo = selected }"]:
     fail("applyInitialSubtitles must hand the flagged track over right after its loop")
 print('PASS: SubtitleTrack.CodingKeys maps isDefault to the page\'s "default" key and '
       "applyInitialSubtitles, called once on first open, selects the flagged track (#228)")
