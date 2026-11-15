@@ -75,6 +75,26 @@ enum LaunchHoldWebViewCheck {
         print("stuck on false, wait 1.5 s: painted \(stuck.painted.map { String(format: "%.2f", $0) } ?? "nil")")
         check((stuck.painted ?? 0) >= 1.5 && (stuck.painted ?? 99) < 3, "a page stuck on false: the cover lifts at paintWait")
 
+        // A failed load lifts the cover at once, not at the loadWait backstop (delegate driven directly, before any finish).
+        for (name, provisional) in [("didFail", false), ("didFailProvisionalNavigation", true)] {
+            let root = shell("window.dobbyPainted = false;")
+            let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+            let nav = ShellNavigation(shellRoot: root)
+            nav.loadWait = 60
+            nav.paintWait = 60
+            let start = Date()
+            var painted: TimeInterval?
+            nav.onPainted = { painted = Date().timeIntervalSince(start) }
+            webView.navigationDelegate = nav
+            nav.load(origin, in: webView)
+            let err = NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet)
+            if provisional { nav.webView(webView, didFailProvisionalNavigation: nil, withError: err) }
+            else { nav.webView(webView, didFail: nil, withError: err) }
+            pump(1) { painted != nil }
+            check((painted ?? 99) < 1, "\(name): a failed load lifts the cover promptly, far before loadWait")
+            try? FileManager.default.removeItem(at: root)
+        }
+
         if failures > 0 {
             print("FAIL: \(failures) launch hold check(s) (#614)")
             exit(1)
