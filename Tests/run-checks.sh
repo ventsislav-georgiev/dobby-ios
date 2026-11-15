@@ -48,6 +48,7 @@ reads = {
                       ["        lines = strip_swift_lines(open(path).read(), path)",
                        'selftest = strip_swift(open("Dobby/Web/SettingsSelfTest.swift").read(), "SettingsSelfTest.swift").splitlines()'], []),
     "SECURESCHEMEPY": ([SWL], ["lines = strip_swift_lines(open(path).read(), path)"], []),
+    "WEBVIEWBLACKPY": ([SWL], ["lines = strip_swift_lines(open(path).read(), path)"], []),
     "PRESENCEPY": ([SW], ['src = strip_swift(open("Dobby/Web/ApiSchemeHandler.swift").read(), "ApiSchemeHandler.swift")',
                           "    server_src = strip_swift(open(routes).read(), routes)",
                           "    text = strip_swift(open(path).read(), path)"], []),
@@ -796,6 +797,42 @@ if stripped != [api, offline]:
 
 print("PASS: WebContainer marks both dobby-api: and dobby-offline: secure before constructing its WKWebView (#067, #151)")
 SECURESCHEMEPY
+
+# #625: a cold start flashed white. An opaque WKWebView paints white (light mode) until WebKit's
+# first frame, about 350 ms on the simulator; with the launch cover removed a light-mode launch
+# recording shows the black launch screen cross-fade into white. The cover hides it only while
+# it is fully opaque. The web view is non-opaque and black instead, set in makeWebView's iOS
+# block, after the construction and before the load (which runs in the Task) so its first paint
+# finds them; nothing else in the file may set isOpaque again.
+python3 - <<'WEBVIEWBLACKPY'
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift_lines
+
+path = "Dobby/Web/WebContainer.swift"
+lines = strip_swift_lines(open(path).read(), path)
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#625)\n" % msg)
+    sys.exit(1)
+def one(text):
+    hits = [i for i, l in enumerate(lines) if l.strip() == text]
+    if len(hits) != 1:
+        fail("expected exactly one line %r in %s, found %d" % (text, path, len(hits)))
+    return hits[0]
+made = one("let webView = WKWebView(frame: .zero, configuration: config)")
+ios = next((i for i in range(made, len(lines)) if lines[i].strip() == "#if os(iOS)"), None)
+end = next((i for i in range(ios or made, len(lines)) if lines[i].strip() == "#endif"), None) if ios else None
+load = one("Task { @MainActor in")
+if ios is None or end is None or not made < ios < end < load:
+    fail("makeWebView's #if os(iOS) block must follow the WKWebView construction and precede the load Task")
+for text in ("webView.isOpaque = false", "webView.backgroundColor = .black",
+             "webView.scrollView.backgroundColor = .black", "webView.underPageBackgroundColor = .black"):
+    if not ios < one(text) < end:
+        fail("%r must sit in makeWebView's #if os(iOS) block, before the load" % text)
+if sum("isOpaque" in l for l in lines) != 1:
+    fail("nothing else in %s may set isOpaque" % path)
+print("PASS: the WKWebView is non-opaque on black before its first load, so no white shows at launch (#625)")
+WEBVIEWBLACKPY
 
 # #129: scheduleHide() re-armed the auto-hide timer on every isPlaying state change,
 # including a rebuffer mid-drag, so a scrub longer than the 3s idle window lost the

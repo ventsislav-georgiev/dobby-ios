@@ -77,6 +77,12 @@ struct WebContainer {
         webView.uiDelegate = coordinator
         #if os(iOS)
         webView.scrollView.bounces = false
+        // #625: an opaque WKWebView paints white until WebKit's first frame; black instead, so
+        // no white can show at launch, under the launch cover or as it fades.
+        webView.isOpaque = false
+        webView.backgroundColor = .black
+        webView.scrollView.backgroundColor = .black
+        webView.underPageBackgroundColor = .black
         webView.allowsBackForwardNavigationGestures = false
         // #197: a left-edge swipe is the Android TV Back key. Not the WebKit history gesture
         // above: most views (settings, pickers, the web player, books) push no history entry,
