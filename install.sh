@@ -20,6 +20,7 @@ TARGET="${1:-mac}"
 : "${DOBBY_PI_HOST:?export DOBBY_PI_HOST (the Pi https name, see README)}"
 
 xcodegen generate
+scripts/fetch-core-package.sh  # #637: the core package the targets link
 
 if [ "$TARGET" = "testflight" ]; then
   : "${ASC_KEY_ID:?set ASC_KEY_ID (App Store Connect API key id)}"

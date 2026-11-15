@@ -52,6 +52,10 @@ targets:
       - package: Sparkle
         product: Sparkle
         destinationFilters: [macOS]
+      # #637: the core package, a static xcframework fetched by scripts/fetch-core-package.sh
+      # (gitignored, sha256-pinned in core-package.lock). Linked, never embedded.
+      - framework: Vendor/YtCore.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: eu.illegible.dobbyios

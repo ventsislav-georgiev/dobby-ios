@@ -1,0 +1,6 @@
+# Core package pinned by scripts/fetch-core-package.sh: source repository, release tag, asset name,
+# sha256 of the asset. The repository lives here, not in the workflow, so no CI log header shows it.
+repo=ventsislav-georgiev/dobby-ytcore
+tag=core-0.1.0
+asset=YtCore.xcframework.zip
+sha256=22a111f3e58e595da43e7a953fec2d6975375c239423637c276927dcffabbf93

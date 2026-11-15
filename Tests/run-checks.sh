@@ -17,6 +17,15 @@ xcrun swiftc -o "$OUT2" \
   Dobby/ServerAddresses.swift Dobby/AppConfig.swift Tests/ServerAddressesCheck.swift
 "$OUT2"
 
+# #637: the core package (scripts/fetch-core-package.sh fails with how to get it when absent)
+# links and starts an isolate on macOS. Its module map does not autolink Foundation.
+scripts/fetch-core-package.sh
+CORE_SLICE=Vendor/YtCore.xcframework/macos-arm64
+OUTCORE="$(mktemp -d)/core-link-check"
+xcrun swiftc -o "$OUTCORE" -I "$CORE_SLICE/Headers" -L "$CORE_SLICE" -lytcore -framework Foundation \
+  Tests/CoreLinkCheck.swift
+"$OUTCORE"
+
 # #190: every block that strips Swift comments imports Tests/swift_strip.py, one lexer for
 # // and nested /* */ comments over "...", """...""" and #"..."# literals, whose probe runs on
 # every import. Its standalone run below is the suite's PASS line for the stripper itself.

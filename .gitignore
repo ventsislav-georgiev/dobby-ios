@@ -36,3 +36,6 @@ Dobby/Shell/*
 # #482: Python-Apple-support and the pinned wheels, fetched by scripts/copy-python.sh. The Python
 # tree itself is only ever copied into the built app, never into this (public) repo.
 python-support/
+
+# #637: the core package, fetched and sha256-verified by scripts/fetch-core-package.sh.
+Vendor/

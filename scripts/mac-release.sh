@@ -91,6 +91,7 @@ ARCHIVE="$DD/Dobby-$BUILD.xcarchive"
 echo "mac-release: build $BUILD ($MARKETING), $([ "$UNSIGNED" = 1 ] && echo unsigned || echo signed), out $OUT"
 
 (cd "$REPO" && "$XCODEGEN" generate --quiet)
+"$REPO/scripts/fetch-core-package.sh"  # #637: the core package the targets link
 # macOS Release needs explicit modules off (prebuilt FFmpeg headers break them), as install.sh.
 COMMON=(-project "$REPO/Dobby.xcodeproj" -scheme Dobby -configuration Release
   -destination 'generic/platform=macOS' -derivedDataPath "$DD/DD"

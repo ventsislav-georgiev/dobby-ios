@@ -178,6 +178,15 @@ jobs:
             exit 1
           fi
 
+      # #637: the core package the app links, a release asset pinned (repository, tag,
+      # sha256) in core-package.lock; a mismatch fails here. Nothing about the source goes in
+      # this step: its header shows only the masked token, and the script prints only
+      # neutral lines (gh's own messages, which name the repository, are dropped).
+      - name: Fetch core package
+        env:
+          CORE_PKG_TOKEN: ${{ secrets.CORE_PKG_TOKEN }}
+        run: scripts/fetch-core-package.sh
+
       - name: Install xcodegen
         run: brew install xcodegen
 

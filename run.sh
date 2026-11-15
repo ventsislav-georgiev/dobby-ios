@@ -8,6 +8,7 @@ cd "$(dirname "$0")"
 APP=build/Build/Products/Debug/Dobby.app
 
 xcodegen generate
+scripts/fetch-core-package.sh  # #637: the core package the targets link
 xcodebuild -project Dobby.xcodeproj -scheme Dobby -configuration Debug \
   -destination 'platform=macOS' -derivedDataPath build \
   CODE_SIGN_IDENTITY="-" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
