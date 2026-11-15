@@ -46,6 +46,46 @@ final class PlaybackCoordinator: ObservableObject {
         return o
     }()
 
+    #if os(iOS)
+    /// #613: the FFmpeg engine's video stream, discarded while the app is in the background.
+    private var backgroundVideo = BackgroundVideo()
+
+    init() {
+        // KSPlayerLayer pauses on didEnterBackground unless this is set; Info.plist has the audio mode.
+        KSOptions.canBackgroundPlay = true
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.parkVideo() }
+        }
+        nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.resumeVideo() }
+        }
+    }
+
+    private func parkVideo() {
+        let p = player.playerLayer?.player
+        let video = p?.tracks(mediaType: .video).first { $0.isEnabled }
+        guard backgroundVideo.enterBackground(ffmpegEngine: p is KSMEPlayer, videoTrack: video), let video else { return }
+        video.isEnabled = false   // AVDISCARD_ALL: the demuxer drops video packets, audio keeps reading
+        mark("background: video parked at \(p?.currentPlaybackTime ?? .nan)s")
+    }
+
+    private func resumeVideo() {
+        let layer = player.playerLayer
+        let tracks: [AnyObject] = layer?.player.tracks(mediaType: .video) ?? []
+        guard let video = backgroundVideo.enterForeground(currentTracks: tracks) as? MediaPlayerTrack,
+              let layer else { return }
+        video.isEnabled = true
+        let t = layer.player.currentPlaybackTime
+        // The seek restarts the demuxer at a keyframe, the only packet a rebuilt VideoToolbox session can
+        // decode. autoPlay keeps a paused player paused.
+        if layer.player.seekable, t.isFinite {
+            layer.seek(time: t, autoPlay: layer.state.isPlaying) { _ in }
+        }
+        mark("foreground: video resumed, resync seek to \(t)s seekable=\(layer.player.seekable)")
+    }
+    #endif
+
     private var didSeekToStart = false
     private var lastPositionMs = 0
     private var lastDurationMs = 0
