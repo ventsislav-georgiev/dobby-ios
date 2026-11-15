@@ -760,7 +760,8 @@ if [ "$(uname -s)" = "Darwin" ]; then
 PLIST
   xcrun swiftc -o "$OUT4" -framework WebKit -framework AppKit \
     -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$PLIST4" \
-    Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeWebViewCheck.swift
+    Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Dobby/Web/BridgeInjection.swift \
+    Tests/ApiSchemeWebViewCheck.swift
   "$OUT4"
 fi
 

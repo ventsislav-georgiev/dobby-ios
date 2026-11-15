@@ -214,6 +214,29 @@ enum ApiSchemeWebViewCheck {
         // The one that was broken: without the fix this rejects before the handler.
         check(secretLane == "status 400", "the secret lane answers an HTTP status, not a network error")
 
+        // #640: YouTube watch progress Pi-less. The native player's ticks reach the page, which posts
+        // playback/track as a relative keepalive fetch; the shipped shim sends it to the scheme, and the
+        // handler hands method, path, query and body to the core lane (a spy here: no Keychain, no network).
+        var lane: (method: String, path: String, query: String?, body: Data?)?
+        ApiSchemeHandler.coreLane = { m, p, q, b, _, done in
+            lane = (m, p, q, b)
+            done(.init(status: 200, headers: ["Content-Type": "application/json"], body: Data("{}".utf8)))
+        }
+        let trackBody = "{\"kind\":\"playback\",\"positionSec\":60}"
+        let track = evaluate(webView, BridgeInjection.coreFetchShim(piEnabled: false) + """
+              try {
+                const r = await fetch('/api/smarttube/playback/track?videoId=aqz-KE-bpKQ&play=1-1', { method: 'POST',
+                  headers: { 'Content-Type': 'application/json' }, body: '\(trackBody)', keepalive: true });
+                return 'status ' + r.status;
+              } catch (e) { return 'error ' + e; }
+        """)
+        print("track lane:   \(track)")
+        check(track == "status 200", "#640: the page's keepalive playback/track POST is answered through the scheme")
+        check(lane?.method == "POST" && lane?.path == "/api/smarttube/playback/track"
+                && lane?.query == "videoId=aqz-KE-bpKQ&play=1-1",
+              "#640: the core lane gets POST /api/smarttube/playback/track with its query: \(String(describing: lane))")
+        check(lane?.body == Data(trackBody.utf8), "#640: the core lane gets the track body the page sent")
+
         print(failures == 0 ? "ApiSchemeWebViewCheck: all good" : "ApiSchemeWebViewCheck: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
