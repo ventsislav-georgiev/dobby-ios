@@ -6,6 +6,8 @@ import WebKit
 struct WebContainer {
     /// #508: the origin the bundled shell is synthesized under (ServerAddresses.origin()), never fetched.
     let url: URL
+    /// #614: the page is drawn (ShellNavigation.onPainted); ContentView lifts its launch cover.
+    var painted: () -> Void = {}
     @EnvironmentObject var playback: PlaybackCoordinator
     @EnvironmentObject var offline: OfflineStore
 
@@ -70,6 +72,7 @@ struct WebContainer {
         if BridgeInjection.onDeviceSearch {
             PythonRuntime.warmUp { [weak webView] in BridgeInjection.withdrawOnDeviceSearch(from: webView) }
         }
+        coordinator.navigation.onPainted = painted
         webView.navigationDelegate = coordinator.navigation
         webView.uiDelegate = coordinator
         #if os(iOS)

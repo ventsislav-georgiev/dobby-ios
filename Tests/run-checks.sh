@@ -1984,6 +1984,18 @@ if [ "$(uname -s)" = "Darwin" ]; then
   "$OUT12"
 fi
 
+# #614: the launch cover over the page lifts on ShellNavigation.onPainted: held while the page's
+# window.dobbyPainted reads false (the PWA's boot restore and first screen), bounded, as Android TV.
+# A real WKWebView on fixture shells. macOS only, like the other WebView checks.
+if [ "$(uname -s)" = "Darwin" ]; then
+  OUT614="$(mktemp -d)/launch-hold-check"
+  xcrun swiftc -o "$OUT614" -framework WebKit -framework AppKit \
+    Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift \
+    Dobby/Offline/BundledShell.swift Dobby/Offline/OfflineSchemeHandler.swift Dobby/Web/ShellNavigation.swift \
+    Tests/LaunchHoldWebViewCheck.swift
+  "$OUT614"
+fi
+
 # #151 wiring. Everything above runs the shell's pieces in isolation: the rewrite as a
 # pure function, the handler behind a WKWebView the CHECK configures. None of it observes
 # whether the app ever takes the offline branch — the exact "helper pinned, call site
@@ -2060,6 +2072,19 @@ if "excludes:\n          - Shell" not in project:
     sys.stderr.write("FAIL: Dobby/Shell must be excluded from the Dobby source glob, or it is added twice\n")
     sys.exit(1)
 
+# 5. #614: the launch cover is wired end to end: makeWebView hands ContentView's release to the delegate
+#    before the load, and ContentView lifts its cover there (LaunchHoldWebViewCheck drives the delegate).
+need(web, "        coordinator.navigation.onPainted = painted",
+     "makeWebView must hand ContentView's release to ShellNavigation.onPainted (#614)")
+if web.index("coordinator.navigation.onPainted = painted") > web.index("coordinator.navigation.load(loadURL, in: webView)"):
+    sys.stderr.write("FAIL: onPainted must be set before the shell load (#614)\n")
+    sys.exit(1)
+need(content, "                WebContainer(url: origin) { launching = false }",
+     "ContentView must lift its launch cover on the page's painted signal (#614)")
+need(content, "                    LaunchCover().transition(.opacity)",
+     "ContentView must show the launch cover over the page until then (#614)")
+
+print("PASS: the launch cover is wired: ContentView's release reaches ShellNavigation.onPainted before the load (#614)")
 print("PASS: the cold start is wired — makeWebView calls ShellNavigation.load(_:in:), which only synthesizes the shell, ShellNavigation is the navigation delegate, ContentView shows it under the stored origin with no probe, and Dobby/Shell ships as a folder reference (#151, #508, #540)")
 SHELLWIRINGPY
 
