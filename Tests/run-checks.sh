@@ -104,6 +104,7 @@ reads = {
                           ['with open("Dobby/Info.plist", "rb") as f:']),
     "REMOTEWIRINGPY": ([SW], ["    src[path] = strip_swift(open(path).read(), path)"], []),
     "SUBTITLEMODEWIRINGPY": ([SW], ['src = strip_swift(open("Dobby/Playback/PlaybackCoordinator.swift").read(), "PlaybackCoordinator.swift")'], []),
+    "BACKGROUNDVIDEOWIRINGPY": ([SW], ['src = strip_swift(open("Dobby/Playback/PlaybackCoordinator.swift").read(), "PlaybackCoordinator.swift")'], []),
 }
 # #196: SHELLIMAGESPY reads the packed copy, so its opener must be live, inside the branch that
 # ran copy-app-shell.sh, and after it; a disabled or hoisted opener still parses as a block.
@@ -312,6 +313,42 @@ if src.count("TrackPreference.pickSubtitle(") != 1 or "priority: subPriority, mo
     fail("the subtitle auto-pick must go through pickSubtitle with the payload's mode, once, and nothing else may set autoSelectEmbedSubtitle")
 print("PASS: the subtitle auto-pick, the page default flag and KSPlayer's embedded fallback are gated on subtitleMode (#586)")
 SUBTITLEMODEWIRINGPY
+
+# #613: the lifecycle policy (keep audio in the background, park the FFmpeg engine's video, resync
+# on return with a seek to a keyframe), then its wiring in the coordinator: background play on, both
+# notifications routed to the policy, the parked track discarded and re-enabled, the seek kept.
+OUTBG="$(mktemp -d)/background-video-check"
+xcrun swiftc -o "$OUTBG" Dobby/Playback/BackgroundVideo.swift Tests/BackgroundVideoCheck.swift
+"$OUTBG"
+python3 - <<'BACKGROUNDVIDEOWIRINGPY'
+import sys
+sys.path.insert(0, "Tests")
+from swift_strip import strip_swift
+src = strip_swift(open("Dobby/Playback/PlaybackCoordinator.swift").read(), "PlaybackCoordinator.swift")
+def fail(msg):
+    sys.stderr.write("FAIL: %s (#613)\n" % msg)
+    sys.exit(1)
+pins = [
+    ("        KSOptions.canBackgroundPlay = true\n", "KSPlayer must not pause on didEnterBackground"),
+    ("UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in\n"
+     "            MainActor.assumeIsolated { self?.parkVideo() }\n", "didEnterBackground parks the video"),
+    ("UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in\n"
+     "            MainActor.assumeIsolated { self?.resumeVideo() }\n", "willEnterForeground resumes the video"),
+    ("        guard backgroundVideo.enterBackground(ffmpegEngine: p is KSMEPlayer, videoTrack: video), let video else { return }\n"
+     "        video.isEnabled = false\n", "the policy decides and the parked track is discarded"),
+    ("        guard let video = backgroundVideo.enterForeground(currentTracks: tracks) as? MediaPlayerTrack,\n", "the policy hands back the parked track"),
+    ("        video.isEnabled = true\n", "the parked track is re-enabled"),
+    ("            layer.seek(time: t, autoPlay: layer.state.isPlaying) { _ in }\n", "the return seeks to the current time, keeping pause"),
+]
+for line, what in pins:
+    if src.count(line) != 1:
+        fail(what + ": expected exactly one %r" % line.strip())
+if src.index("        video.isEnabled = true\n") > src.index("            layer.seek(time: t, autoPlay:"):
+    fail("the track must be re-enabled before the resync seek, or the seek restarts without video packets")
+if src.count("canBackgroundPlay") != 1:
+    fail("nothing else may set KSOptions.canBackgroundPlay")
+print("PASS: background play on, the FFmpeg engine's video parked in the background and resynced on return (#613)")
+BACKGROUNDVIDEOWIRINGPY
 
 # #560: the intro / recap skip and next-episode model (SkipSegments.swift, pure), with the play
 # payload it decodes from (PlayNativePayload.swift), so an absent or malformed skip is pinned too.
