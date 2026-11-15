@@ -24,7 +24,7 @@ struct AspectModel: Equatable {
 
     var mode = Mode.original
     /// #563: iPhone and iPad (AspectSheet.swift sets this at session start) follow the video view's
-    /// orientation until the user picks a mode: Crop in portrait, Stretch in landscape. The Mac keeps Original.
+    /// orientation until the user picks a mode: Crop to screen in both (#612, was Stretch in landscape). The Mac keeps Original.
     var orientationDefault = false
     var modePicked = false
     var followsOrientation: Bool { orientationDefault && !modePicked }
@@ -53,7 +53,7 @@ struct AspectModel: Equatable {
 
     /// The mode on screen: the user's pick, else the orientation default (#563).
     func effectiveMode(portrait: Bool) -> Mode {
-        followsOrientation ? (portrait ? .crop : .stretch) : mode
+        followsOrientation ? .crop : mode
     }
 
     /// #477 letterbox sampler session (Android letterboxSampler*): `token` names the running

@@ -153,21 +153,21 @@ enum AspectModelCheck {
         check(AspectModel.isPortrait(9.0 / 16) && !AspectModel.isPortrait(1) && !AspectModel.isPortrait(0),
               "portrait is a laid-out view aspect under 1")
         o.orientationDefault = true
-        check(o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .stretch,
-              "phone and pad: portrait crops, landscape stretches")
+        check(o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .crop,
+              "phone and pad: Crop to screen is the default in both orientations (#612)")
         t = o.transform(width: 1600, height: 900)
-        check(t.x == 1 && near(t.y, 2.4 / tv), "landscape renders Stretch to screen")
+        check(t.x == 1 && t.y == 1, "landscape renders Crop to screen, no stretch")
         t = o.transform(width: 900, height: 1600)
-        check(t.x == 1 && t.y == 1, "a rotation to portrait drops the stretch (Crop is the gravity)")
+        check(t.x == 1 && t.y == 1, "a rotation to portrait stays Crop")
         check(o.modeHasNoEffect(viewAspect: 2.41), "a picture matching the view still disables the Mode row")
-        o.adjust(.mode, 1, portrait: false)
-        check(o.mode == .crop && o.effectiveMode(portrait: false) == .crop && o.effectiveMode(portrait: true) == .crop,
+        o.adjust(.mode, -1, portrait: false)
+        check(o.mode == .stretch && o.effectiveMode(portrait: false) == .stretch && o.effectiveMode(portrait: true) == .stretch,
               "a pick steps from the mode on screen and survives a rotation")
-        o.adjust(.mode, 1, portrait: true)
+        o.adjust(.mode, -1, portrait: true)
         check(o.effectiveMode(portrait: true) == .original && o.effectiveMode(portrait: false) == .original,
               "a pick of Original holds in both orientations")
         o.adjust(.reset, 1)
-        check(o.followsOrientation && o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .stretch,
+        check(o.followsOrientation && o.effectiveMode(portrait: true) == .crop && o.effectiveMode(portrait: false) == .crop,
               "Reset returns phone and pad to the orientation default")
         var mac = AspectModel(); mac.adjust(.mode, 1); mac.adjust(.reset, 1)
         check(mac.effectiveMode(portrait: false) == .original, "Reset on the Mac is Original")
