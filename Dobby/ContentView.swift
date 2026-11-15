@@ -3,6 +3,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var playback: PlaybackCoordinator
     @State private var typingOnTv = false
+    /// #614: the launch cover stays over the page until it reports its first screen drawn.
+    @State private var launching = true
     /// #508: the Pi is retired, so nothing is probed and nothing is waited for: the bundled
     /// shell, straight away, under the origin its data is keyed to (ServerAddresses.origin()).
     private let origin = ServerAddresses.origin()
@@ -10,9 +12,12 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             if let origin, BundledShell.root != nil {
-                WebContainer(url: origin)
+                WebContainer(url: origin) { launching = false }
                     .ignoresSafeArea()
                     .background(Color.black)
+                if launching {
+                    LaunchCover().transition(.opacity)
+                }
             } else {
                 // #155: a build made without the sibling dobby checkout (scripts/copy-app-shell.sh),
                 // or with no DOBBY_PI_HOST and nothing stored, has nothing to load. Say which.
@@ -36,6 +41,7 @@ struct ContentView: View {
             #endif
         }
         .animation(.easeInOut(duration: 0.2), value: playback.activeRef)
+        .animation(.easeOut(duration: 0.24), value: launching)
         .onReceive(NotificationCenter.default.publisher(for: TvLink.open)) { _ in typingOnTv = true }
         .sheet(isPresented: $typingOnTv) {
             TvLinkSheet()

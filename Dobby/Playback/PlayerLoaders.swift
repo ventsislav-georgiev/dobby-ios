@@ -90,3 +90,17 @@ private struct TraceLoader: View {
         .frame(width: 120, height: 120)
     }
 }
+
+/// #614: the app's launch cover (ContentView), the launch screen (Info.plist UILaunchScreen: the D mark on
+/// LaunchBackground) with the launch trace running over the mark, as the Android TV launch view does,
+/// until the page reports its first screen drawn. The Apple TV skin's accent: the default skin.
+struct LaunchCover: View {
+    var body: some View {
+        ZStack {
+            Color("LaunchBackground").ignoresSafeArea()
+            Image("LaunchMark").resizable().frame(width: 120, height: 120)
+            TraceLoader(color: OsdTint.appleTV.accent)
+        }
+        .accessibilityLabel("Loading")
+    }
+}

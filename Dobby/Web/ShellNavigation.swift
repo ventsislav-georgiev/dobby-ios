@@ -11,6 +11,16 @@ final class ShellNavigation: NSObject, WKNavigationDelegate {
     static let maxReloads = 3
     static let window: TimeInterval = 60
 
+    /// #614: the launch cover's release (ContentView), called once. The Android TV rule (MainActivity.awaitPaint,
+    /// #458): after the page finishes, poll `window.dobbyPainted` (js/26-skins.js: the boot restore settled and its
+    /// window drawn) and hold only while it reads false, at most `paintWait`; anything else releases at once.
+    /// `loadWait` from the first load covers a page that never finishes.
+    var onPainted: (() -> Void)?
+    var paintWait: TimeInterval = 6
+    var loadWait: TimeInterval = 15
+    static let paintPoll: TimeInterval = 0.1
+    private var paintDeadline: Date?
+
     private let shellRoot: URL?
     /// The first URL `load` was given, the reload target when the page's own URL is unusable.
     private var shellURL: URL?
@@ -33,7 +43,10 @@ final class ShellNavigation: NSObject, WKNavigationDelegate {
     /// iOS because of this). #508: ContentView shows WebContainer only when the build has
     /// a shell, so there is no network fallback here.
     func load(_ loadURL: URL, in webView: WKWebView) {
-        if shellURL == nil { shellURL = loadURL }
+        if shellURL == nil {
+            shellURL = loadURL
+            DispatchQueue.main.asyncAfter(deadline: .now() + loadWait) { [weak self] in self?.releaseLaunch("no page") }
+        }
         guard let html = BundledShell.indexHTML(root: shellRoot) else { return }
         webView.loadSimulatedRequest(URLRequest(url: loadURL), responseHTML: html)
     }
@@ -64,10 +77,43 @@ final class ShellNavigation: NSObject, WKNavigationDelegate {
         return url
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard onPainted != nil, paintDeadline == nil else { return }
+        paintDeadline = Date().addingTimeInterval(paintWait)
+        pollPaint(webView)
+    }
+
+    private func pollPaint(_ webView: WKWebView) {
+        webView.evaluateJavaScript("window.dobbyPainted") { [weak self, weak webView] painted, _ in
+            guard let self, let deadline = self.paintDeadline else { return }
+            if let webView, Self.launchHolds(painted, timedOut: Date() >= deadline) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.paintPoll) { self.pollPaint(webView) }
+                return
+            }
+            self.releaseLaunch("painted=\(painted.map { "\($0)" } ?? "nil")")
+        }
+    }
+
+    /// Android's launchHolds: only an explicit false with time left holds; true, an older page's
+    /// undefined or a failed read releases.
+    static func launchHolds(_ painted: Any?, timedOut: Bool) -> Bool {
+        (painted as? Bool) == false && !timedOut
+    }
+
+    private func releaseLaunch(_ why: String) {
+        guard let release = onPainted else { return }
+        onPainted = nil
+        let after = paintDeadline.map { String(format: "%.0f", (Date().timeIntervalSince($0) + paintWait) * 1000) } ?? "-"
+        NSLog("%@", "Dobby: launch cover off: \(why) afterMs=\(after)")
+        release()
+    }
+
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         NSLog("%@", "Dobby: navigation failed: \(error.localizedDescription)")
+        releaseLaunch("load failed")
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         NSLog("%@", "Dobby: provisional navigation failed: \(error.localizedDescription)")
+        releaseLaunch("load failed")
     }
 }
