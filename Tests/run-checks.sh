@@ -477,6 +477,22 @@ xcrun swiftc -o "$OUT10" -framework WebKit -framework JavaScriptCore \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/BridgeInjection.swift Tests/BridgeInjectionCheck.swift
 "$OUT10"
 
+# #646: the core package is arm64 only, and the Mac release is universal. The x86_64 half must compile
+# the core lane with no core import or symbol (CoreBridge's stub) and its bridge must say ytCore false.
+# The x86_64 check binary runs under Rosetta.
+OUT10X="$(mktemp -d)"
+xcrun swiftc -target x86_64-apple-macos14 -o "$OUT10X/bridge-injection-check" -framework WebKit -framework JavaScriptCore \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/BridgeInjection.swift Tests/BridgeInjectionCheck.swift
+[ "$(lipo -archs "$OUT10X/bridge-injection-check")" = x86_64 ] || { echo "FAIL: #646 bridge check is not x86_64" >&2; exit 1; }
+arch -x86_64 "$OUT10X/bridge-injection-check" youTubeFetchesGoToTheCoreOnlyPiLess
+xcrun swiftc -target x86_64-apple-macos14 -emit-library -o "$OUT10X/core-lane.dylib" \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Dobby/Core/CoreStore.swift \
+  Dobby/Core/CoreBridge.swift
+if nm -u "$OUT10X/core-lane.dylib" | grep -E '_(ytcore|graal)_'; then
+  echo "FAIL: #646 the x86_64 core lane references core symbols" >&2; exit 1
+fi
+echo "PASS: #646 x86_64 bridge says ytCore false and its core lane links without the core"
+
 # #243 D4, the construct itself (the behaviour is BridgeInjectionCheck above): _setOffline keys the
 # finished set (complete entries by id, cover and meta, sorted), assigns the cache, then calls
 # window.refreshOfflineBooksSection only when that key changed, behind a typeof guard, inside the

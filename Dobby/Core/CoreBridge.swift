@@ -1,4 +1,7 @@
 import Foundation
+// #646: the core package has arm64 slices only (iOS, Apple-silicon Mac); the universal Mac
+// archive links the x86_64 half without it, so nothing on that half may reference a core symbol.
+#if arch(arm64)
 import YtCore
 
 /// #639: the core package in-process. One isolate per process, and every call from the one thread
@@ -75,3 +78,15 @@ private let corePut: ytcore_put_fn = { ctx, key, value in
     guard let ctx, let key else { return }
     Unmanaged<CoreStore>.fromOpaque(ctx).takeUnretainedValue().put(String(cString: key), value.map { String(cString: $0) })
 }
+#else
+/// #646: an Intel Mac has no core. Every YouTube request answers 503, and the bridge says ytCore false
+/// (BridgeInjection.ytCore), so the page shows its needs-Pi screen instead of calling here.
+final class CoreBridge {
+    static let shared = CoreBridge()
+
+    func request(_ method: String, _ path: String, _ query: String?, _ body: Data?, _ headers: [String: String],
+                 _ done: @escaping (ApiSchemeHandler.CoreReply) -> Void) {
+        done(.init(status: 503, headers: [:], body: Data(#"{"error":"core unavailable"}"#.utf8)))
+    }
+}
+#endif

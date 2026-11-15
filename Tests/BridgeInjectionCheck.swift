@@ -56,8 +56,14 @@ enum BridgeInjectionCheck {
               == "dobby-api://smarttube/config dobby-api://smarttube/channels/UC%2Fx?continuation=a%3D "
               + "dobby-api://smarttube/settings /api/settings https://other.example.test/api/smarttube/x",
               "#639: Pi-less, /api/smarttube/* must go to dobby-api://smarttube/* and nothing else may: \(ctx.evaluateScript("sent.join(' ')")?.toString() ?? "")")
-        check(ctx.evaluateScript("window.Dobby.ytCore === true && window.Dobby.piEnabled() === false")?.toBool() == true,
-              "#639: Pi-less, the page must read ytCore true and piEnabled false")
+        // #646: the core is arm64 only; run-checks also runs this check as an x86_64 build, where it must be false.
+        #if arch(arm64)
+        let ytCore = "true"
+        #else
+        let ytCore = "false"
+        #endif
+        check(ctx.evaluateScript("window.Dobby.ytCore === \(ytCore) && window.Dobby.piEnabled() === false")?.toBool() == true,
+              "#639, #646: Pi-less, the page must read ytCore \(ytCore) on this arch and piEnabled false")
         let withPi = JSContext()!
         withPi.evaluateScript("var window = this;" + stub + BridgeInjection.coreFetchShim(piEnabled: true) + "fetch('/api/smarttube/config');")
         check(withPi.evaluateScript("sent.join(' ')")?.toString() == "/api/smarttube/config",

@@ -24,6 +24,14 @@ enum BridgeInjection {
     static let remotePlayer = false
     #endif
 
+    /// #646: the core package is arm64 only (CoreBridge), so the x86_64 half of the universal Mac app has no core
+    /// and the page shows its needs-Pi screen.
+    #if arch(arm64)
+    static let ytCore = true
+    #else
+    static let ytCore = false
+    #endif
+
     /// #483: `window.Dobby.onDeviceSearch`, the PWA's switch for the on-device lanes (`apiUrlFor`,
     /// #484). WebContainer sets it from `PythonRuntime.bundled` before the first injection and takes
     /// it back through `withdrawOnDeviceSearch` if the interpreter then fails to start, so it stays
@@ -101,7 +109,7 @@ enum BridgeInjection {
             // The no-op setter keeps the pair the PWA requires (both, or it reads no bridge as Pi on).
             piEnabled: function () { return false; },
             // #639: this build answers /api/smarttube/* itself (dobby-api://smarttube, the in-process core).
-            ytCore: true,
+            ytCore: \(ytCore ? "true" : "false"),
             setPiEnabled: function () {},
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
