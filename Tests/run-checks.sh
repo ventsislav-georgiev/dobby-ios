@@ -2783,9 +2783,6 @@ from swift_strip import strip_swift
 from js_strip import strip_js
 
 MEMBERS_WITH_NO_PWA_CALLER = {
-    "ytCore": "#639: the page's YouTube gate (stPiOff) reads it once the PWA half lands; until then "
-              "the wrapper answers dobby-api://smarttube but the tab still shows its needs-Pi screen. "
-              "Drop this entry when the PWA names it.",
     "platform": "identity string the wrapper advertises; nothing in the PWA branches on it "
                 "(canPlayNative is what every call site tests instead).",
     "version": "same — advertised, never read. Kept so a future PWA can gate on a wrapper age.",
