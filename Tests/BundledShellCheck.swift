@@ -19,8 +19,13 @@ enum BundledShellCheck {
     }
 
     /// Where run-checks.sh put the copy (argv[1]).
+    /// Symlinks resolved up front: Foundation's standardizedFileURL prefixes /private to a
+    /// NONEXISTENT path under a symlinked dir (a checkout under /tmp or /var) but not to the
+    /// existing root, so the containment compare refused the not-on-disk "js/a b.js" below
+    /// there (#626). The handler's own guard is unchanged; it answers 404 for such a file anyway.
     private static var shellRoot: URL {
         URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "Dobby/Shell")
+            .resolvingSymlinksInPath()
     }
 
     static func main() {
