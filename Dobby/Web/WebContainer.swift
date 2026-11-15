@@ -54,6 +54,8 @@ struct WebContainer {
         config.setURLSchemeHandler(ApiSchemeHandler(server: url), forURLScheme: ApiSchemeHandler.scheme)
         // #483: the on-device lanes on that scheme, and the offline sidecars they cache.
         ApiSchemeHandler.onDeviceLane = OnDeviceLane.answer
+        // #639: started on the first YouTube request, not at launch.
+        ApiSchemeHandler.coreLane = { CoreBridge.shared.request($0, $1, $2, $3, $4, $5) }
         OfflineStore.laneSidecar = OnDeviceLane.sidecarFile
         // Before the first WKWebView is created — the safe order, not a required one
         // (registering after the WKWebView, or even after its load completes, measured

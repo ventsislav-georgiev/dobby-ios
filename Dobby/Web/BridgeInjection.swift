@@ -53,6 +53,28 @@ enum BridgeInjection {
         WKUserScript(source: script(), injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 
+    /// #639: the page fetches `/api/smarttube/*` relative to its document, which sits on the Pi origin that
+    /// PiRequestBlock refuses. With the Pi off this sends those fetches (relative, or absolute on the page
+    /// origin) to `dobby-api://smarttube/*` instead; with a Pi it is empty and the page talks to the Pi as
+    /// before. shortcut: string URLs only (every call site in the page passes one); a Request object
+    /// passes through unchanged.
+    static func coreFetchShim(piEnabled: Bool) -> String {
+        guard !piEnabled else { return "" }
+        return """
+          (function () {
+            var pageFetch = window.fetch, prefix = '/api/smarttube/';
+            if (typeof pageFetch !== 'function') return;
+            window.fetch = function (input, init) {
+              if (typeof input === 'string') {
+                var path = input.indexOf(location.origin + prefix) === 0 ? input.slice(location.origin.length) : input;
+                if (path.indexOf(prefix) === 0) input = 'dobby-api://smarttube/' + path.slice(prefix.length);
+              }
+              return pageFetch.call(this, input, init);
+            };
+          })();
+"""
+    }
+
     static func script() -> String {
         """
         (function () {
@@ -78,6 +100,8 @@ enum BridgeInjection {
             // (piEnabledBridge in js/12-service-worker-offline.js) to keep every Pi route closed.
             // The no-op setter keeps the pair the PWA requires (both, or it reads no bridge as Pi on).
             piEnabled: function () { return false; },
+            // #639: this build answers /api/smarttube/* itself (dobby-api://smarttube, the in-process core).
+            ytCore: true,
             setPiEnabled: function () {},
             playNative: function (json) { post('playNative', json); },
             attachSubtitle: function (json) { post('attachSubtitle', json); },
@@ -125,6 +149,7 @@ enum BridgeInjection {
               return '';
             }
           };
+        \(coreFetchShim(piEnabled: false /* the #508 answer of piEnabled above */))
           console.log('Dobby native bridge injected (canPlayNative=' + window.Dobby.canPlayNative + ')');
           post('ready', { canPlayNative: window.Dobby.canPlayNative, ua: navigator.userAgent });
         })();

@@ -14,6 +14,7 @@ enum BridgeInjectionCheck {
             ("setOfflineSkipsAPageWithoutTheRefresh", setOfflineSkipsAPageWithoutTheRefresh),
             ("setOfflineRefreshesOnlyWhenTheDoneSetChanges", setOfflineRefreshesOnlyWhenTheDoneSetChanges),
             ("externalURLOpensOnlyHttpsFromTheMainFrame", externalURLOpensOnlyHttpsFromTheMainFrame),
+            ("youTubeFetchesGoToTheCoreOnlyPiLess", youTubeFetchesGoToTheCoreOnlyPiLess),
         ]
         let only = Set(CommandLine.arguments.dropFirst())
         for (name, run) in checks where only.isEmpty || only.contains(name) { run() }
@@ -38,6 +39,29 @@ enum BridgeInjectionCheck {
                           ["url": ok]] {
             check(BridgeInjection.externalURL(bad, mainFrame: true) == nil, "#486: refused: \(String(describing: bad))")
         }
+    }
+
+    /// #639, the router: Pi-less, the page's /api/smarttube/* fetches (relative, or absolute on the page origin)
+    /// go to dobby-api://smarttube/* and the flag says so; with a Pi the shim is empty and they stay on the Pi.
+    static func youTubeFetchesGoToTheCoreOnlyPiLess() {
+        let stub = "var location = { origin: 'https://pi.example.test' }; var sent = [];"
+            + "window.fetch = function (u, init) { sent.push(u); return 'ok'; };"
+        let (ctx, thrown) = page(stub)
+        ctx.evaluateScript("""
+            fetch('/api/smarttube/config'); fetch('https://pi.example.test/api/smarttube/channels/UC%2Fx?continuation=a%3D');
+            fetch('/api/smarttube/settings', { method: 'PUT' }); fetch('/api/settings'); fetch('https://other.example.test/api/smarttube/x');
+            """)
+        check(thrown.all.isEmpty, "#639: the shim threw: \(thrown.all)")
+        check(ctx.evaluateScript("sent.join(' ')")?.toString()
+              == "dobby-api://smarttube/config dobby-api://smarttube/channels/UC%2Fx?continuation=a%3D "
+              + "dobby-api://smarttube/settings /api/settings https://other.example.test/api/smarttube/x",
+              "#639: Pi-less, /api/smarttube/* must go to dobby-api://smarttube/* and nothing else may: \(ctx.evaluateScript("sent.join(' ')")?.toString() ?? "")")
+        check(ctx.evaluateScript("window.Dobby.ytCore === true && window.Dobby.piEnabled() === false")?.toBool() == true,
+              "#639: Pi-less, the page must read ytCore true and piEnabled false")
+        let withPi = JSContext()!
+        withPi.evaluateScript("var window = this;" + stub + BridgeInjection.coreFetchShim(piEnabled: true) + "fetch('/api/smarttube/config');")
+        check(withPi.evaluateScript("sent.join(' ')")?.toString() == "/api/smarttube/config",
+              "#639: with a Pi, /api/smarttube/* must stay on the Pi")
     }
 
     final class Thrown { var all: [String] = [] }

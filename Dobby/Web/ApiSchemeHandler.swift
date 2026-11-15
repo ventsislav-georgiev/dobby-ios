@@ -76,6 +76,7 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         // nil in that measurement; a body arriving only as a stream would read here
         // as "no body" and be refused with a 400 rather than stored empty.
         let body = task.request.httpBody
+        let requestHeaders = task.request.allHTTPHeaderFields ?? [:]
 
         queue.async { [weak self] in
             guard let self else { return }
@@ -85,6 +86,8 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
             // #483: a full search holds its request for up to a minute while /partial polls every 2 s,
             // so the on-device lanes get a concurrent queue of their own instead of this serial one.
             case "streaming", "subtitles": Self.laneQueue.async { self.serveLane(task, id, url, method, origin, body) }
+            // #639: the YouTube routes, answered by the in-process core (CoreBridge) on its own thread.
+            case "smarttube": self.serveCore(task, id, url, method, origin, body, requestHeaders)
             default: self.fail(task, id, 404, "Unknown dobby-api route", origin)
             }
         }
@@ -105,6 +108,118 @@ final class ApiSchemeHandler: NSObject, WKURLSchemeHandler {
         let answer = lane(url, method, body)
         respond(task, id, status: answer.status, contentType: answer.contentType, body: answer.body,
                 origin: origin, secret: true, extra: ["Cache-Control": answer.cacheControl])
+    }
+
+    // MARK: - dobby-api://smarttube (#639)
+
+    struct CoreReply {
+        let status: Int
+        let headers: [String: String]
+        let body: Data
+    }
+
+    /// The core's request entry (CoreBridge.request), installed by WebContainer. A hook for the same reason
+    /// as `onDeviceLane`: this file compiles on its own in Tests/run-checks.sh. `done` runs off main.
+    static var coreLane: ((_ method: String, _ path: String, _ query: String?, _ body: Data?,
+                           _ headers: [String: String], _ done: @escaping (CoreReply) -> Void) -> Void)?
+
+    static let coreUpstreamPrefix = "X-Ytcore-Upstream-"
+
+    /// `dobby-api://smarttube/<rest>?<query>` is the page's `/api/smarttube/<rest>?<query>`, path and query
+    /// still percent-encoded as the page sent them (a channel id or a continuation token is passed through).
+    static func corePath(_ url: URL) -> (path: String, query: String?) {
+        let parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        return ("/api/smarttube" + (parts?.percentEncodedPath ?? url.path), parts?.percentEncodedQuery)
+    }
+
+    /// The core's playback/proxy answer is a 307 descriptor, not bytes: Location is the upstream URL the core
+    /// validated, each X-Ytcore-Upstream-<Name> a header to send. The page's Range and, for POST, its body go
+    /// along. nil when the reply is not such a descriptor.
+    static func upstreamRequest(_ reply: CoreReply, method: String, range: String?, body: Data?) -> URLRequest? {
+        guard reply.status == 307,
+              let location = reply.headers.first(where: { $0.key.caseInsensitiveCompare("Location") == .orderedSame })?.value,
+              let url = URL(string: location), let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else { return nil }
+        var request = URLRequest(url: url)
+        for (name, value) in reply.headers where name.lowercased().hasPrefix(coreUpstreamPrefix.lowercased()) {
+            request.setValue(value, forHTTPHeaderField: String(name.dropFirst(coreUpstreamPrefix.count)))
+        }
+        if let range { request.setValue(range, forHTTPHeaderField: "Range") }
+        if method == "POST" {
+            request.httpMethod = "POST"
+            request.httpBody = body
+        }
+        return request
+    }
+
+    /// The core's own headers pass through, except the two this side owns (the body length it actually
+    /// sends, and ACAO). Exact-origin ACAO: these answers carry the signed-in account.
+    private func serveCore(_ task: WKURLSchemeTask, _ id: ObjectIdentifier, _ url: URL, _ method: String,
+                           _ origin: String?, _ body: Data?, _ requestHeaders: [String: String]) {
+        if method == "OPTIONS" {
+            respond(task, id, status: 204, contentType: "text/plain", body: Data(), origin: origin, secret: true,
+                    extra: ["Access-Control-Allow-Methods": "GET, POST, PUT, DELETE",
+                            "Access-Control-Allow-Headers": "Content-Type, Range"])
+            return
+        }
+        guard let lane = Self.coreLane else { fail(task, id, 404, "Unknown dobby-api route", origin); return }
+        let target = Self.corePath(url)
+        lane(method, target.path, target.query, body, requestHeaders) { [weak self] reply in
+            Self.laneQueue.async {
+                guard let self else { return }
+                let range = requestHeaders.first(where: { $0.key.caseInsensitiveCompare("Range") == .orderedSame })?.value
+                if let upstream = Self.upstreamRequest(reply, method: method, range: range, body: body) {
+                    CoreUpstream.shared.stream(upstream, to: CoreUpstreamSink(handler: self, task: task, id: id, origin: origin))
+                    return
+                }
+                var extra: [String: String] = [:]
+                for (name, value) in reply.headers where !["content-type", "content-length", "access-control-allow-origin"].contains(name.lowercased()) {
+                    extra[name] = value
+                }
+                let contentType = reply.headers.first(where: { $0.key.lowercased() == "content-type" })?.value ?? "application/json"
+                self.respond(task, id, status: reply.status, contentType: contentType, body: reply.body,
+                             origin: origin, secret: true, extra: extra)
+            }
+        }
+    }
+
+    /// The upstream bytes, streamed to the task as they arrive (never buffered whole); status and the
+    /// range headers pass through. Media carries no secret, so the image lane's permissive ACAO.
+    private final class CoreUpstreamSink: CoreUpstream.Sink {
+        private weak var handler: ApiSchemeHandler?
+        private let task: WKURLSchemeTask
+        private let id: ObjectIdentifier
+        private let origin: String?
+
+        init(handler: ApiSchemeHandler, task: WKURLSchemeTask, id: ObjectIdentifier, origin: String?) {
+            self.handler = handler; self.task = task; self.id = id; self.origin = origin
+        }
+
+        func respond(_ response: HTTPURLResponse) -> Bool {
+            guard let handler, let url = task.request.url else { return false }
+            var fields: [String: String] = [:]
+            for name in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Cache-Control"] {
+                if let value = response.value(forHTTPHeaderField: name) { fields[name] = value }
+            }
+            // URLSession hands over decoded bytes, so an encoded length would never be met (see ImageStreamSink).
+            if response.value(forHTTPHeaderField: "Content-Encoding") != nil { fields["Content-Length"] = nil }
+            if let acao = ApiSchemeHandler.acao(origin: origin, serverOrigin: handler.serverOrigin, secret: false) {
+                fields["Access-Control-Allow-Origin"] = acao
+            }
+            guard let answer = HTTPURLResponse(url: url, statusCode: response.statusCode, httpVersion: "HTTP/1.1",
+                                               headerFields: fields) else { return false }
+            return handler.send(task, id) { $0.didReceive(answer) }
+        }
+
+        func receive(_ data: Data) -> Bool {
+            guard let handler else { return false }
+            return handler.send(task, id) { $0.didReceive(data) }
+        }
+
+        func complete(error: Error?) {
+            guard let handler else { return }
+            if let error { handler.failMidStream(task, id, error) } else { handler.finish(task, id) }
+        }
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
@@ -981,6 +1096,62 @@ enum Transport {
                         completionHandler: @escaping (URLRequest?) -> Void) {
             completionHandler(nil)
         }
+    }
+}
+
+// MARK: - CoreUpstream (#639)
+
+/// The host half of the core's playback proxy: one long-lived session with no cache and no cookies,
+/// no resource timeout (a film streams for hours; the request timeout still catches a stalled upstream),
+/// redirects followed as a media client does. A chunk the task refuses (stopped: a seek, a teardown)
+/// cancels the upstream fetch.
+final class CoreUpstream: NSObject, URLSessionDataDelegate {
+    protocol Sink: AnyObject {
+        func respond(_ response: HTTPURLResponse) -> Bool
+        func receive(_ data: Data) -> Bool
+        func complete(error: Error?)
+    }
+
+    static let shared = CoreUpstream()
+
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
+    private let lock = NSLock()
+    private var sinks: [Int: Sink] = [:]
+
+    func stream(_ request: URLRequest, to sink: Sink) {
+        let task = session.dataTask(with: request)
+        lock.lock(); sinks[task.taskIdentifier] = sink; lock.unlock()
+        task.resume()
+    }
+
+    private func sink(_ task: URLSessionTask) -> Sink? {
+        lock.lock(); defer { lock.unlock() }
+        return sinks[task.taskIdentifier]
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse, let sink = sink(dataTask), sink.respond(http) else {
+            completionHandler(.cancel); return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if sink(dataTask)?.receive(data) == false { dataTask.cancel() }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock(); let sink = sinks.removeValue(forKey: task.taskIdentifier); lock.unlock()
+        sink?.complete(error: error)
     }
 }
 

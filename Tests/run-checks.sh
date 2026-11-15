@@ -8,6 +8,13 @@ xcrun swiftc -o "$OUT" \
   Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Tests/ApiSchemeHandlerCheck.swift
 "$OUT"
 
+# #639: the core lane's host rules (refused vs absent store reads, scheme path, proxy Range forwarding).
+OUTLANE="$(mktemp -d)/core-lane-check"
+xcrun swiftc -o "$OUTLANE" \
+  Dobby/AppConfig.swift Dobby/ServerAddresses.swift Dobby/Web/ApiSchemeHandler.swift Dobby/Core/CoreStore.swift \
+  Tests/CoreLaneCheck.swift
+"$OUTLANE"
+
 OUT0="$(mktemp -d)/app-config-check"
 xcrun swiftc -o "$OUT0" Dobby/AppConfig.swift Tests/AppConfigCheck.swift
 "$OUT0"
@@ -2776,6 +2783,9 @@ from swift_strip import strip_swift
 from js_strip import strip_js
 
 MEMBERS_WITH_NO_PWA_CALLER = {
+    "ytCore": "#639: the page's YouTube gate (stPiOff) reads it once the PWA half lands; until then "
+              "the wrapper answers dobby-api://smarttube but the tab still shows its needs-Pi screen. "
+              "Drop this entry when the PWA names it.",
     "platform": "identity string the wrapper advertises; nothing in the PWA branches on it "
                 "(canPlayNative is what every call site tests instead).",
     "version": "same — advertised, never read. Kept so a future PWA can gate on a wrapper age.",
